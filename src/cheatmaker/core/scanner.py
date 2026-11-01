@@ -13,7 +13,9 @@ from cheatmaker.core.values import Compare, ValueType, guess_types
 log = logging.getLogger(__name__)
 LOG_MATCHES = 50  # match lists this short are written to the log
 
-FEW_MATCHES = 10  # AC-3.4
+FEW_MATCHES = 10  # AC-3.4 default; the player can change it (show_limit)
+MAX_SHOW = 500
+READ_SPAN = 0x1000  # matches this close together are read in one request
 
 
 @dataclass(frozen=True)
@@ -29,6 +31,7 @@ class Scanner:
         self.vtype: ValueType | None = None
         self.count: int | None = None
         self.history: list[str] = []
+        self.show_limit = FEW_MATCHES  # list the matches once this few are left
         session.on_game_changed.append(lambda _g: self.reset())  # AC-2.3
 
     @property
@@ -37,7 +40,7 @@ class Scanner:
 
     @property
     def few_left(self) -> bool:
-        return self.count is not None and 0 < self.count <= FEW_MATCHES
+        return self.count is not None and 0 < self.count <= self.show_limit
 
     def reset(self) -> None:
         if self.session.client is not None and self.active:
@@ -129,14 +132,28 @@ class Scanner:
             hits = self.session.require_client().scan_results(self.count)
             log.info("action=matches addrs=%s", " ".join(f"{h.address:#x}" for h in hits))
 
-    def matches(self, limit: int = FEW_MATCHES) -> list[Match]:
+    def matches(self, limit: int | None = None) -> list[Match]:
         """Current values of up to ``limit`` matches, read fresh (AC-3.4 live list)."""
+        limit = self.show_limit if limit is None else limit
         if not self.active or self.vtype is None:
             return []
         client = self.session.require_client()
         game = self.session.require_game()
-        out = []
-        for hit in client.scan_results(limit):
-            raw = client.read(game.pid, hit.address, self.vtype.size)
-            out.append(Match(hit.address, self.vtype.decode(raw), raw))
-        return out
+        size = self.vtype.size
+        hits = client.scan_results(limit)
+        # One read per cluster of nearby matches, not one per match (~36 ms each on PS5).
+        values: dict[int, bytes] = {}
+        addrs = sorted(h.address for h in hits)
+        i = 0
+        while i < len(addrs):
+            j = i
+            while j + 1 < len(addrs) and addrs[j + 1] + size - addrs[i] <= READ_SPAN:
+                j += 1
+            start = addrs[i]
+            data = client.read(game.pid, start, addrs[j] + size - start)
+            for a in addrs[i : j + 1]:
+                values[a] = data[a - start : a - start + size]
+            i = j + 1
+        return [
+            Match(h.address, self.vtype.decode(values[h.address]), values[h.address]) for h in hits
+        ]

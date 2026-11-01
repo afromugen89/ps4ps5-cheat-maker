@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QProgressBar,
     QPushButton,
+    QSpinBox,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -24,7 +25,7 @@ from PySide6.QtWidgets import (
 
 from cheatmaker.core import pointers as ptr
 from cheatmaker.core.pointers import Chain
-from cheatmaker.core.scanner import FEW_MATCHES, Match
+from cheatmaker.core.scanner import MAX_SHOW, Match
 from cheatmaker.core.templates import TEMPLATES, make_cheat
 from cheatmaker.core.values import Compare, ValueType, parse_number
 from cheatmaker.errors import ReadFailed
@@ -75,6 +76,11 @@ class FindWizard(QWidget):
         self.unknown_btn = QPushButton("I don't know the number")
         self.new_btn = QPushButton("Start over")
         self.count = QLabel("")
+        self.show_n = QSpinBox()
+        self.show_n.setRange(1, MAX_SHOW)
+        self.show_n.setValue(max(1, min(MAX_SHOW, ctl.settings.show_matches)))
+        self.show_n.setToolTip("List the matches with their live values once this few are left")
+        ctl.scanner.show_limit = self.show_n.value()
         self.up_btn = QPushButton("Went up")
         self.down_btn = QPushButton("Went down")
         self.changed_btn = QPushButton("Changed")
@@ -134,6 +140,8 @@ class FindWizard(QWidget):
             top.addWidget(w)
         cmp_row = QHBoxLayout()
         cmp_row.addWidget(self.count, 1)
+        cmp_row.addWidget(QLabel("Show up to"))
+        cmp_row.addWidget(self.show_n)
         for w in (self.up_btn, self.down_btn, self.changed_btn, self.same_btn):
             cmp_row.addWidget(w)
         prog = QHBoxLayout()
@@ -173,6 +181,7 @@ class FindWizard(QWidget):
         self.remove_btn.clicked.connect(self.do_remove_address)
         self.pointer_btn.clicked.connect(self.do_pointer_scan)
         self.table.itemSelectionChanged.connect(self._update_buttons)
+        self.show_n.valueChanged.connect(self._set_show_limit)
 
         self.timer = QTimer(self)
         self.timer.setInterval(LIVE_MS)
@@ -327,7 +336,7 @@ class FindWizard(QWidget):
             self._fill_table()
             return
         try:
-            rows = sc.matches(FEW_MATCHES) if show_matches else []
+            rows = sc.matches() if show_matches else []
             types = [self._vtype()] * len(rows) if rows else []
             seen = {m.address for m in rows}
             chains: list[Chain | None] = [None] * len(rows)
@@ -351,8 +360,20 @@ class FindWizard(QWidget):
             return
         self.rows, self.row_types, self.row_chains = rows, types, chains
         self._fill_table()
+        # Big lists refresh less often (each separate read costs ~36 ms on the PS5).
+        self.timer.setInterval(max(LIVE_MS, 40 * len(self.rows)))
         if not self.timer.isActive():
             self.timer.start()
+
+    def _set_show_limit(self, n: int) -> None:
+        self.ctl.scanner.show_limit = n
+        self.ctl.settings.show_matches = n
+        try:
+            self.ctl.settings.save()
+        except OSError as exc:
+            log.warning("action=save_settings reason=%s", exc)
+        if self.ctl.scanner.active:
+            self._after_scan(self.ctl.scanner.count or 0)
 
     def _fill_table(self) -> None:
         keep = self.table.selectionModel().selectedRows()

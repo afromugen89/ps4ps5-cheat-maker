@@ -21,6 +21,7 @@ class Settings:
     first_run_done: bool = False
     ng_port: int = 744
     ftp_port: int = 2121
+    show_matches: int = 10  # list matches with live values once this few are left
 
     @classmethod
     def path(cls) -> Path:

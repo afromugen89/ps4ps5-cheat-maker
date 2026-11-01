@@ -431,3 +431,14 @@ def test_player_only_collect_test_keep(qtbot, monkeypatch):
     kept = ctl.cheat_file.cheats[0]
     assert kept.saveable and len(kept.locations) == 2
     ctl.shutdown()
+
+
+def test_show_up_to_n_matches_is_saved(win, fake):
+    connect(win)
+    search(win, "100")  # 2 matches: shown with the default 10
+    assert win.find.table.rowCount() == 2
+    win.find.show_n.setValue(1)
+    assert win.find.table.rowCount() == 0, "2 matches > 1: no list"
+    assert Settings.load().show_matches == 1
+    win.find.show_n.setValue(50)
+    assert win.find.table.rowCount() == 2

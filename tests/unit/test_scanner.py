@@ -118,3 +118,14 @@ def test_between_rejects_backwards_range(session):
     sc.first_scan(None)
     with pytest.raises(ValueError, match="smaller"):
         sc.next_scan(Compare.BETWEEN, (10, 1))
+
+
+def test_show_limit_is_player_set(session, fake):
+    sc = Scanner(session)
+    assert sc.first_scan(None, ValueType.INT32) > 10 and not sc.few_left
+    sc.show_limit = 5000
+    assert sc.few_left
+    ms = sc.matches()
+    assert len(ms) == sc.count and HEALTH_ADDR in [m.address for m in ms]
+    reads = len(fake.reads) if hasattr(fake, "reads") else None
+    assert reads is None or reads < sc.count, "nearby matches share one read"
