@@ -355,3 +355,34 @@ def test_lock_it_test_all_at_once(win, fake):
     assert wiz.hint.text().startswith("All options are on")
     wiz.keep_btn.click()
     assert len(win.ctl.cheat_file.cheats[0].locations) == 2
+
+
+def test_pointer_scan_use_and_recheck_after_restart(win, fake):
+    from cheatmaker.core.values import ValueType
+    from cheatmaker.ui.pointer_dialog import PointerDialog
+    from tests.conftest import HEAP_BASE
+    from tests.unit.test_pointers import plant_chain
+
+    plant_chain(fake)
+    connect(win)
+    f = win.find
+    f.add_type.setCurrentIndex(list(ValueType).index(ValueType.INT32))
+    f.add_addr.setText(f"{HEALTH_ADDR:#x}")
+    f.add_btn.click()
+    dlg = PointerDialog(win.ctl, HEALTH_ADDR, ValueType.INT32, f.use_pointer, f)
+    dlg.scan_btn.click()
+    assert dlg.list.count() >= 1 and dlg.list.item(0).text() == "[[base+0x1020]+0x10]+0x40"
+    # "restart": health moves; the saved list is re-checked against the new address
+    moved = HEAP_BASE + 0x800
+    fake.poke(PID, moved, struct.pack("<i", 77))
+    plant_chain(fake, moved)
+    dlg2 = PointerDialog(win.ctl, moved, ValueType.INT32, f.use_pointer, f)
+    assert dlg2.list.count() >= 1, "loaded from the saved file"
+    dlg2.recheck_btn.click()
+    assert "still lead here" in dlg2.hint.text()
+    dlg2.use_btn.click()
+    row = f.table.rowCount() - 1
+    assert f.table.item(row, 0).text().startswith("77") and "pointer" in f.table.item(row, 0).text()
+    f.set_value.setText("999")
+    f.set_btn.click()
+    assert i32(fake, moved) == 999

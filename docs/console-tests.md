@@ -27,3 +27,18 @@ If anything fails: press **Copy log** and paste it into the thread.
   falls back to the process list and shows version "unknown"; C1 tells us which.
 - The main module is found by the map name `eboot.bin`; otherwise the lowest executable map is used and logged. C1's
   `manifest.json` confirms the real names for PS5 and PS4 games.
+
+## C7 Pointer scan (added 2026-11-01)
+
+1. Find health (Float). With its row selected, press **Pointer scan**, keep Levels 3 and
+   Max offset 0x1000, press **Find pointers**. Note the time and count (log:
+   `action=pointer_level`, `action=pointer_pass`, `action=pointer_scan`).
+2. Restart the game, find health again, select its row, open **Pointer scan**, press
+   **Re-check with this address**. Expect a smaller list that still leads to health.
+3. Repeat the restart + re-check once more, then **Use this pointer**: the row should
+   show live health, and Set / Freeze should work.
+4. After the next restart, open **Pointer scan** with no row selected and **Use this
+   pointer** straight away: health should show without searching.
+
+Pass: at least one pointer survives two restarts. Pointer cheats are live only; they
+can't be saved into GoldHEN / CheatRunner files (those hold fixed byte patches).

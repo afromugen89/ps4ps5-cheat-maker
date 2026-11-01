@@ -30,3 +30,20 @@ LOCK_NOT_LANDED = (
 )
 LOCK_PICK = "Pick an option and press Test it. If the game acts strangely, try another."
 SAVE = "Pick a format and press Save to PC, or Send to PS5 if ftpsrv is running."
+POINTER_START = (
+    "Find pointers looks for paths from the game's fixed memory to this value. It runs "
+    "one PS5 search per level, so 3 levels take a few minutes."
+)
+POINTER_NO_TARGET = (
+    "These are the pointers saved for this game version. Pick one and press Use this "
+    "pointer. To re-check them, find the value again and open Pointer scan from its row."
+)
+POINTER_RUNNING = "Searching... keep the game where it is (don't load a new area)."
+POINTER_FOUND = (
+    "Found some. Now restart the game, find the value again, and press Re-check with this "
+    "address: the pointers that still lead to it are the ones that last."
+)
+POINTER_NONE = "No pointers found. Try more levels or a bigger max offset."
+POINTER_RECHECKED = (
+    "{kept} of {before} pointers still lead here. Pick one and press Use this pointer."
+)

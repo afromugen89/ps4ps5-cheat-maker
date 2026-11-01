@@ -22,11 +22,15 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from cheatmaker.core import pointers as ptr
+from cheatmaker.core.pointers import Chain
 from cheatmaker.core.scanner import FEW_MATCHES, Match
 from cheatmaker.core.templates import TEMPLATES, make_cheat
 from cheatmaker.core.values import Compare, ValueType, parse_number
+from cheatmaker.errors import ReadFailed
 from cheatmaker.ui import hints
 from cheatmaker.ui.controller import Controller
+from cheatmaker.ui.pointer_dialog import PointerDialog
 from cheatmaker.ui.tasks import _Signals
 
 log = logging.getLogger(__name__)
@@ -56,6 +60,8 @@ class FindWizard(QWidget):
         self.rows: list[Match] = []
         self.row_types: list[ValueType] = []
         self.manual: dict[int, ValueType] = {}  # addresses the player typed in
+        self.pointers: dict[Chain, ValueType] = {}  # chains followed on every refresh
+        self.row_chains: list[Chain | None] = []
         self._cancel: threading.Event | None = None
         self._progress = _Signals()
         self._progress.done.connect(self._on_progress)
@@ -105,6 +111,7 @@ class FindWizard(QWidget):
         self.add_type.setCurrentIndex(list(ValueType).index(ValueType.FLOAT))
         self.add_btn = QPushButton("Add address")
         self.remove_btn = QPushButton("Remove")
+        self.pointer_btn = QPushButton("Pointer scan")
 
         self.table = QTableWidget(0, 2)
         self.table.setHorizontalHeaderLabels(["Value now", "Address"])
@@ -134,7 +141,7 @@ class FindWizard(QWidget):
         prog.addWidget(self.cancel_btn)
         add_row = QHBoxLayout()
         add_row.addWidget(self.add_addr, 1)
-        for w in (self.add_type, self.add_btn, self.remove_btn):
+        for w in (self.add_type, self.add_btn, self.remove_btn, self.pointer_btn):
             add_row.addWidget(w)
         act = QHBoxLayout()
         for w in (self.set_value, self.set_btn, self.freeze_btn, self.template, self.make_btn):
@@ -164,12 +171,14 @@ class FindWizard(QWidget):
         self.add_btn.clicked.connect(self.do_add_address)
         self.add_addr.returnPressed.connect(self.do_add_address)
         self.remove_btn.clicked.connect(self.do_remove_address)
+        self.pointer_btn.clicked.connect(self.do_pointer_scan)
         self.table.itemSelectionChanged.connect(self._update_buttons)
 
         self.timer = QTimer(self)
         self.timer.setInterval(LIVE_MS)
         self.timer.timeout.connect(self.refresh_live)
-        ctl.game_changed.connect(lambda _g: self._new_game())
+        ctl.game_changed.connect(self._new_game)
+        self._game_key: tuple[str, str] | None = None
         ctl.connection_changed.connect(lambda _up: self._update_buttons())
         self._update_buttons()
 
@@ -188,12 +197,15 @@ class FindWizard(QWidget):
         for b in (self.up_btn, self.down_btn, self.changed_btn, self.same_btn):
             b.setEnabled(ready and active)
         self.cancel_btn.setEnabled(busy)
-        sel = ready and self.selected() is not None
+        sel = ready and self.selected() is not None and self.selected().address != 0
         for w in (self.set_btn, self.freeze_btn, self.make_btn):
             w.setEnabled(sel)
         self.add_btn.setEnabled(ready)
         m = self.selected()
-        self.remove_btn.setEnabled(sel and m is not None and m.address in self.manual)
+        i = self._selected_row()
+        is_ptr = i is not None and i < len(self.row_chains) and self.row_chains[i] is not None
+        self.remove_btn.setEnabled(ready and m is not None and (m.address in self.manual or is_ptr))
+        self.pointer_btn.setEnabled(ready)
         self.freeze_btn.setText(
             "Unfreeze" if m and m.address in self.ctl.frozen_addresses else "Freeze"
         )
@@ -309,24 +321,35 @@ class FindWizard(QWidget):
         addresses are listed under the matches."""
         sc = self.ctl.scanner
         show_matches = sc.few_left and self._ready()
-        if not (show_matches or (self.manual and self._ready())):
+        if not (show_matches or ((self.manual or self.pointers) and self._ready())):
             self.timer.stop()
-            self.rows, self.row_types = [], []
+            self.rows, self.row_types, self.row_chains = [], [], []
             self._fill_table()
             return
         try:
             rows = sc.matches(FEW_MATCHES) if show_matches else []
             types = [self._vtype()] * len(rows) if rows else []
             seen = {m.address for m in rows}
+            chains: list[Chain | None] = [None] * len(rows)
             for addr, vt in self.manual.items():
                 if addr not in seen:
                     rows.append(self._read_match(addr, vt))
                     types.append(vt)
+                    chains.append(None)
+            for chain, vt in self.pointers.items():
+                addr = ptr.resolve_live(self.ctl.session, chain)
+                try:
+                    m = self._read_match(addr, vt) if addr else Match(0, 0, b"")
+                except ReadFailed:
+                    m = Match(0, 0, b"")
+                rows.append(m)
+                types.append(vt)
+                chains.append(chain)
         except Exception as exc:
             self.timer.stop()
             self.ctl.fail(exc, "read")
             return
-        self.rows, self.row_types = rows, types
+        self.rows, self.row_types, self.row_chains = rows, types, chains
         self._fill_table()
         if not self.timer.isActive():
             self.timer.start()
@@ -340,6 +363,11 @@ class FindWizard(QWidget):
             frozen = " (frozen)" if m.address in self.ctl.frozen_addresses else ""
             if m.address in self.manual:
                 frozen += f" (added, {self.manual[m.address].label})"
+            chain = self.row_chains[i] if i < len(self.row_chains) else None
+            if chain is not None:
+                frozen += f" (pointer {chain.label()})"
+                if m.address == 0:
+                    frozen = f" (pointer {chain.label()} leads nowhere right now)"
             self.table.setItem(i, 0, QTableWidgetItem(fmt_value(m.value) + frozen))
             self.table.setItem(i, 1, QTableWidgetItem(f"{m.address:#x}"))
         if keep_row is not None and keep_row < len(self.rows):
@@ -360,8 +388,12 @@ class FindWizard(QWidget):
         raw = self.ctl.session.require_client().read(g.pid, addr, vt.size)
         return Match(addr, vt.decode(raw), raw)
 
-    def _new_game(self) -> None:
+    def _new_game(self, game=None) -> None:
         self.manual.clear()  # addresses belong to the old game's memory
+        key = (game.title_id, game.version) if game is not None else None
+        if key != self._game_key:
+            self.pointers.clear()  # pointers last across restarts of the same version
+        self._game_key = key
         self.do_reset()
 
     def do_add_address(self) -> None:
@@ -393,7 +425,30 @@ class FindWizard(QWidget):
         self.refresh_live()
         self.table.selectRow(next(i for i, m in enumerate(self.rows) if m.address == addr))
 
+    def do_pointer_scan(self) -> None:
+        i = self._selected_row()
+        m = self.selected()
+        target = m.address if m is not None and m.address else None
+        vt = self.row_types[i] if i is not None else self.add_type.currentData()
+        dlg = PointerDialog(self.ctl, target, vt, self.use_pointer, self)
+        dlg.exec()
+
+    def use_pointer(self, chain: Chain, vt: ValueType) -> None:
+        log.info("action=use_pointer chain=%s type=%s", chain.label(), vt.name)
+        self.pointers[chain] = vt
+        self.refresh_live()
+        self.table.selectRow(len(self.rows) - 1)
+
     def do_remove_address(self) -> None:
+        i = self._selected_row()
+        if i is not None and i < len(self.row_chains) and self.row_chains[i] is not None:
+            m = self.rows[i]
+            if m.address in self.ctl.frozen_addresses:
+                self.ctl.freezer.unfreeze(f"find:{m.address}")
+                self.ctl.frozen_addresses.discard(m.address)
+            del self.pointers[self.row_chains[i]]
+            self.refresh_live()
+            return
         m = self.selected()
         if m is None or m.address not in self.manual:
             return
