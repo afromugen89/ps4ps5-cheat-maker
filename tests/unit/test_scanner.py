@@ -83,3 +83,14 @@ def test_new_game_clears_results(session, fake):  # AC-2.3
 def test_zero_matches(session):
     sc = Scanner(session)
     assert sc.first_scan(123456789) == 0 and not sc.few_left
+
+
+def test_logs_value_and_few_match_addresses(session, fake, caplog):
+    caplog.set_level("INFO", logger="cheatmaker.core.scanner")
+    sc = Scanner(session)
+    sc.first_scan(100)
+    fake.poke(PID, HEALTH_ADDR, struct.pack("<i", 90))
+    sc.next_scan(Compare.EXACT, 90)
+    text = caplog.text
+    assert "value=100" in text and "value=90 count=1" in text
+    assert f"action=matches addrs={HEALTH_ADDR:#x}" in text

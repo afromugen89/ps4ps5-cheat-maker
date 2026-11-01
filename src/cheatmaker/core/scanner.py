@@ -77,13 +77,20 @@ class Scanner:
                     progress((i + p) / len(candidates))
 
             count = client.scan_start(game.pid, regions, vt, cmp, value, scaled, cancel)
-            log.info("action=scan_first type=%s cmp=%s count=%d", vt.name, cmp.value, count)
+            log.info(
+                "action=scan_first type=%s cmp=%s value=%s count=%d",
+                vt.name,
+                cmp.value,
+                value,
+                count,
+            )
             self.vtype = vt
             if count:
                 break
         if progress:
             progress(1.0)
         self.count = count
+        self._log_addresses()
         self.history = [f"{'unknown' if value is None else value}"]
         return count
 
@@ -99,10 +106,17 @@ class Scanner:
         if cmp.needs_value and value is None:
             raise ValueError("Type the number you see now.")
         count = self.session.require_client().scan_next(cmp, value, progress, cancel)
-        log.info("action=scan_next cmp=%s count=%d", cmp.value, count)
+        log.info("action=scan_next cmp=%s value=%s count=%d", cmp.value, value, count)
         self.count = count
+        self._log_addresses()
         self.history.append(cmp.value if value is None else str(value))
         return count
+
+    def _log_addresses(self) -> None:
+        """With only a few matches left, log where they are (helps console-test triage)."""
+        if 0 < self.count <= FEW_MATCHES:
+            hits = self.session.require_client().scan_results(self.count)
+            log.info("action=matches addrs=%s", " ".join(f"{h.address:#x}" for h in hits))
 
     def matches(self, limit: int = FEW_MATCHES) -> list[Match]:
         """Current values of up to ``limit`` matches, read fresh (AC-3.4 live list)."""

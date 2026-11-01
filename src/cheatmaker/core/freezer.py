@@ -41,6 +41,8 @@ class Freezer:
 
     def freeze(self, key: str, writes: list[tuple[int, int, bytes]]) -> None:
         """``writes`` = [(pid, address, bytes)], all written each tick."""
+        for _pid, addr, data in writes:
+            log.info("action=freeze key=%s addr=%#x bytes=%s", key, addr, data.hex())
         with self._lock:
             self._entries[key] = list(writes)
         self._ensure_thread()
@@ -120,6 +122,7 @@ class LiveCheats:
         """Write the cheat's value once (AC-4.1). Raises WriteFailed (AC-4.3)."""
         client = self.session.require_client()
         for pid, addr, data in self._writes(cheat, True):
+            log.info("action=write cheat=%r addr=%#x bytes=%s", cheat.name, addr, data.hex())
             client.write(pid, addr, data)
 
     def turn_on(self, cheat: Cheat) -> None:

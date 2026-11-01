@@ -107,3 +107,11 @@ def test_connection_drop_stops_and_marks_off(session, fake):  # AC-1.4
     off = live.mark_all_off()
     assert off == [c] and not c.enabled and not fz.keys
     fz.stop()
+
+
+def test_freeze_logs_address_and_bytes(session, caplog):
+    caplog.set_level("INFO", logger="cheatmaker.core.freezer")
+    fr = Freezer(session)
+    fr.freeze("k", [(PID, HEALTH_ADDR, b"\x9f\x86\x01\x00")])
+    fr.stop()
+    assert f"action=freeze key=k addr={HEALTH_ADDR:#x} bytes=9f860100" in caplog.text

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 
@@ -27,6 +28,8 @@ from cheatmaker.core.values import Compare, ValueType, parse_number
 from cheatmaker.ui import hints
 from cheatmaker.ui.controller import Controller
 from cheatmaker.ui.tasks import _Signals
+
+log = logging.getLogger(__name__)
 
 LIVE_MS = 500
 
@@ -291,6 +294,9 @@ class FindWizard(QWidget):
         try:
             data = self._vtype().encode(parse_number(self.set_value.text()))
             g = self.ctl.session.require_game()
+            log.info(
+                "action=write type=%s addr=%#x bytes=%s", self._vtype().name, m.address, data.hex()
+            )
             self.ctl.session.require_client().write(g.pid, m.address, data)
             if m.address in self.ctl.frozen_addresses:
                 self.ctl.freezer.freeze(f"find:{m.address}", [(g.pid, m.address, data)])
