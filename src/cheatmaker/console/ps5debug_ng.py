@@ -41,6 +41,8 @@ SCAN_SLICE = 64 * 1024 * 1024  # first scan in slices so Cancel and progress res
 IO_TIMEOUT = 4.0  # short, so a dropped PS5 is noticed within 5 s while freezing (AC-1.4)
 SCAN_TIMEOUT = 60.0  # one scan slice runs on the console and may take a while
 SENTINEL_U64 = 0xFFFFFFFFFFFFFFFF
+TSE_PARALLEL_COMPARE = 0x100  # turbo engine bit: server can compare on several threads
+TS_PARALLEL_COMPARE = 0x80  # turbo request flag asking for that
 AUTH_MAGIC = 0xBB40E64D
 INTERRUPT_PORT = 755
 INTERRUPT_SIZE = 0x4A0
@@ -173,6 +175,7 @@ class Ps5DebugNgClient:
         self._lock = threading.RLock()  # freezer thread and UI share the socket
         self._authed = False
         self._turbo: bool | None = None
+        self._turbo_flags = 0
         self._scan: LocalScanSession | None = None
         self._scan_pid: int | None = None
         self._fg_supported = True
@@ -335,8 +338,16 @@ class Ps5DebugNgClient:
                 self._w.request(Cmd.TURBOSCAN_CAPS)
                 self._turbo = self._w.status() == Status.SUCCESS
                 if self._turbo:
-                    self._w.recv(16)
-            log.info("turbo scan available: %s", self._turbo)
+                    ver, engines, threads, _r = struct.unpack("<IIII", self._w.recv(16))
+                    if engines & TSE_PARALLEL_COMPARE:
+                        self._turbo_flags = TS_PARALLEL_COMPARE
+                    log.info(
+                        "turbo scan caps: version=%d engines=%#x max_threads=%d",
+                        ver,
+                        engines,
+                        threads,
+                    )
+            log.info("turbo scan available: %s flags=%#x", self._turbo, self._turbo_flags)
         return self._turbo
 
     def _scan_slice(
@@ -355,11 +366,18 @@ class Ps5DebugNgClient:
         )
         turbo = self._has_turbo()
         cmd = Cmd.TURBOSCAN_START if turbo else Cmd.PROC_SCAN_START
-        body = hdr + (struct.pack("<I", 0) if turbo else b"")
+        flags = self._turbo_flags
+        body = hdr + (struct.pack("<I", flags) if turbo else b"")
         hits = []
         with self._lock, self._timeout(SCAN_TIMEOUT):
             self._w.request(cmd, body)
-            self._w.ok("scan start", ReadFailed)
+            if self._w.status() != Status.SUCCESS:
+                if flags:
+                    # Server refused the parallel flag: stop asking and retry plainly.
+                    log.warning("turbo scan refused flags=%#x; retrying without", flags)
+                    self._turbo_flags = 0
+                    return self._scan_slice(pid, start, length, vtype, value)
+                raise ReadFailed(f"scan start at {start:#x}: console refused")
             self._w.send(vbytes)
             self._w.ok("scan", ReadFailed)
             stride = 4 + vtype.size
@@ -393,6 +411,7 @@ class Ps5DebugNgClient:
         ]
         total = sum(n for _, n in slices) or 1
         done, hits = 0, []
+        t0 = time.monotonic()
         for s, n in slices:
             if cancel is not None and cancel.is_set():
                 raise ScanCancelled("scan cancelled by the player")
@@ -400,6 +419,15 @@ class Ps5DebugNgClient:
             done += n
             if progress:
                 progress(done / total)
+        log.info(
+            "action=scan_stats requests=%d regions=%d mib=%.0f seconds=%.1f turbo=%s flags=%#x",
+            len(slices),
+            len(regions),
+            total / 2**20,
+            time.monotonic() - t0,
+            self._turbo,
+            self._turbo_flags,
+        )
         self._scan = LocalScanSession(
             lambda a, n: self.read(pid, a, n), lambda spans: self.read_many(pid, spans)
         )

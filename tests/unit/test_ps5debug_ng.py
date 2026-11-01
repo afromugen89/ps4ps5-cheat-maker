@@ -45,7 +45,15 @@ def _pad(s: str, n: int) -> bytes:
 class FakeNgServer:
     """Minimal PS5Debug-NG over a FakeConsole."""
 
-    def __init__(self, turbo: bool = True, foreground: bool = True) -> None:
+    def __init__(
+        self,
+        turbo: bool = True,
+        foreground: bool | str = True,
+        parallel: bool = False,
+        refuse_flags: bool = False,
+    ) -> None:
+        self.parallel, self.refuse_flags = parallel, refuse_flags
+        self.scan_flags: list[int] = []
         self.fake = build_fake()
         self.turbo, self.foreground = turbo, foreground
         self.authed = False
@@ -163,11 +171,17 @@ class FakeNgServer:
             self.authed = ans == bytes(x ^ ks[i] for i, x in enumerate(chal))
             c.sendall(OK if self.authed else struct.pack("<I", Status.DATA_NULL))
         elif cmd == Cmd.TURBOSCAN_CAPS:
-            c.sendall(OK + b"\0" * 16 if self.turbo else ERR)
+            caps = struct.pack("<IIII", 1, 0x100 if self.parallel else 0, 8, 0)
+            c.sendall(OK + caps if self.turbo else ERR)
         elif cmd in (Cmd.TURBOSCAN_START, Cmd.PROC_SCAN_START):
             assert self.authed
             pid, addr, n, _vt, _ct, align, lv = struct.unpack("<IQIBBBI", body[:23])
             assert (cmd == Cmd.TURBOSCAN_START) == (len(body) == 27)
+            if len(body) == 27:
+                self.scan_flags.append(struct.unpack("<I", body[23:])[0])
+                if self.refuse_flags and self.scan_flags[-1]:
+                    c.sendall(ERR)
+                    return
             c.sendall(OK)
             needle = self._recv(c, lv)
             c.sendall(OK)
@@ -367,3 +381,15 @@ def test_merge_ranges_joins_touching_maps():
     ]
     assert merge_ranges(maps) == [(0x1000, 0x4000), (0x8000, 0x9000)]
     assert merge_ranges([]) == []
+
+
+@pytest.mark.parametrize("refuse", [False, True])
+def test_parallel_compare_flag_used_and_dropped_if_refused(refuse):
+    server = FakeNgServer(parallel=True, refuse_flags=refuse)
+    cl = Ps5DebugNgClient.connect("127.0.0.1", server.port, timeout=3)
+    regions = [m for m in cl.maps(PID) if m.writable]
+    assert cl.scan_start(PID, regions, ValueType.INT32, Compare.EXACT, 100) == 2
+    assert server.scan_flags[0] == 0x80
+    if refuse:
+        assert server.scan_flags[1:] and all(f == 0 for f in server.scan_flags[1:])
+    cl.close()
