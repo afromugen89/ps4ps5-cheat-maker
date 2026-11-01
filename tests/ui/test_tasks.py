@@ -21,3 +21,12 @@ def test_sync_runner_busy_signal(qtbot):
     r.busy_changed.connect(states.append)
     r.run(lambda: 1, lambda _v: None, lambda _e: None)
     assert states == [True, False]
+
+
+def test_eta_text():
+    from cheatmaker.ui.find_wizard import eta_text
+
+    assert eta_text(0.01, 10) == "%p%"
+    assert eta_text(0.5, 30) == "%p% · about 30 s left"
+    assert eta_text(0.25, 40) == "%p% · about 2 min left"
+    assert eta_text(1.0, 100) == "%p%"

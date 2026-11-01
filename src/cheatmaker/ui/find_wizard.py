@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import time
 
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import (
@@ -30,6 +31,16 @@ from cheatmaker.ui.tasks import _Signals
 LIVE_MS = 500
 
 
+def eta_text(fraction: float, elapsed: float) -> str:
+    """Progress bar text with time left (big PS5 games take ~100 s, C3)."""
+    if fraction <= 0.02 or fraction >= 1 or elapsed < 2:
+        return "%p%"
+    left = elapsed * (1 - fraction) / fraction
+    if left < 60:
+        return f"%p% · about {max(5, round(left / 5) * 5)} s left"
+    return f"%p% · about {round(left / 60, 1):g} min left"
+
+
 def fmt_value(v: float | int) -> str:
     return f"{v:,.2f}" if isinstance(v, float) else f"{v:,}"
 
@@ -42,7 +53,8 @@ class FindWizard(QWidget):
         self.rows: list[Match] = []
         self._cancel: threading.Event | None = None
         self._progress = _Signals()
-        self._progress.done.connect(lambda p: self.progress.setValue(int(p * 100)))
+        self._progress.done.connect(self._on_progress)
+        self._started = 0.0
 
         self.hint = QLabel(hints.FIND_START)
         self.hint.setWordWrap(True)
@@ -160,9 +172,14 @@ class FindWizard(QWidget):
             return None
         return self.rows[rows[0].row()]
 
+    def _on_progress(self, fraction: float) -> None:
+        self.progress.setValue(int(fraction * 100))
+        self.progress.setFormat(eta_text(fraction, time.monotonic() - self._started))
+
     def _after_scan(self, count: int) -> None:
         self._cancel = None
         self.progress.setValue(100)
+        self.progress.setFormat("%p%")
         sc = self.ctl.scanner
         self.count.setText(f"{count:,} matches")
         if count == 0:
@@ -184,6 +201,8 @@ class FindWizard(QWidget):
         self._cancel = threading.Event()
         cancel = self._cancel
         self.progress.setValue(0)
+        self.progress.setFormat("%p%")
+        self._started = time.monotonic()
         self._update_buttons()
         self.ctl.tasks.run(
             lambda: fn(self._progress.done.emit, cancel), self._after_scan, self._scan_failed
