@@ -15,9 +15,13 @@ from cheatmaker.core.values import Compare, ValueType, matches
 from cheatmaker.errors import ScanCancelled
 
 ReadFn = Callable[[int, int], bytes]
+ReadManyFn = Callable[[list[tuple[int, int]]], list[bytes]]
 
 READ_GAP = 64
 """Candidates closer than this are fetched with one read."""
+
+READ_BATCH = 4096
+"""Spans fetched per round trip when the client supports bulk reads."""
 
 
 def alignment_for(vtype: ValueType) -> int:
@@ -70,8 +74,9 @@ def _batched_reads(addrs: list[int], size: int) -> Iterable[tuple[int, int]]:
 
 
 class LocalScanSession:
-    def __init__(self, read: ReadFn) -> None:
+    def __init__(self, read: ReadFn, read_many: ReadManyFn | None = None) -> None:
         self._read = read
+        self._read_many = read_many
         self.vtype: ValueType | None = None
         self.hits: list[ScanHit] = []
 
@@ -111,13 +116,22 @@ class LocalScanSession:
         assert self.vtype is not None
         size = self.vtype.size
         addrs = sorted(h.address for h in hits)
+        spans = list(_batched_reads(addrs, size))
         out: dict[int, bytes] = {}
-        for start, length in _batched_reads(addrs, size):
+        idx = 0  # addrs and spans are both sorted, so walk them together
+        for i in range(0, len(spans), READ_BATCH):
             _check(cancel)
-            blob = self._read(start, length)
-            for a in addrs:
-                if start <= a < start + length:
+            batch = spans[i : i + READ_BATCH]
+            blobs = (
+                self._read_many(batch)
+                if self._read_many is not None
+                else [self._read(s, n) for s, n in batch]
+            )
+            for (start, length), blob in zip(batch, blobs, strict=True):
+                while idx < len(addrs) and addrs[idx] < start + length:
+                    a = addrs[idx]
                     out[a] = blob[a - start : a - start + size]
+                    idx += 1
         return out
 
     def next(
