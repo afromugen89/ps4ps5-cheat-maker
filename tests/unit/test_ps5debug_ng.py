@@ -22,6 +22,7 @@ from cheatmaker.console.ps5debug_ng import (
     Ps5DebugNgClient,
     Status,
     build_keystream,
+    merge_ranges,
 )
 from cheatmaker.core.values import Compare, ValueType
 from cheatmaker.errors import (
@@ -353,3 +354,16 @@ def test_server_gone_raises_connection_lost(client, server):
 def test_keystream_is_stable():
     ks = build_keystream()
     assert len(ks) == 256 and ks != bytes(256)
+
+
+def test_merge_ranges_joins_touching_maps():
+    from cheatmaker.console.client import MemMap
+
+    maps = [
+        MemMap("c", 0x3000, 0x4000, 3),
+        MemMap("a", 0x1000, 0x2000, 3),
+        MemMap("b", 0x2000, 0x3000, 3),
+        MemMap("d", 0x8000, 0x9000, 3),
+    ]
+    assert merge_ranges(maps) == [(0x1000, 0x4000), (0x8000, 0x9000)]
+    assert merge_ranges([]) == []

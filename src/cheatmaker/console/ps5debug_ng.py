@@ -88,6 +88,18 @@ _DR7_LEN = {1: 0, 2: 1, 4: 3, 8: 2}
 _DR7_WRITE = 1
 
 
+def merge_ranges(regions: list[MemMap]) -> list[tuple[int, int]]:
+    """Join regions that touch, so a game with tens of thousands of small maps
+    (Returnal has ~38k) is scanned in a few big requests, not one per map."""
+    out: list[tuple[int, int]] = []
+    for r in sorted(regions, key=lambda m: m.start):
+        if out and r.start <= out[-1][1]:
+            out[-1] = (out[-1][0], max(out[-1][1], r.end))
+        else:
+            out.append((r.start, r.end))
+    return out
+
+
 def _cstr(raw: bytes) -> str:
     return raw.split(b"\x00", 1)[0].decode("utf-8", "replace")
 
@@ -375,9 +387,9 @@ class Ps5DebugNgClient:
             raise ScanNotSupported("unknown-value search isn't available on the PS5 yet")
         self._auth()
         slices = [
-            (s, min(SCAN_SLICE, r.end - s))
-            for r in regions
-            for s in range(r.start, r.end, SCAN_SLICE)
+            (s, min(SCAN_SLICE, end - s))
+            for start, end in merge_ranges(regions)
+            for s in range(start, end, SCAN_SLICE)
         ]
         total = sum(n for _, n in slices) or 1
         done, hits = 0, []
