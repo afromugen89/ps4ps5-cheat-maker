@@ -87,6 +87,14 @@ class FindWizard(QWidget):
         adv = QHBoxLayout(self.advanced)
         adv.addWidget(QLabel("Number type:"))
         adv.addWidget(self.vtype)
+        self.range_lo = QLineEdit()
+        self.range_lo.setPlaceholderText("e.g. 1")
+        self.range_hi = QLineEdit()
+        self.range_hi.setPlaceholderText("e.g. 1000")
+        adv.addWidget(QLabel("Don't know the number, but it's between"))
+        adv.addWidget(self.range_lo)
+        adv.addWidget(QLabel("and"))
+        adv.addWidget(self.range_hi)
         self.advanced.toggled.connect(lambda _on: self._fill_table())
 
         self.add_addr = QLineEdit()
@@ -251,10 +259,29 @@ class FindWizard(QWidget):
             vt = self.vtype.currentData() if self.advanced.isChecked() else None
             self._run_scan(lambda p, c: sc.first_scan(value, vt, p, c))
 
+    def _range(self) -> tuple[float, float] | None:
+        """The optional "between low and high" from Advanced. Raises ValueError."""
+        if not self.advanced.isChecked():
+            return None
+        lo, hi = self.range_lo.text().strip(), self.range_hi.text().strip()
+        if not lo and not hi:
+            return None
+        if not (lo and hi):
+            raise ValueError("Fill in both numbers of the range, or leave both empty.")
+        low, high = parse_number(lo), parse_number(hi)
+        if low > high:
+            raise ValueError("The first number of the range must be the smaller one.")
+        return (low, high)
+
     def do_unknown(self) -> None:
+        try:
+            rng = self._range()
+        except ValueError as exc:
+            self.ctl.fail(exc, "scan")
+            return
         self.unknown_mode = True
         vt = self.vtype.currentData() if self.advanced.isChecked() else None
-        self._run_scan(lambda p, c: self.ctl.scanner.first_scan(None, vt, p, c))
+        self._run_scan(lambda p, c: self.ctl.scanner.first_scan(None, vt, p, c, value_range=rng))
 
     def do_compare(self, cmp: Compare) -> None:
         self._run_scan(lambda p, c: self.ctl.scanner.next_scan(cmp, None, p, c))

@@ -57,10 +57,11 @@ class Compare(Enum):
     DECREASED = "decreased"
     CHANGED = "changed"
     UNCHANGED = "unchanged"
+    BETWEEN = "between"  # value is (low, high), both included
 
     @property
     def needs_value(self) -> bool:
-        return self is Compare.EXACT
+        return self in (Compare.EXACT, Compare.BETWEEN)
 
     @property
     def needs_previous(self) -> bool:
@@ -91,6 +92,9 @@ def matches(
         if vtype.is_float:
             return abs(cur - float(target)) <= FLOAT_TOLERANCE
         return cur == int(target)
+    if cmp is Compare.BETWEEN:
+        lo, hi = target  # type: ignore[misc]
+        return lo <= cur <= hi
     if previous is None:
         raise ValueError(f"{cmp.value} needs a previous scan")
     prev = vtype.decode(previous)

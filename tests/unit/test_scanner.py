@@ -101,3 +101,20 @@ def test_eight_byte_types_keep_4_byte_alignment():
     from cheatmaker.console.local_scan import alignment_for
 
     assert alignment_for(ValueType.INT64) == 4 and alignment_for(ValueType.DOUBLE) == 4
+
+
+def test_unknown_with_range_keeps_only_values_in_range(session, fake):
+    sc = Scanner(session)
+    everything = Scanner(session).first_scan(None)
+    sc = Scanner(session)
+    count = sc.first_scan(None, value_range=(80, 90))
+    assert 0 < count < everything
+    assert BAR_ADDR in [m.address for m in sc.matches()]  # 87.4
+    assert all(80 <= m.value <= 90 for m in sc.matches())
+
+
+def test_between_rejects_backwards_range(session):
+    sc = Scanner(session)
+    sc.first_scan(None)
+    with pytest.raises(ValueError, match="smaller"):
+        sc.next_scan(Compare.BETWEEN, (10, 1))

@@ -112,6 +112,7 @@ _NG_COMPARE = {
     Compare.DECREASED: 7,
     Compare.CHANGED: 9,
     Compare.UNCHANGED: 10,
+    Compare.BETWEEN: 4,  # server keeps low <= value <= high (both included)
 }
 _NG_FUZZY = 1
 """FuzzyValue: |typed - memory| < 1.0, float/double only. Legacy ExactValue on floats
@@ -591,7 +592,11 @@ class Ps5DebugNgClient:
         code = _NG_COMPARE[cmp]
         if cmp is Compare.EXACT and vtype.is_float:
             code = _NG_FUZZY
-        val = vtype.encode(value) if cmp.needs_value and value is not None else b""
+        if cmp is Compare.BETWEEN:
+            lo, hi = value  # type: ignore[misc]
+            val = vtype.encode(lo) + vtype.encode(hi)
+        else:
+            val = vtype.encode(value) if cmp.needs_value and value is not None else b""
         total = max(self._resident_count, 1)
         cancelled = False
         with self._lock, self._timeout(SCAN_TIMEOUT):

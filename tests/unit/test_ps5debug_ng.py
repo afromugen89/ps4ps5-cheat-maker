@@ -279,7 +279,13 @@ class FakeNgServer:
         for a, old in r["vals"].items():
             now = self.fake.read(pid, a, r["size"])
             o, v = struct.unpack(fmt, old)[0], struct.unpack(fmt, now)[0]
-            if ct == 0:
+            if ct == 4:
+                lo, hi = (
+                    struct.unpack(fmt, needle[: r["size"]])[0],
+                    struct.unpack(fmt, needle[r["size"] :])[0],
+                )
+                ok = lo <= v <= hi
+            elif ct == 0:
                 ok = now == needle
             elif ct == 1:
                 ok = abs(struct.unpack(fmt, needle)[0] - v) < 1
@@ -465,6 +471,17 @@ def test_unknown_value_then_went_down_on_console():
     assert server.scan_compares[-4:] == [7, 10, 5, 9]
     cl.scan_cancel()
     assert server.resident is None, "new search frees the console's snapshot"
+    cl.close()
+
+
+def test_unknown_then_between_on_console():
+    server = FakeNgServer(snapshot=True)
+    cl = Ps5DebugNgClient.connect("127.0.0.1", server.port, timeout=3)
+    regions = [m for m in cl.maps(PID) if m.writable]
+    cl.scan_start(PID, regions, ValueType.FLOAT, Compare.UNKNOWN, None)
+    n = cl.scan_next(Compare.BETWEEN, (80, 90))
+    assert n >= 1 and server.scan_compares[-1] == 4
+    assert BAR_ADDR in {h.address for h in cl.scan_results(50)}
     cl.close()
 
 

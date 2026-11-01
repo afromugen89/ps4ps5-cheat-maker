@@ -53,8 +53,12 @@ class Scanner:
         vtype: ValueType | None = None,
         progress: ProgressFn | None = None,
         cancel: threading.Event | None = None,
+        value_range: tuple[float, float] | None = None,
     ) -> int:
         """Exact search when ``value`` is given, otherwise "Unknown value" (AC-3.3).
+
+        ``value_range`` (unknown only): keep just values from low to high, e.g. health
+        between 1 and 1000, which drops most of the hundreds of millions of candidates.
 
         With no ``vtype`` the scanner tries the likely types in order and keeps the
         first that finds something (AC-3.6).
@@ -91,8 +95,10 @@ class Scanner:
         if progress:
             progress(1.0)
         self.count = count
-        self._log_addresses()
         self.history = [f"{'unknown' if value is None else value}"]
+        if value is None and value_range is not None and count:
+            return self.next_scan(Compare.BETWEEN, value_range, None, cancel)  # type: ignore[arg-type]
+        self._log_addresses()
         return count
 
     def next_scan(
@@ -106,6 +112,10 @@ class Scanner:
             raise ValueError("Start a new search first.")
         if cmp.needs_value and value is None:
             raise ValueError("Type the number you see now.")
+        if cmp is Compare.BETWEEN:
+            lo, hi = value  # type: ignore[misc]
+            if lo > hi:
+                raise ValueError("The first number of the range must be the smaller one.")
         count = self.session.require_client().scan_next(cmp, value, progress, cancel)
         log.info("action=scan_next cmp=%s value=%s count=%d", cmp.value, value, count)
         self.count = count
