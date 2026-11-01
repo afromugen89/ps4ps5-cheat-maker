@@ -14,3 +14,10 @@ Findings that changed the code:
 - The foreground-app command works and gives the version; its name field is the process name ("eboot.bin"), so the title ID is shown instead.
 - The game's module is the `executable` maps. Maps named `(NoName)eboot.bin` are elsewhere and were wrongly picked as the base before.
 - Writable memory is large (up to 12 GiB, ~4,000 ranges after joining touching maps). C3 measures whether the first search fits in 60 s.
+
+## C2: not reachable: passed (2026-11-01)
+
+## C3: first search (2026-11-01, Returnal, a10316f)
+
+- Exact 4-byte search: ~3 minutes, 637,388 matches. Misses the 60 s target (AC-3.5).
+- Next build (parallel compare + timing log) to re-measure.
