@@ -41,10 +41,11 @@ class LockWizard(QDialog):
         self.options = QListWidget()
         self.show_code = QCheckBox("Advanced: show instructions")
         self.test_btn = QPushButton("Test it")
+        self.test_all_btn = QPushButton("Test all at once")
         self.keep_btn = QPushButton("Keep it")
         self.cancel_btn = QPushButton("Cancel")
         row = QHBoxLayout()
-        for w in (self.test_btn, self.keep_btn, self.cancel_btn):
+        for w in (self.test_btn, self.test_all_btn, self.keep_btn, self.cancel_btn):
             row.addWidget(w)
         lay = QVBoxLayout(self)
         lay.addWidget(self.hint)
@@ -55,6 +56,7 @@ class LockWizard(QDialog):
 
         self.start_btn.clicked.connect(self.do_start)
         self.test_btn.clicked.connect(self.do_test)
+        self.test_all_btn.clicked.connect(self.do_test_all)
         self.keep_btn.clicked.connect(self.do_keep)
         self.cancel_btn.clicked.connect(self.reject)
         self.options.currentRowChanged.connect(lambda _r: self._pick())
@@ -64,6 +66,7 @@ class LockWizard(QDialog):
     def _update(self) -> None:
         has = self.options.currentRow() >= 0
         self.test_btn.setEnabled(has)
+        self.test_all_btn.setEnabled(len(self.writers) > 1)
         self.keep_btn.setEnabled(has and self.candidate is not None and self.candidate.enabled)
 
     def do_start(self) -> None:
@@ -135,6 +138,26 @@ class LockWizard(QDialog):
             self.hint.setText(hints.LOCK_TESTING.format(n=n))
         else:
             self.hint.setText(hints.LOCK_NOT_LANDED.format(n=n))
+        self._update()
+
+    def do_test_all(self) -> None:
+        """Switch off every instruction that changed the value, as one cheat. Quicker
+        than trying options one by one; if the game misbehaves, test them singly."""
+        if len(self.writers) < 2:
+            return
+        self._untest()
+        try:
+            parts = [make_lock_cheat(self.ctl.session, w, self.source.name) for w in self.writers]
+            cheat = parts[0]
+            cheat.locations = [loc for c in parts for loc in c.locations]
+            verify_original(self.ctl.session, cheat)
+            self.ctl.live.turn_on(cheat)
+            landed = patch_landed(self.ctl.session, cheat)
+        except Exception as exc:
+            self.ctl.fail(exc, "lock")
+            return
+        self.candidate = cheat
+        self.hint.setText(hints.LOCK_ALL_ON if landed else hints.LOCK_NOT_LANDED.format(n="all"))
         self._update()
 
     def do_keep(self) -> None:

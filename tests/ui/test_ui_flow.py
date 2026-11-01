@@ -335,3 +335,23 @@ def test_type_in_bad_or_unmapped_address(win):
     win.find.add_btn.click()
     assert win.status.text().startswith("Nothing is at 0x10")
     assert win.find.table.rowCount() == 0
+
+
+def test_lock_it_test_all_at_once(win, fake):
+    second = WRITER_ADDR + 0x40
+    fake.poke(PID, second, b"\x89\x08")  # another "mov [rax],ecx"
+    fake.writers[HEALTH_ADDR] = [WRITER_ADDR + 2, second + 2, second + 2]
+    connect(win)
+    search(win, "100")
+    fake.poke(PID, HEALTH_ADDR, struct.pack("<i", 99))
+    search(win, "99")
+    win.find.table.selectRow(0)
+    win.find.make_btn.click()
+    wiz = LockWizard(win.ctl, win.ctl.cheat_file.cheats[0], win)
+    wiz.start_btn.click()
+    assert wiz.options.count() == 2 and wiz.test_all_btn.isEnabled()
+    wiz.test_all_btn.click()
+    assert fake.peek(PID, WRITER_ADDR, 2) == b"\x90\x90" == fake.peek(PID, second, 2)
+    assert wiz.hint.text().startswith("All options are on")
+    wiz.keep_btn.click()
+    assert len(win.ctl.cheat_file.cheats[0].locations) == 2

@@ -21,6 +21,10 @@ LOCK_TESTING = (
     "Option {n} is on. Play a bit: if the value still changes, pick the next option and "
     "press Test it. If it stops, press Keep it."
 )
+LOCK_ALL_ON = (
+    "All options are on. Take a hit: if the value stops changing, press Keep it (or test "
+    "options one by one to find the single one that does it)."
+)
 LOCK_NOT_LANDED = (
     "The PS5 said OK but option {n} didn't change the game's code. Try the next option."
 )
