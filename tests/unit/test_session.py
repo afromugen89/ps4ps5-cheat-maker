@@ -130,3 +130,33 @@ def test_connect_accepts_pasted_url(fake):
     s = Session(lambda ip, port: seen.append(ip) or fake)
     s.connect("http://192.168.0.193/")
     assert seen == ["192.168.0.193"] and s.ip == "192.168.0.193"
+
+
+def _real_maps(name):
+    import json
+    from pathlib import Path
+
+    from cheatmaker.console.client import MemMap
+
+    doc = json.loads((Path(__file__).parent.parent / "fixtures" / "maps" / name).read_text())
+    maps = [
+        MemMap(m["name"], int(m["start"], 16), int(m["end"], 16), m["prot"]) for m in doc["maps"]
+    ]
+    return doc["game"], maps
+
+
+@pytest.mark.parametrize(
+    "name,end", [("ps5_PPSA01285_maps.json", 0x94E4000), ("ps4_CUSA33778_maps.json", 0x58BC000)]
+)
+def test_module_range_on_real_console_maps(name, end):
+    """C1: NG 1.3 names the game's module "executable"; "(NoName)eboot.bin" maps
+    elsewhere are not it."""
+    game, maps = _real_maps(name)
+    assert Session._module_range(maps, game["process"]) == (0x400000, end)
+
+
+def test_title_falls_back_to_title_id(fake):
+    fake._procs[PID].title = "eboot.bin"
+    s = Session(lambda ip, port: fake)
+    s.connect("1.1.1.1")
+    assert s.refresh_game().title == "PPSA01234"

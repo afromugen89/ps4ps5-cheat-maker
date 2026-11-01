@@ -1,0 +1,679 @@
+{
+ "note": "Map list (no memory) recorded on Kein's PS5, console test C1, 2026-11-01; trimmed.",
+ "server_version": "1.3",
+ "game": {
+  "pid": 3150,
+  "title_id": "CUSA33778",
+  "title": "eboot.bin",
+  "version": "01.03",
+  "process": "eboot.bin"
+ },
+ "maps": [
+  {
+   "name": "executable",
+   "start": "0x400000",
+   "end": "0x471c000",
+   "prot": 5
+  },
+  {
+   "name": "executable",
+   "start": "0x4800000",
+   "end": "0x51e4000",
+   "prot": 1
+  },
+  {
+   "name": "executable",
+   "start": "0x5200000",
+   "end": "0x5288000",
+   "prot": 3
+  },
+  {
+   "name": "executable",
+   "start": "0x5288000",
+   "end": "0x58bc000",
+   "prot": 3
+  },
+  {
+   "name": "libSceFios2.prx",
+   "start": "0x80000000",
+   "end": "0x80060000",
+   "prot": 5
+  },
+  {
+   "name": "libc.prx",
+   "start": "0x80190000",
+   "end": "0x802a8000",
+   "prot": 5
+  },
+  {
+   "name": "libSceNpToolkit2.prx",
+   "start": "0x802bc000",
+   "end": "0x80364000",
+   "prot": 5
+  },
+  {
+   "name": "AkSineTone.prx",
+   "start": "0x80378000",
+   "end": "0x8037c000",
+   "prot": 5
+  },
+  {
+   "name": "AkSilenceGenerator.prx",
+   "start": "0x8077c000",
+   "end": "0x80780000",
+   "prot": 5
+  },
+  {
+   "name": "AkToneGen.prx",
+   "start": "0x80b80000",
+   "end": "0x80b88000",
+   "prot": 5
+  },
+  {
+   "name": "McDSP.prx",
+   "start": "0x80f84000",
+   "end": "0x80f8c000",
+   "prot": 5
+  },
+  {
+   "name": "AkParametricEQ.prx",
+   "start": "0x81388000",
+   "end": "0x8138c000",
+   "prot": 5
+  },
+  {
+   "name": "AkDelay.prx",
+   "start": "0x8178c000",
+   "end": "0x81790000",
+   "prot": 5
+  },
+  {
+   "name": "AkCompressor.prx",
+   "start": "0x81b90000",
+   "end": "0x81b94000",
+   "prot": 5
+  },
+  {
+   "name": "AkExpander.prx",
+   "start": "0x81f94000",
+   "end": "0x81f98000",
+   "prot": 5
+  },
+  {
+   "name": "AkMatrixReverb.prx",
+   "start": "0x82398000",
+   "end": "0x823a4000",
+   "prot": 5
+  },
+  {
+   "name": "AkRoomVerb.prx",
+   "start": "0x8279c000",
+   "end": "0x827b4000",
+   "prot": 5
+  },
+  {
+   "name": "AkFlanger.prx",
+   "start": "0x82ba0000",
+   "end": "0x82ba8000",
+   "prot": 5
+  },
+  {
+   "name": "AkGuitarDistortion.prx",
+   "start": "0x82fa4000",
+   "end": "0x82fac000",
+   "prot": 5
+  },
+  {
+   "name": "AkConvolutionReverb.prx",
+   "start": "0x833a8000",
+   "end": "0x833bc000",
+   "prot": 5
+  },
+  {
+   "name": "AkTimeStretch.prx",
+   "start": "0x837ac000",
+   "end": "0x837bc000",
+   "prot": 5
+  },
+  {
+   "name": "AkTremolo.prx",
+   "start": "0x83bb0000",
+   "end": "0x83bb4000",
+   "prot": 5
+  },
+  {
+   "name": "AkStereoDelay.prx",
+   "start": "0x83fb4000",
+   "end": "0x83fbc000",
+   "prot": 5
+  },
+  {
+   "name": "AkPitchShifter.prx",
+   "start": "0x843b8000",
+   "end": "0x843c0000",
+   "prot": 5
+  },
+  {
+   "name": "AkHarmonizer.prx",
+   "start": "0x847bc000",
+   "end": "0x847d0000",
+   "prot": 5
+  },
+  {
+   "name": "AkGain.prx",
+   "start": "0x84bc0000",
+   "end": "0x84bc4000",
+   "prot": 5
+  },
+  {
+   "name": "MasteringSuite.prx",
+   "start": "0x84fc4000",
+   "end": "0x84fdc000",
+   "prot": 5
+  },
+  {
+   "name": "AkMotion.prx",
+   "start": "0x853c8000",
+   "end": "0x853d0000",
+   "prot": 5
+  },
+  {
+   "name": "(NoName)eboot.bin",
+   "start": "0x7eedf8000",
+   "end": "0x7eedfc000",
+   "prot": 0
+  },
+  {
+   "name": "(NoName)SceSysCore.elf",
+   "start": "0x7eeffc000",
+   "end": "0x7ef000000",
+   "prot": 5
+  },
+  {
+   "name": "libkernel.sprx",
+   "start": "0x800000000",
+   "end": "0x800048000",
+   "prot": 5
+  },
+  {
+   "name": "libSceLibcInternal.sprx",
+   "start": "0x8000a4000",
+   "end": "0x8001cc000",
+   "prot": 5
+  },
+  {
+   "name": "libSceSysmodule.sprx",
+   "start": "0x80026c000",
+   "end": "0x800278000",
+   "prot": 5
+  },
+  {
+   "name": "libSceNet.sprx",
+   "start": "0x800298000",
+   "end": "0x8002cc000",
+   "prot": 5
+  },
+  {
+   "name": "libSceIpmi.sprx",
+   "start": "0x800480000",
+   "end": "0x800488000",
+   "prot": 5
+  },
+  {
+   "name": "libSceMbus.sprx",
+   "start": "0x8004a4000",
+   "end": "0x8004ac000",
+   "prot": 5
+  },
+  {
+   "name": "libSceRegMgr.sprx",
+   "start": "0x8004b8000",
+   "end": "0x8004bc000",
+   "prot": 5
+  },
+  {
+   "name": "libSceRtc.sprx",
+   "start": "0x8004c8000",
+   "end": "0x8004cc000",
+   "prot": 5
+  },
+  {
+   "name": "libSceRazorCpu.sprx",
+   "start": "0x8004d8000",
+   "end": "0x8004e4000",
+   "prot": 5
+  },
+  {
+   "name": "libSceAvSetting.sprx",
+   "start": "0x8004f4000",
+   "end": "0x800508000",
+   "prot": 5
+  },
+  {
+   "name": "libSceVideoOut.sprx",
+   "start": "0x800518000",
+   "end": "0x800538000",
+   "prot": 5
+  },
+  {
+   "name": "libSceGnmDriverForNeoMode.sprx",
+   "start": "0x800550000",
+   "end": "0x80055c000",
+   "prot": 5
+  },
+  {
+   "name": "libSceAudioOut.sprx",
+   "start": "0x800574000",
+   "end": "0x8005c8000",
+   "prot": 5
+  },
+  {
+   "name": "libSceAudioIn.sprx",
+   "start": "0x80094c000",
+   "end": "0x800954000",
+   "prot": 5
+  },
+  {
+   "name": "libSceAjm.sprx",
+   "start": "0x800960000",
+   "end": "0x800964000",
+   "prot": 5
+  },
+  {
+   "name": "libScePad.sprx",
+   "start": "0x800970000",
+   "end": "0x80098c000",
+   "prot": 5
+  },
+  {
+   "name": "libSceCamera.sprx",
+   "start": "0x8009a4000",
+   "end": "0x8009c8000",
+   "prot": 5
+  },
+  {
+   "name": "libSceNetCtl.sprx",
+   "start": "0x800a08000",
+   "end": "0x800a10000",
+   "prot": 5
+  },
+  {
+   "name": "libSceHttp.sprx",
+   "start": "0x800a1c000",
+   "end": "0x800a4c000",
+   "prot": 5
+  },
+  {
+   "name": "libSceSsl.sprx",
+   "start": "0x800a64000",
+   "end": "0x800b58000",
+   "prot": 5
+  },
+  {
+   "name": "libSceHttp2.sprx",
+   "start": "0x800bd0000",
+   "end": "0x800bfc000",
+   "prot": 5
+  },
+  {
+   "name": "libSceNpCommon.sprx",
+   "start": "0x800c10000",
+   "end": "0x800c44000",
+   "prot": 5
+  },
+  {
+   "name": "libSceNpManager.sprx",
+   "start": "0x800c60000",
+   "end": "0x800ca4000",
+   "prot": 5
+  },
+  {
+   "name": "libSceNpGameIntent.sprx",
+   "start": "0x800cc4000",
+   "end": "0x800cc8000",
+   "prot": 5
+  },
+  {
+   "name": "libSceNpWebApi.sprx",
+   "start": "0x800cd4000",
+   "end": "0x800ce8000",
+   "prot": 5
+  },
+  {
+   "name": "libSceNpWebApi2.sprx",
+   "start": "0x800cf8000",
+   "end": "0x800d18000",
+   "prot": 5
+  },
+  {
+   "name": "libSceSaveData.sprx",
+   "start": "0x800d28000",
+   "end": "0x800d70000",
+   "prot": 5
+  },
+  {
+   "name": "libSceSystemService.sprx",
+   "start": "0x800d90000",
+   "end": "0x800dbc000",
+   "prot": 5
+  },
+  {
+   "name": "libSceUserService.sprx",
+   "start": "0x800de4000",
+   "end": "0x800df4000",
+   "prot": 5
+  },
+  {
+   "name": "libSceCommonDialog.sprx",
+   "start": "0x800e04000",
+   "end": "0x800e08000",
+   "prot": 5
+  },
+  {
+   "name": "libSceSysUtil.sprx",
+   "start": "0x800e14000",
+   "end": "0x800e18000",
+   "prot": 5
+  },
+  {
+   "name": "libSceDiscMap.sprx",
+   "start": "0x800e24000",
+   "end": "0x800e28000",
+   "prot": 5
+  },
+  {
+   "name": "libSceAppContent.sprx",
+   "start": "0x800e34000",
+   "end": "0x800e38000",
+   "prot": 5
+  },
+  {
+   "name": "libScePlayGo.sprx",
+   "start": "0x800e48000",
+   "end": "0x800e4c000",
+   "prot": 5
+  },
+  {
+   "name": "libSceScreenShot.sprx",
+   "start": "0x800e58000",
+   "end": "0x800e5c000",
+   "prot": 5
+  },
+  {
+   "name": "libSceResourceArbitrator.sprx",
+   "start": "0x800e68000",
+   "end": "0x800e6c000",
+   "prot": 5
+  },
+  {
+   "name": "libSceAvcap2.sprx",
+   "start": "0x800e78000",
+   "end": "0x800e80000",
+   "prot": 5
+  },
+  {
+   "name": "libSceVideoRecording.sprx",
+   "start": "0x800ea4000",
+   "end": "0x800ef4000",
+   "prot": 5
+  },
+  {
+   "name": "libSceContentExport.sprx",
+   "start": "0x800f0c000",
+   "end": "0x800f28000",
+   "prot": 5
+  },
+  {
+   "name": "libSceSharePlay.sprx",
+   "start": "0x800f38000",
+   "end": "0x800f3c000",
+   "prot": 5
+  },
+  {
+   "name": "libSceGameLiveStreaming.sprx",
+   "start": "0x800f48000",
+   "end": "0x800f50000",
+   "prot": 5
+  },
+  {
+   "name": "libSceNpUtility.sprx",
+   "start": "0x800f60000",
+   "end": "0x800f80000",
+   "prot": 5
+  },
+  {
+   "name": "libSceSigninDialog.sprx",
+   "start": "0x800f98000",
+   "end": "0x800f9c000",
+   "prot": 5
+  },
+  {
+   "name": "libSceNpCommerce.sprx",
+   "start": "0x800fac000",
+   "end": "0x800fb0000",
+   "prot": 5
+  },
+  {
+   "name": "libSceJson2.sprx",
+   "start": "0x800fbc000",
+   "end": "0x800fcc000",
+   "prot": 5
+  },
+  {
+   "name": "libSceNpProfileDialog.sprx",
+   "start": "0x800fd8000",
+   "end": "0x800fdc000",
+   "prot": 5
+  },
+  {
+   "name": "libSceWebBrowserDialog.sprx",
+   "start": "0x800fe8000",
+   "end": "0x800ff0000",
+   "prot": 5
+  },
+  {
+   "name": "libSceInvitationDialog.sprx",
+   "start": "0x800ffc000",
+   "end": "0x801000000",
+   "prot": 5
+  },
+  {
+   "name": "libSceErrorDialog.sprx",
+   "start": "0x80100c000",
+   "end": "0x801010000",
+   "prot": 5
+  },
+  {
+   "name": "libSceNpTrophy.sprx",
+   "start": "0x801020000",
+   "end": "0x801040000",
+   "prot": 5
+  },
+  {
+   "name": "libSceNpTus.sprx",
+   "start": "0x801054000",
+   "end": "0x80105c000",
+   "prot": 5
+  },
+  {
+   "name": "libSceIme.sprx",
+   "start": "0x801068000",
+   "end": "0x801080000",
+   "prot": 5
+  },
+  {
+   "name": "libSceImeDialog.sprx",
+   "start": "0x8010ac000",
+   "end": "0x8010b4000",
+   "prot": 5
+  },
+  {
+   "name": "libSceAvPlayer.sprx",
+   "start": "0x8010c0000",
+   "end": "0x801100000",
+   "prot": 5
+  },
+  {
+   "name": "libSceVdecSavc2.sprx",
+   "start": "0x801118000",
+   "end": "0x801174000",
+   "prot": 5
+  },
+  {
+   "name": "libSceVdecCore.sprx",
+   "start": "0x8011c4000",
+   "end": "0x801244000",
+   "prot": 5
+  },
+  {
+   "name": "libSceVideodec2.sprx",
+   "start": "0x801294000",
+   "end": "0x80129c000",
+   "prot": 5
+  },
+  {
+   "name": "libSceAudiodec.sprx",
+   "start": "0x8012a8000",
+   "end": "0x8012b0000",
+   "prot": 5
+  },
+  {
+   "name": "libSceAudio3d.sprx",
+   "start": "0x8012bc000",
+   "end": "0x8012c0000",
+   "prot": 5
+  },
+  {
+   "name": "libSceSaveDataDialog.sprx",
+   "start": "0x8012cc000",
+   "end": "0x8012e4000",
+   "prot": 5
+  },
+  {
+   "name": "(NoName)eboot.bin",
+   "start": "0xc80000000",
+   "end": "0xc80048000",
+   "prot": 3
+  },
+  {
+   "name": "executable",
+   "start": "0x5200000",
+   "end": "0x5288000",
+   "prot": 3
+  },
+  {
+   "name": "executable",
+   "start": "0x5288000",
+   "end": "0x58bc000",
+   "prot": 3
+  },
+  {
+   "name": "libSceFios2.prx",
+   "start": "0x80064000",
+   "end": "0x80074000",
+   "prot": 3
+  },
+  {
+   "name": "libSceFios2.prx",
+   "start": "0x80074000",
+   "end": "0x80190000",
+   "prot": 3
+  },
+  {
+   "name": "libc.prx",
+   "start": "0x802ac000",
+   "end": "0x802b8000",
+   "prot": 3
+  },
+  {
+   "name": "libc.prx",
+   "start": "0x802b8000",
+   "end": "0x802bc000",
+   "prot": 3
+  },
+  {
+   "name": "libSceNpToolkit2.prx",
+   "start": "0x80368000",
+   "end": "0x8036c000",
+   "prot": 3
+  },
+  {
+   "name": "libSceNpToolkit2.prx",
+   "start": "0x8036c000",
+   "end": "0x80378000",
+   "prot": 3
+  },
+  {
+   "name": "AkSineTone.prx",
+   "start": "0x80778000",
+   "end": "0x8077c000",
+   "prot": 3
+  },
+  {
+   "name": "AkSilenceGenerator.prx",
+   "start": "0x80b7c000",
+   "end": "0x80b80000",
+   "prot": 3
+  },
+  {
+   "name": "AkToneGen.prx",
+   "start": "0x80f80000",
+   "end": "0x80f84000",
+   "prot": 3
+  },
+  {
+   "name": "McDSP.prx",
+   "start": "0x81384000",
+   "end": "0x81388000",
+   "prot": 3
+  },
+  {
+   "name": "AkParametricEQ.prx",
+   "start": "0x81788000",
+   "end": "0x8178c000",
+   "prot": 3
+  },
+  {
+   "name": "AkDelay.prx",
+   "start": "0x81b8c000",
+   "end": "0x81b90000",
+   "prot": 3
+  },
+  {
+   "name": "AkCompressor.prx",
+   "start": "0x81f90000",
+   "end": "0x81f94000",
+   "prot": 3
+  },
+  {
+   "name": "AkExpander.prx",
+   "start": "0x82394000",
+   "end": "0x82398000",
+   "prot": 3
+  },
+  {
+   "name": "AkMatrixReverb.prx",
+   "start": "0x82798000",
+   "end": "0x8279c000",
+   "prot": 3
+  },
+  {
+   "name": "AkRoomVerb.prx",
+   "start": "0x82b9c000",
+   "end": "0x82ba0000",
+   "prot": 3
+  },
+  {
+   "name": "AkFlanger.prx",
+   "start": "0x82fa0000",
+   "end": "0x82fa4000",
+   "prot": 3
+  },
+  {
+   "name": "AkGuitarDistortion.prx",
+   "start": "0x833a4000",
+   "end": "0x833a8000",
+   "prot": 3
+  }
+ ]
+}

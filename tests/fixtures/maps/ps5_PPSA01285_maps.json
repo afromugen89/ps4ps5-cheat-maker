@@ -1,0 +1,577 @@
+{
+ "note": "Map list (no memory) recorded on Kein's PS5, console test C1, 2026-11-01; trimmed.",
+ "server_version": "1.3",
+ "game": {
+  "pid": 2176,
+  "title_id": "PPSA01285",
+  "title": "eboot.bin",
+  "version": "03.000.005",
+  "process": "eboot.bin"
+ },
+ "maps": [
+  {
+   "name": "executable",
+   "start": "0x400000",
+   "end": "0x65d8000",
+   "prot": 5
+  },
+  {
+   "name": "executable",
+   "start": "0x65d8000",
+   "end": "0x8384000",
+   "prot": 1
+  },
+  {
+   "name": "executable",
+   "start": "0x8384000",
+   "end": "0x8ef0000",
+   "prot": 1
+  },
+  {
+   "name": "executable",
+   "start": "0x8ef0000",
+   "end": "0x8f00000",
+   "prot": 3
+  },
+  {
+   "name": "executable",
+   "start": "0x8f00000",
+   "end": "0x8f34000",
+   "prot": 1
+  },
+  {
+   "name": "executable",
+   "start": "0x8f34000",
+   "end": "0x8f5c000",
+   "prot": 3
+  },
+  {
+   "name": "executable",
+   "start": "0x8f5c000",
+   "end": "0x94e4000",
+   "prot": 3
+  },
+  {
+   "name": "libc.prx",
+   "start": "0x80000000",
+   "end": "0x800cc000",
+   "prot": 5
+  },
+  {
+   "name": "libSceNpCppWebApi.prx",
+   "start": "0x80118000",
+   "end": "0x803d4000",
+   "prot": 5
+  },
+  {
+   "name": "(NoName)eboot.bin",
+   "start": "0x6ff9ac000",
+   "end": "0x700000000",
+   "prot": 0
+  },
+  {
+   "name": "(NoName)eboot.bin",
+   "start": "0x7eedf8000",
+   "end": "0x7eedfc000",
+   "prot": 0
+  },
+  {
+   "name": "(NoName)SceSysCore.elf",
+   "start": "0x7eeffc000",
+   "end": "0x7ef000000",
+   "prot": 5
+  },
+  {
+   "name": "libkernel.sprx",
+   "start": "0x800000000",
+   "end": "0x800048000",
+   "prot": 5
+  },
+  {
+   "name": "libSceLibcInternal.sprx",
+   "start": "0x8000a4000",
+   "end": "0x8001cc000",
+   "prot": 5
+  },
+  {
+   "name": "libSceSysmodule.sprx",
+   "start": "0x80026c000",
+   "end": "0x800278000",
+   "prot": 5
+  },
+  {
+   "name": "libSceAmpr.sprx",
+   "start": "0x800298000",
+   "end": "0x8002a0000",
+   "prot": 5
+  },
+  {
+   "name": "libSceNet.sprx",
+   "start": "0x8002ac000",
+   "end": "0x8002e0000",
+   "prot": 5
+  },
+  {
+   "name": "libSceIpmi.sprx",
+   "start": "0x800494000",
+   "end": "0x80049c000",
+   "prot": 5
+  },
+  {
+   "name": "libSceMbus.sprx",
+   "start": "0x8004b8000",
+   "end": "0x8004c0000",
+   "prot": 5
+  },
+  {
+   "name": "libSceRegMgr.sprx",
+   "start": "0x8004cc000",
+   "end": "0x8004d0000",
+   "prot": 5
+  },
+  {
+   "name": "libSceRtc.sprx",
+   "start": "0x8004dc000",
+   "end": "0x8004e0000",
+   "prot": 5
+  },
+  {
+   "name": "libSceRazorCpu.sprx",
+   "start": "0x8004ec000",
+   "end": "0x8004f8000",
+   "prot": 5
+  },
+  {
+   "name": "libSceAvSetting.sprx",
+   "start": "0x800508000",
+   "end": "0x80051c000",
+   "prot": 5
+  },
+  {
+   "name": "libSceVideoOut.sprx",
+   "start": "0x80052c000",
+   "end": "0x80054c000",
+   "prot": 5
+  },
+  {
+   "name": "libSceAgcDriver.sprx",
+   "start": "0x800564000",
+   "end": "0x800570000",
+   "prot": 5
+  },
+  {
+   "name": "libSceAgc.sprx",
+   "start": "0x800588000",
+   "end": "0x8005a0000",
+   "prot": 5
+  },
+  {
+   "name": "libSceAudioOut.sprx",
+   "start": "0x8005d4000",
+   "end": "0x800628000",
+   "prot": 5
+  },
+  {
+   "name": "libSceAudioIn.sprx",
+   "start": "0x8009ac000",
+   "end": "0x8009b4000",
+   "prot": 5
+  },
+  {
+   "name": "libSceAjmi.sprx",
+   "start": "0x8009c0000",
+   "end": "0x8009c4000",
+   "prot": 5
+  },
+  {
+   "name": "libSceAjm.native.sprx",
+   "start": "0x8009d0000",
+   "end": "0x8009dc000",
+   "prot": 5
+  },
+  {
+   "name": "libScePad.sprx",
+   "start": "0x8009f8000",
+   "end": "0x800a14000",
+   "prot": 5
+  },
+  {
+   "name": "libSceNetCtl.sprx",
+   "start": "0x800a2c000",
+   "end": "0x800a34000",
+   "prot": 5
+  },
+  {
+   "name": "libSceSsl.sprx",
+   "start": "0x800a40000",
+   "end": "0x800b34000",
+   "prot": 5
+  },
+  {
+   "name": "libSceHttpCache.sprx",
+   "start": "0x800bac000",
+   "end": "0x800bf4000",
+   "prot": 5
+  },
+  {
+   "name": "libSceHttp.sprx",
+   "start": "0x800c0c000",
+   "end": "0x800c3c000",
+   "prot": 5
+  },
+  {
+   "name": "libSceHttp2.sprx",
+   "start": "0x800c54000",
+   "end": "0x800c80000",
+   "prot": 5
+  },
+  {
+   "name": "libSceNpCommon.sprx",
+   "start": "0x800c94000",
+   "end": "0x800cc8000",
+   "prot": 5
+  },
+  {
+   "name": "libSceNpManager.sprx",
+   "start": "0x800ce4000",
+   "end": "0x800d28000",
+   "prot": 5
+  },
+  {
+   "name": "libSceNpGameIntent.sprx",
+   "start": "0x800d48000",
+   "end": "0x800d4c000",
+   "prot": 5
+  },
+  {
+   "name": "libSceNpWebApi2.sprx",
+   "start": "0x800d58000",
+   "end": "0x800d78000",
+   "prot": 5
+  },
+  {
+   "name": "libSceSaveData.native.sprx",
+   "start": "0x800d88000",
+   "end": "0x800dbc000",
+   "prot": 5
+  },
+  {
+   "name": "libSceSystemService.sprx",
+   "start": "0x800dd4000",
+   "end": "0x800e00000",
+   "prot": 5
+  },
+  {
+   "name": "libSceUserService.sprx",
+   "start": "0x800e28000",
+   "end": "0x800e38000",
+   "prot": 5
+  },
+  {
+   "name": "libSceCommonDialog.sprx",
+   "start": "0x800e48000",
+   "end": "0x800e4c000",
+   "prot": 5
+  },
+  {
+   "name": "libSceSysUtil.sprx",
+   "start": "0x800e58000",
+   "end": "0x800e5c000",
+   "prot": 5
+  },
+  {
+   "name": "libSceAppContent.sprx",
+   "start": "0x800e68000",
+   "end": "0x800e6c000",
+   "prot": 5
+  },
+  {
+   "name": "libSceJson2.sprx",
+   "start": "0x800e7c000",
+   "end": "0x800e8c000",
+   "prot": 5
+  },
+  {
+   "name": "libSceNpUniversalDataSystem.spr",
+   "start": "0x800e98000",
+   "end": "0x800ea8000",
+   "prot": 5
+  },
+  {
+   "name": "libSceRandom.sprx",
+   "start": "0x800eb8000",
+   "end": "0x800ebc000",
+   "prot": 5
+  },
+  {
+   "name": "libSceSystemLogger2Game.sprx",
+   "start": "0x800ec8000",
+   "end": "0x800edc000",
+   "prot": 5
+  },
+  {
+   "name": "libSceNpSessionSignaling.sprx",
+   "start": "0x800eec000",
+   "end": "0x800f8c000",
+   "prot": 5
+  },
+  {
+   "name": "libScePlayerInvitationDialog.sp",
+   "start": "0x800fc8000",
+   "end": "0x800fcc000",
+   "prot": 5
+  },
+  {
+   "name": "libSceCdlgG2P.sprx",
+   "start": "0x800fd8000",
+   "end": "0x800fdc000",
+   "prot": 5
+  },
+  {
+   "name": "libSceCdlgPlayerReview.sprx",
+   "start": "0x800fe8000",
+   "end": "0x800fec000",
+   "prot": 5
+  },
+  {
+   "name": "libSceVoiceChat.sprx",
+   "start": "0x800ff8000",
+   "end": "0x801004000",
+   "prot": 5
+  },
+  {
+   "name": "libSceNpTrophy2.sprx",
+   "start": "0x801010000",
+   "end": "0x801020000",
+   "prot": 5
+  },
+  {
+   "name": "libSceAcm.sprx",
+   "start": "0x80102c000",
+   "end": "0x801038000",
+   "prot": 5
+  },
+  {
+   "name": "libSceAudioPropagation.sprx",
+   "start": "0x801044000",
+   "end": "0x80105c000",
+   "prot": 5
+  },
+  {
+   "name": "libSceShare.native.sprx",
+   "start": "0x801080000",
+   "end": "0x801090000",
+   "prot": 5
+  },
+  {
+   "name": "libSceIme.sprx",
+   "start": "0x80109c000",
+   "end": "0x8010b4000",
+   "prot": 5
+  },
+  {
+   "name": "libSceImeDialog.sprx",
+   "start": "0x8010e0000",
+   "end": "0x8010e8000",
+   "prot": 5
+  },
+  {
+   "name": "ulobjmgr.sprx",
+   "start": "0x8010f4000",
+   "end": "0x8010f8000",
+   "prot": 5
+  },
+  {
+   "name": "libSceFiber.sprx",
+   "start": "0x801104000",
+   "end": "0x801108000",
+   "prot": 5
+  },
+  {
+   "name": "libSceAudiodec.native.sprx",
+   "start": "0x801114000",
+   "end": "0x801118000",
+   "prot": 5
+  },
+  {
+   "name": "libSceVdecCore.native.sprx",
+   "start": "0x801124000",
+   "end": "0x8011b8000",
+   "prot": 5
+  },
+  {
+   "name": "libSceVideodec2.sprx",
+   "start": "0x801220000",
+   "end": "0x801228000",
+   "prot": 5
+  },
+  {
+   "name": "libSceAvPlayer.native.sprx",
+   "start": "0x801234000",
+   "end": "0x801410000",
+   "prot": 5
+  },
+  {
+   "name": "libSceVdecSvp9.native.sprx",
+   "start": "0x8014b0000",
+   "end": "0x80150c000",
+   "prot": 5
+  },
+  {
+   "name": "libSceVdecSavc2.native.sprx",
+   "start": "0x801584000",
+   "end": "0x8015e8000",
+   "prot": 5
+  },
+  {
+   "name": "libSceSaveDataDialog.native.spr",
+   "start": "0x801638000",
+   "end": "0x801650000",
+   "prot": 5
+  },
+  {
+   "name": "libSceGameUpdate.sprx",
+   "start": "0x801660000",
+   "end": "0x801664000",
+   "prot": 5
+  },
+  {
+   "name": "libSceNpEntitlementAccess.sprx",
+   "start": "0x801670000",
+   "end": "0x801674000",
+   "prot": 5
+  },
+  {
+   "name": "(NoName)eboot.bin",
+   "start": "0x8ff9ac000",
+   "end": "0x900000000",
+   "prot": 0
+  },
+  {
+   "name": "(NoName)eboot.bin",
+   "start": "0xc80000000",
+   "end": "0xc80048000",
+   "prot": 3
+  },
+  {
+   "name": "executable",
+   "start": "0x8ef0000",
+   "end": "0x8f00000",
+   "prot": 3
+  },
+  {
+   "name": "executable",
+   "start": "0x8f34000",
+   "end": "0x8f5c000",
+   "prot": 3
+  },
+  {
+   "name": "executable",
+   "start": "0x8f5c000",
+   "end": "0x94e4000",
+   "prot": 3
+  },
+  {
+   "name": "libc.prx",
+   "start": "0x80110000",
+   "end": "0x80114000",
+   "prot": 3
+  },
+  {
+   "name": "libc.prx",
+   "start": "0x80114000",
+   "end": "0x80118000",
+   "prot": 3
+  },
+  {
+   "name": "libSceNpCppWebApi.prx",
+   "start": "0x80594000",
+   "end": "0x80598000",
+   "prot": 3
+  },
+  {
+   "name": "anon:0008009af2a1",
+   "start": "0x200000000",
+   "end": "0x200014000",
+   "prot": 3
+  },
+  {
+   "name": "anon:000800e49077",
+   "start": "0x200018000",
+   "end": "0x20001c000",
+   "prot": 3
+  },
+  {
+   "name": "1200df0cd0",
+   "start": "0x20001c000",
+   "end": "0x20021c000",
+   "prot": 3
+  },
+  {
+   "name": "/SceAuOut2SysShm0x880",
+   "start": "0x200220000",
+   "end": "0x200224000",
+   "prot": 3
+  },
+  {
+   "name": "/SceAuOut2ContShm0x8800x0",
+   "start": "0x200224000",
+   "end": "0x200588000",
+   "prot": 3
+  },
+  {
+   "name": "/SceAuOut2ChPShmP880C0P800010",
+   "start": "0x200588000",
+   "end": "0x2005a8000",
+   "prot": 3
+  },
+  {
+   "name": "/SceAuOut2ChPShmP880C0P830011",
+   "start": "0x2005a8000",
+   "end": "0x2005c8000",
+   "prot": 3
+  },
+  {
+   "name": "/SceAuOut2ChPShmP880C0P840012",
+   "start": "0x2005c8000",
+   "end": "0x2005e0000",
+   "prot": 3
+  },
+  {
+   "name": "/SceAuOut2ChPShmP880C0P840013",
+   "start": "0x2005e0000",
+   "end": "0x2005f8000",
+   "prot": 3
+  },
+  {
+   "name": "/SceAuOut2ChPShmP880C0P800014",
+   "start": "0x2005f8000",
+   "end": "0x200610000",
+   "prot": 3
+  },
+  {
+   "name": "/SceAuOut2ChPShmP880C0P0",
+   "start": "0x200610000",
+   "end": "0x200628000",
+   "prot": 3
+  },
+  {
+   "name": "/SceAuOut2ChPShmP880C0P820015",
+   "start": "0x200628000",
+   "end": "0x200640000",
+   "prot": 3
+  },
+  {
+   "name": "/SceAuOut2ChPShmP880C0P810016",
+   "start": "0x200640000",
+   "end": "0x200658000",
+   "prot": 3
+  },
+  {
+   "name": "/SceAuOut2ChPShmP880C0P820017",
+   "start": "0x200658000",
+   "end": "0x200678000",
+   "prot": 3
+  }
+ ]
+}

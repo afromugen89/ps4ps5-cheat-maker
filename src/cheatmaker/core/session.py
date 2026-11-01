@@ -59,9 +59,18 @@ def parse_version(text: str) -> tuple[int, ...]:
     return tuple(int(n) for n in nums)
 
 
-def _is_main_module(m: MemMap, process: str) -> bool:
-    name = m.name.lower()
-    return name in (process.lower(), MAIN_MODULE) or name.endswith(MAIN_MODULE)
+EXECUTABLE_MAP = "executable"
+"""What PS5Debug-NG 1.3 calls the game's own module in the memory map, for PS5 and
+PS4 games alike (seen on Kein's PS5, console test C1). Other maps named
+"(NoName)eboot.bin" are unrelated system areas and must not be used as the base."""
+
+
+def _main_module_maps(maps: list[MemMap], process: str) -> list[MemMap]:
+    for wanted in (EXECUTABLE_MAP, process.lower(), MAIN_MODULE):
+        found = [m for m in maps if m.name.lower() == wanted]
+        if found and any(m.executable for m in found):
+            return found
+    return []
 
 
 class Session:
@@ -133,9 +142,9 @@ class Session:
             self._set_game(None)
             raise GameNotFound("no PPSA/CUSA process running")
         base, end = self._module_range(client.maps(pid), process)
-        game = GameInfo(
-            pid, title_id.upper(), title or title_id, version or "unknown", process, base, end
-        )
+        if not title or title.lower() in (process.lower(), MAIN_MODULE):
+            title = title_id.upper()  # NG 1.3 reports "eboot.bin" as the name
+        game = GameInfo(pid, title_id.upper(), title, version or "unknown", process, base, end)
         log.info(
             "action=detect_game pid=%d title_id=%s version=%s process=%s base=%#x",
             pid,
@@ -149,18 +158,16 @@ class Session:
 
     @staticmethod
     def _module_range(maps: list[MemMap], process: str) -> tuple[int, int]:
-        mods = [m for m in maps if _is_main_module(m, process)]
+        mods = _main_module_maps(maps, process)
         if not mods:
-            # Fall back to the lowest executable map; logged so S1 can confirm names.
+            # Fall back to the lowest executable map, and log it.
             exe = [m for m in maps if m.executable]
             if not exe:
                 raise GameNotFound("can't find the game's main module in its memory map")
-            log.warning(
-                "action=detect_game no map named %s; using lowest executable map %r",
-                MAIN_MODULE,
-                min(exe, key=lambda m: m.start).name,
-            )
             first = min(exe, key=lambda m: m.start)
+            log.warning(
+                "action=detect_game no main-module map; using lowest executable %r", first.name
+            )
             mods = [m for m in maps if m.name == first.name] or [first]
         return min(m.start for m in mods), max(m.end for m in mods)
 
