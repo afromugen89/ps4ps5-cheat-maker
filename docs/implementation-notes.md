@@ -24,6 +24,27 @@ and the AC-8.1 usability test) is not done.
 - `.shn` is written exactly like the real GoldHEN files (declares utf-16, stored as ASCII with CRLF).
 - Saved cheats that came from a value write their value once when toggled (files can't freeze).
 
+## v2: cheats that survive a game update (2026-11-01)
+
+Spec §5 left two items for v2: wider code patching and update-proof cheats. Lock it,
+player-only caves and the pointer scan already shipped in the v1 branch, so v2 starts
+with update-proof cheats (`core/updater.py`).
+
+- **Learn** (old version running, read only): for every code line that isn't a cave,
+  store a signature: the original bytes plus the following instructions, with jump
+  distances and RIP-relative displacements as `??`. Grown until unique in the game's
+  code (16 to 96 bytes). Saved to app data `signatures/{title}_{version}.json`.
+  Runs automatically whenever a file's own version is running and a line has no
+  signature yet. Live bytes are overlaid with each line's `off` bytes, so cheats can be on.
+- **Move** (new version running): patches move to their unique signature match
+  (fallback: the `off` bytes alone, 6+ bytes, unique, reported as a guess). Caves
+  (patches over zero bytes) move together to spare zeros at the end of the code, and
+  lines inside a cave move with it. Every jump / RIP-relative operand in moved code is
+  re-aimed; a target outside the moved patches and caves fails that cheat with a reason.
+  Instruction sizes never change, so short jumps inside caves stay valid.
+- Not handled: saved static values (`MODULE_VALUE`), session-only cheats, and patches
+  whose original instruction itself changed between versions (reported, not guessed).
+
 ## Unknown-value search on the PS5 (resolved 2026-11-01)
 
 Kein asked for it to be built. It uses PS5Debug-NG's own snapshot engine, so memory stays

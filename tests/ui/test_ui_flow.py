@@ -465,3 +465,57 @@ def test_filter_listed_rows_by_value(win, fake):
     assert f.rows[[f.table.isRowHidden(i) for i in range(2)].index(False)].address == HEALTH_ADDR
     f.filter.clear()
     assert not any(f.table.isRowHidden(i) for i in range(2))
+
+
+def test_update_cheats_for_new_game_version(win, fake, tmp_path):
+    """v2: learn signatures while 01.000 runs, then move the cheat after an update."""
+    from tests.conftest import MODULE_BASE
+
+    vmovss = bytes.fromhex("C4C17A118C24AC020000")
+
+    def site(rip_disp: int) -> bytes:  # mov rax,[rip+disp]; vmovss [r12+2AC],xmm1; ret
+        return bytes.fromhex("488B05") + struct.pack("<i", rip_disp) + vmovss + b"\xc3"
+
+    fake.poke(PID, MODULE_BASE + 0x200, site(0x100))
+    connect(win)
+    old = tmp_path / "PPSA01234_01.000.json"
+    old.write_text(
+        json.dumps(
+            {
+                "name": "T",
+                "id": "PPSA01234",
+                "version": "01.000",
+                "process": "eboot.bin",
+                "mods": [
+                    {
+                        "name": "No damage",
+                        "type": "checkbox",
+                        "memory": [{"offset": "207", "on": "90" * 10, "off": vmovss.hex()}],
+                    }
+                ],
+            }
+        )
+    )
+    win.cheats.pick_file = lambda: str(old)
+    win.cheats.open_btn.click()
+    assert win.cheats.update_btn.isHidden()
+    from cheatmaker.core import updater as up
+
+    learned = up.load_signatures(up.signatures_path("PPSA01234", "01.000"))
+    assert learned[0x207].text().startswith("C4 C1 7A 11 8C 24 AC 02 00 00 C3")
+
+    # the game updates: code moves and the RIP-relative distance changes
+    fake.poke(PID, MODULE_BASE + 0x200, b"\xcc" * 18)
+    fake.poke(PID, MODULE_BASE + 0x340, site(0x80))
+    fake._procs[PID].version = "01.010"
+    win.ctl.session.refresh_game()
+    assert "made for version 01.000" in win.cheats.warning.text()
+    assert not win.cheats.update_btn.isHidden()
+    win.cheats.update_btn.click()
+    cf = win.ctl.cheat_file
+    assert cf.version == "01.010" and cf.cheats[0].locations[0].offset == 0x347
+    assert "Updated 1 of 1 cheats for version 01.010" in win.cheats.warning.text()
+    assert win.cheats.update_btn.isHidden()
+    win.cheats.table.item(0, COL_ON).setCheckState(Qt.CheckState.Checked)
+    assert fake.peek(PID, MODULE_BASE + 0x347, 10) == b"\x90" * 10
+    assert 0x347 in up.load_signatures(up.signatures_path("PPSA01234", "01.010"))
