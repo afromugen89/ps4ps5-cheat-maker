@@ -12,6 +12,7 @@ import threading
 
 import pytest
 
+from cheatmaker.console.client import ProcInfo
 from cheatmaker.console.ps5debug_ng import (
     INTERRUPT_SIZE,
     MAGIC,
@@ -84,6 +85,9 @@ class FakeNgServer:
                             return
                         if cmd == Cmd.CONSOLE_FOREGROUND_APP and self.foreground == "drop":
                             break  # like a PS5Debug-NG build without this command
+                        if cmd == Cmd.PROC_INFO and struct.unpack("<I", body)[0] == 0:
+                            c.sendall(ERR)  # real NG 1.3: error, then hang up
+                            break
                         self._handle(c, cmd, body)
                 except (EOFError, OSError):
                     continue
@@ -93,7 +97,7 @@ class FakeNgServer:
         if cmd == Cmd.VERSION:
             c.sendall(struct.pack("<I", 3) + b"1.3")
         elif cmd == Cmd.PROC_LIST:
-            procs = f.processes()
+            procs = [ProcInfo(0, "kernel"), *f.processes()]
             c.sendall(
                 OK
                 + struct.pack("<I", len(procs))
@@ -234,7 +238,7 @@ def test_connect_refused_is_unreachable():
 def test_info_commands(client):
     assert client.version() == "1.3"
     procs = client.processes()
-    assert procs[0].pid == PID and procs[0].title_id == "PPSA01234"
+    assert [p.pid for p in procs] == [0, PID] and procs[1].title_id == "PPSA01234"
     fg = client.foreground_app()
     assert (fg.pid, fg.title_id, fg.title, fg.version) == (PID, "PPSA01234", "Test Game", "01.000")
     assert client.maps(PID)[0].name == "eboot.bin"
@@ -268,6 +272,25 @@ def test_session_detects_game_when_foreground_drops():
     s.connect("127.0.0.1")
     g = s.refresh_game()
     assert g.title_id == "PPSA01234" and g.pid == PID
+    s.disconnect()
+
+
+def test_never_asks_info_for_pid0_and_survives_refusals(client, server):
+    """Real PS5Debug-NG 1.3 hangs up after refusing process info for pid 0."""
+    client.processes()
+    assert client.version() == "1.3" and server.connections == 1
+    client._w.request(Cmd.PROC_INFO, struct.pack("<I", 0))
+    assert client._w.status() == Status.ERROR
+
+
+def test_session_with_foreground_skips_process_list(server):
+    from cheatmaker.core.session import Session
+
+    s = Session(lambda ip, port: Ps5DebugNgClient.connect(ip, server.port, timeout=3))
+    s.connect("127.0.0.1")
+    g = s.refresh_game()
+    assert (g.title_id, g.version) == ("PPSA01234", "01.000")
+    assert Cmd.PROC_LIST not in server.commands and Cmd.PROC_INFO not in server.commands
     s.disconnect()
 
 

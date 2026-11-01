@@ -217,10 +217,17 @@ class Ps5DebugNgClient:
             out = []
             for name, pid in entries:
                 title_id = content_id = ""
-                self._w.request(Cmd.PROC_INFO, struct.pack("<I", pid))
-                if self._w.status() == Status.SUCCESS:
-                    rec = self._w.recv(188)
-                    title_id, content_id = _cstr(rec[108:124]), _cstr(rec[124:188])
+                # PS5Debug-NG 1.3 answers process info for pid 0 (kernel) with an
+                # error and then closes the connection, so never ask for it.
+                if pid > 0:
+                    self._w.request(Cmd.PROC_INFO, struct.pack("<I", pid))
+                    if self._w.status() == Status.SUCCESS:
+                        rec = self._w.recv(188)
+                        title_id, content_id = _cstr(rec[108:124]), _cstr(rec[124:188])
+                    else:
+                        # Same server may drop us after any refused info call.
+                        log.info("process info refused for pid %d; reconnecting", pid)
+                        self._reconnect()
                 out.append(ProcInfo(pid, name, title_id, content_id))
             return out
 

@@ -122,15 +122,16 @@ class Session:
         pid, title_id, title, version = None, "", "", ""
         if fg is not None and TITLE_ID_RE.match(fg.title_id):
             pid, title_id, title, version = fg.pid, fg.title_id, fg.title, fg.version
-        else:
+
+        process = MAIN_MODULE
+        if pid is None:
             for p in client.processes():
                 if TITLE_ID_RE.match(p.title_id):
-                    pid, title_id, title = p.pid, p.title_id, p.name
+                    pid, title_id, title, process = p.pid, p.title_id, p.name, p.name
                     break
         if pid is None:
             self._set_game(None)
             raise GameNotFound("no PPSA/CUSA process running")
-        process = next((p.name for p in client.processes() if p.pid == pid), MAIN_MODULE)
         base, end = self._module_range(client.maps(pid), process)
         game = GameInfo(
             pid, title_id.upper(), title or title_id, version or "unknown", process, base, end
