@@ -46,7 +46,11 @@ TS_PARALLEL_COMPARE = 0x80  # turbo request flag asking for that
 AUTH_MAGIC = 0xBB40E64D
 INTERRUPT_PORT = 755
 INTERRUPT_SIZE = 0x4A0
-RIP_OFFSET = 0x30 + 15 * 8  # struct reg: r15..rax (15 regs) then rip
+RIP_OFFSET = 0x30 + 136
+"""FreeBSD amd64 struct reg: r15..rax (15 x 8 = 120 bytes), then trapno/fs/gs/err/es/ds
+(16 bytes), then rip. reg64 starts at 0x30 in the interrupt packet."""
+ATTACH_TIMEOUT = 30.0
+"""Attaching pauses the game and dials back on port 755; it took over 4 s in C4."""
 
 
 class Status(IntEnum):  # on-wire (already bit-swapped) values
@@ -534,11 +538,19 @@ class Ps5DebugNgClient:
         found: list[int] = []
         try:
             with self._lock:
-                self._w.request(Cmd.DEBUG_ATTACH, struct.pack("<I", pid))
-                self._w.ok("debug attach")
+                with self._timeout(ATTACH_TIMEOUT):
+                    self._w.request(Cmd.DEBUG_ATTACH, struct.pack("<I", pid))
+                    status = self._w.status()
+                if status != Status.SUCCESS:
+                    raise ReadFailed(
+                        "The PS5 wouldn't attach the debugger to the game. If a previous "
+                        "Lock it was cut off, restart the game and try again."
+                    )
+                # 24 bytes: index, enabled, length, breaktype (u32 each), address (u64).
+                # A 22-byte packet made NG 1.3 close the connection (C4).
                 self._w.request(
                     Cmd.DEBUG_SET_WATCHPOINT,
-                    struct.pack("<IIIHQ", 0, 1, _DR7_LEN[size], _DR7_WRITE, addr),
+                    struct.pack("<IIIIQ", 0, 1, _DR7_LEN[size], _DR7_WRITE, addr),
                 )
                 self._w.ok("set watchpoint")
             deadline = time.monotonic() + timeout_s
@@ -556,7 +568,7 @@ class Ps5DebugNgClient:
                 with self._lock:
                     self._w.request(
                         Cmd.DEBUG_SET_WATCHPOINT,
-                        struct.pack("<IIIHQ", 0, 0, 0, 0, 0),
+                        struct.pack("<IIIIQ", 0, 0, 0, 0, 0),
                     )
                     self._w.status()
                     self._w.request(Cmd.DEBUG_DETACH)

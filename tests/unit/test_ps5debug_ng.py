@@ -59,6 +59,7 @@ class FakeNgServer:
         self.turbo, self.foreground = turbo, foreground
         self.authed = False
         self.watch_rips: list[int] = []
+        self.watchpoints: list[tuple[int, ...]] = []
         self.commands: list[int] = []
         self.connections = 0
         self.sock = socket.socket()
@@ -217,7 +218,11 @@ class FakeNgServer:
         elif cmd == Cmd.DEBUG_ATTACH:
             c.sendall(OK)
             threading.Thread(target=self._dial_back, daemon=True).start()
-        elif cmd in (Cmd.DEBUG_SET_WATCHPOINT, Cmd.DEBUG_CONTINUE, Cmd.DEBUG_DETACH):
+        elif cmd == Cmd.DEBUG_SET_WATCHPOINT:
+            assert len(body) == 24, "cmd_debug_watchpt_packet is 24 bytes (C4)"
+            self.watchpoints.append(struct.unpack("<IIIIQ", body))
+            c.sendall(OK)
+        elif cmd in (Cmd.DEBUG_CONTINUE, Cmd.DEBUG_DETACH):
             c.sendall(OK)
         else:
             c.sendall(ERR)
@@ -460,3 +465,14 @@ def test_whole_number_search_stays_exact(client, server):
 def _first(cl, regions, value):
     cl.scan_start(PID, regions, ValueType.FLOAT, Compare.EXACT, value)
     return cl.scan_results(100)
+
+
+def test_watchpoint_packet_and_rip_offset(client, server):
+    server.watch_rips = [0x400102]
+    client.watch_writes(PID, HEALTH_ADDR, 4, timeout_s=1.0)
+    # index 0, enabled, DR7 len 4 bytes = 3, write-only = 1, address; then cleared.
+    assert server.watchpoints[0] == (0, 1, 3, 1, HEALTH_ADDR)
+    assert server.watchpoints[-1] == (0, 0, 0, 0, 0)
+    from cheatmaker.console.ps5debug_ng import RIP_OFFSET
+
+    assert RIP_OFFSET == 0xB8  # 0x30 + struct reg offset of r_rip (136)
