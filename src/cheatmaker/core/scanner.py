@@ -11,6 +11,7 @@ from cheatmaker.core.session import Session
 from cheatmaker.core.values import Compare, ValueType, guess_types
 
 log = logging.getLogger(__name__)
+LOG_MATCHES = 50  # match lists this short are written to the log
 
 FEW_MATCHES = 10  # AC-3.4
 
@@ -114,7 +115,7 @@ class Scanner:
 
     def _log_addresses(self) -> None:
         """With only a few matches left, log where they are (helps console-test triage)."""
-        if 0 < self.count <= FEW_MATCHES:
+        if 0 < self.count <= LOG_MATCHES:
             hits = self.session.require_client().scan_results(self.count)
             log.info("action=matches addrs=%s", " ".join(f"{h.address:#x}" for h in hits))
 
