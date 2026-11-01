@@ -8,6 +8,7 @@ Tests build one in code (``add_region``) or load a recorded dump directory
 from __future__ import annotations
 
 import json
+import struct
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -44,6 +45,7 @@ class FakeConsole:
         self.supports_unknown_scan = True
         # addr -> RIPs that "write" it while watched (set by tests / dumps)
         self.writers: dict[int, list[int]] = {}
+        self.pointer_passes: list[tuple[int, int]] = []
         self.writes: list[tuple[int, int, bytes]] = []
         self._lock = threading.RLock()
         self._scan: LocalScanSession | None = None
@@ -200,6 +202,29 @@ class FakeConsole:
     def scan_cancel(self) -> None:
         self._scan = None
         self._scan_pid = None
+
+    def find_pointers(
+        self,
+        pid: int,
+        regions: list[MemMap],
+        low: int,
+        high: int,
+        keep,
+        progress: ProgressFn | None = None,
+        cancel: threading.Event | None = None,
+    ) -> list[tuple[int, int]]:
+        self._alive()
+        self.pointer_passes.append((low, high))
+        out = []
+        for r in regions:
+            data = self.read(pid, r.start, r.size)
+            for off in range(0, len(data) - 7, 8):
+                (v,) = struct.unpack_from("<Q", data, off)
+                if low <= v <= high and keep(v):
+                    out.append((r.start + off, v))
+        if progress:
+            progress(1.0)
+        return out
 
     def watch_writes(self, pid: int, addr: int, size: int, timeout_s: float) -> list[int]:
         self._alive()

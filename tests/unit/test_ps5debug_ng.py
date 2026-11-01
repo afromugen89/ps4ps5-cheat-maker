@@ -210,16 +210,21 @@ class FakeNgServer:
             c.sendall(OK)
             data = f.read(pid, addr, n)
 
+            size = lv // 2 if ct == 4 else lv  # ValueBetween sends low + high
+
             def hit(chunk: bytes) -> bool:
+                if ct == 4:
+                    lo, hi = struct.unpack("<QQ", needle)
+                    return lo <= struct.unpack("<Q", chunk)[0] <= hi
                 if ct == 1:  # FuzzyValue: |scan - mem| < 1.0, float/double only
                     code = {8: "<f", 9: "<d"}[vt]
                     return abs(struct.unpack(code, needle)[0] - struct.unpack(code, chunk)[0]) < 1
                 return chunk == needle
 
             entries = b"".join(
-                struct.pack("<I", o) + data[o : o + lv]
-                for o in range(0, n - lv + 1, align)
-                if hit(data[o : o + lv])
+                struct.pack("<I", o) + data[o : o + size]
+                for o in range(0, n - size + 1, align)
+                if hit(data[o : o + size])
             )
             if entries:
                 c.sendall(struct.pack("<Q", len(entries)) + entries)
@@ -598,3 +603,13 @@ def test_watchpoint_packet_and_rip_offset(client, server):
     from cheatmaker.console.ps5debug_ng import RIP_OFFSET
 
     assert RIP_OFFSET == 0xB8  # 0x30 + struct reg offset of r_rip (136)
+
+
+def test_find_pointers_uses_value_between_and_filters(client, server):
+    server.fake.poke(PID, HEAP_BASE + 0x400, struct.pack("<Q", HEALTH_ADDR - 0x40))
+    server.fake.poke(PID, HEAP_BASE + 0x408, struct.pack("<Q", HEALTH_ADDR - 0x20))
+    regions = [m for m in client.maps(PID) if m.writable]
+    lo, hi = HEALTH_ADDR - 0x1000, HEALTH_ADDR
+    got = client.find_pointers(PID, regions, lo, hi, lambda v: v != HEALTH_ADDR - 0x20)
+    assert got == [(HEAP_BASE + 0x400, HEALTH_ADDR - 0x40)]
+    assert server.scan_compares[-1] == 4

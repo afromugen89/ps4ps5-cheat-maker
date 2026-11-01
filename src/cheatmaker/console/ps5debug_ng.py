@@ -454,6 +454,69 @@ class Ps5DebugNgClient:
             hits = [h for h in hits if matches(vtype, Compare.EXACT, h.value, target=value)]
         return hits
 
+    def _pointer_slice(
+        self, pid: int, start: int, length: int, low: int, high: int, keep
+    ) -> list[tuple[int, int]]:
+        """One console pass: 8-byte aligned values in [low, high] (NG ValueBetween)."""
+        vbytes = struct.pack("<QQ", low, high)
+        turbo = self._has_turbo()
+        hdr = struct.pack(
+            "<IQIBBBI", pid, start, length, _NG_VTYPE[ValueType.INT64], 4, 8, len(vbytes)
+        )
+        body = hdr + (struct.pack("<I", 0) if turbo else b"")
+        out = []
+        unpack = struct.Struct("<IQ").unpack_from
+        with self._lock, self._timeout(SCAN_TIMEOUT):
+            self._w.request(Cmd.TURBOSCAN_START if turbo else Cmd.PROC_SCAN_START, body)
+            self._w.ok("pointer scan", ReadFailed)
+            self._w.send(vbytes)
+            self._w.ok("pointer scan", ReadFailed)
+            while (block_len := self._w.u64()) != SENTINEL_U64:
+                block = self._w.recv(block_len)
+                for off in range(0, len(block) - 11, 12):
+                    rel, value = unpack(block, off)
+                    if keep(value):
+                        out.append((start + rel, value))
+            self._w.ok("pointer scan end", ReadFailed)
+        return out
+
+    def find_pointers(
+        self,
+        pid: int,
+        regions: list[MemMap],
+        low: int,
+        high: int,
+        keep,
+        progress: ProgressFn | None = None,
+        cancel: threading.Event | None = None,
+    ) -> list[tuple[int, int]]:
+        self._auth()
+        ranges = merge_ranges(regions)
+        slices = [
+            (s, min(SCAN_SLICE, end - s))
+            for start, end in ranges
+            for s in range(start, end, SCAN_SLICE)
+        ]
+        total = sum(n for _, n in slices) or 1
+        done, out = 0, []
+        t0 = time.monotonic()
+        for s, n in slices:
+            if cancel is not None and cancel.is_set():
+                raise ScanCancelled("pointer scan cancelled")
+            out.extend(self._pointer_slice(pid, s, n, low, high, keep))
+            done += n
+            if progress:
+                progress(done / total)
+        log.info(
+            "action=pointer_pass low=%#x high=%#x hits=%d mib=%.0f seconds=%.1f",
+            low,
+            high,
+            len(out),
+            total / 2**20,
+            time.monotonic() - t0,
+        )
+        return out
+
     def _scan_ranges(
         self,
         pid: int,

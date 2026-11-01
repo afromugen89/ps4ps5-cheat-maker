@@ -116,6 +116,20 @@ class ConsoleClient(Protocol):
         """Drop the current scan session."""
         ...
 
+    def find_pointers(
+        self,
+        pid: int,
+        regions: list[MemMap],
+        low: int,
+        high: int,
+        keep: Callable[[int], bool],
+        progress: ProgressFn | None = None,
+        cancel: threading.Event | None = None,
+    ) -> list[tuple[int, int]]:
+        """Every 8-byte aligned value in ``regions`` between ``low`` and ``high`` that
+        ``keep`` accepts, as (address, value). Used by the pointer scan."""
+        ...
+
     def watch_writes(self, pid: int, addr: int, size: int, timeout_s: float) -> list[int]:
         """Watch ``addr`` for writes. Returns the RIP reported after each write.
 
