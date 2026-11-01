@@ -123,4 +123,24 @@ def verify_original(session: Session, cheat: Cheat) -> None:
             raise LockFailed("the game's code isn't what we expected; refusing to patch")
 
 
-__all__ = ["Writer", "find_writers", "instruction_before", "make_lock_cheat", "verify_original"]
+def patch_landed(session: Session, cheat: Cheat) -> bool:
+    """After turning a lock on: read the code back. Some writes to code pages are
+    acknowledged without changing anything."""
+    client = session.require_client()
+    game = session.require_game()
+    ok = all(
+        client.read(game.pid, loc.address(game.module_base), len(loc.on)) == loc.on
+        for loc in cheat.locations
+    )
+    log.info("action=lock_test name=%r landed=%s", cheat.name, ok)
+    return ok
+
+
+__all__ = [
+    "Writer",
+    "find_writers",
+    "instruction_before",
+    "make_lock_cheat",
+    "patch_landed",
+    "verify_original",
+]

@@ -175,6 +175,7 @@ def test_lock_it_then_save_json_and_send(win, fake, tmp_path):  # D8, AC-6.1, AC
     assert wiz.options.count() == 1 and "changed it 2 times" in wiz.options.item(0).text()
     wiz.test_btn.click()
     assert fake.peek(PID, WRITER_ADDR, 2) == b"\x90\x90"
+    assert wiz.hint.text().startswith("Option 1 is on")
     wiz.keep_btn.click()
     c = win.ctl.cheat_file.cheats[0]
     assert c.saveable and win.cheats.table.item(0, COL_KEEPS).text() == "Yes"

@@ -13,7 +13,13 @@ from PySide6.QtWidgets import (
 )
 
 from cheatmaker.core.cheats import Cheat
-from cheatmaker.core.locker import Writer, find_writers, make_lock_cheat, verify_original
+from cheatmaker.core.locker import (
+    Writer,
+    find_writers,
+    make_lock_cheat,
+    patch_landed,
+    verify_original,
+)
 from cheatmaker.ui import hints
 from cheatmaker.ui.controller import Controller
 
@@ -119,11 +125,16 @@ class LockWizard(QDialog):
             cheat = make_lock_cheat(self.ctl.session, self.writers[row], self.source.name)
             verify_original(self.ctl.session, cheat)
             self.ctl.live.turn_on(cheat)
+            landed = patch_landed(self.ctl.session, cheat)
         except Exception as exc:
             self.ctl.fail(exc, "lock")
             return
         self.candidate = cheat
-        self.ctl.message.emit("Patched. Play a bit: the value should stop changing.")
+        n = row + 1
+        if landed:
+            self.hint.setText(hints.LOCK_TESTING.format(n=n))
+        else:
+            self.hint.setText(hints.LOCK_NOT_LANDED.format(n=n))
         self._update()
 
     def do_keep(self) -> None:

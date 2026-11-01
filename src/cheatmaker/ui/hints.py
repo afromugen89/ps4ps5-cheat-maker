@@ -17,5 +17,12 @@ CHEATS_SESSION = (
 )
 LOCK_READY = "Press Start, then make the value change in the game within 30 seconds."
 LOCK_WATCHING = "Watching... make the value change in the game now."
+LOCK_TESTING = (
+    "Option {n} is on. Play a bit: if the value still changes, pick the next option and "
+    "press Test it. If it stops, press Keep it."
+)
+LOCK_NOT_LANDED = (
+    "The PS5 said OK but option {n} didn't change the game's code. Try the next option."
+)
 LOCK_PICK = "Pick an option and press Test it. If the game acts strangely, try another."
 SAVE = "Pick a format and press Save to PC, or Send to PS5 if ftpsrv is running."

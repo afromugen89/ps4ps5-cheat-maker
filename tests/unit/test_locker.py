@@ -6,6 +6,7 @@ from cheatmaker.core.locker import (
     find_writers,
     instruction_before,
     make_lock_cheat,
+    patch_landed,
     verify_original,
 )
 from cheatmaker.errors import LockFailed
@@ -70,3 +71,14 @@ def test_verify_original_detects_changed_code(session, fake):
     fake.poke(PID, WRITER_ADDR, b"\x00\x00")
     with pytest.raises(LockFailed):
         verify_original(session, c)
+
+
+def test_patch_landed_reads_code_back(session, fake, monkeypatch):
+    [w] = find_writers(session, HEALTH_ADDR, 4, 1)
+    c = make_lock_cheat(session, w, "x")
+    live = LiveCheats(session, Freezer(session))
+    live.turn_on(c)
+    assert patch_landed(session, c)
+    # A console that acks code writes without applying them (C4 suspicion).
+    fake.poke(PID, WRITER_ADDR, b"\x89\x08")
+    assert not patch_landed(session, c)
