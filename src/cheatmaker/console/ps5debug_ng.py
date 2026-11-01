@@ -102,6 +102,29 @@ def merge_ranges(regions: list[MemMap]) -> list[tuple[int, int]]:
     return out
 
 
+MAX_READ_SPANS = 400
+"""Above this many reads, narrowing down re-scans on the console instead."""
+
+
+def read_spans(addrs: list[int], size: int) -> list[tuple[int, int]]:
+    from cheatmaker.console.local_scan import _batched_reads
+
+    return list(_batched_reads(sorted(addrs), size))
+
+
+def ranges_with(ranges: list[tuple[int, int]], sorted_addrs: list[int]) -> list[tuple[int, int]]:
+    """The ranges that contain at least one of the (sorted) addresses."""
+    import bisect
+
+    starts = [s for s, _ in ranges]
+    keep: dict[int, tuple[int, int]] = {}
+    for a in sorted_addrs:
+        i = bisect.bisect_right(starts, a) - 1
+        if i >= 0 and ranges[i][0] <= a < ranges[i][1]:
+            keep[i] = ranges[i]
+    return [keep[i] for i in sorted(keep)]
+
+
 def _cstr(raw: bytes) -> str:
     return raw.split(b"\x00", 1)[0].decode("utf-8", "replace")
 
@@ -178,6 +201,7 @@ class Ps5DebugNgClient:
         self._turbo_flags = 0
         self._scan: LocalScanSession | None = None
         self._scan_pid: int | None = None
+        self._scan_ranges_list: list[tuple[int, int]] = []
         self._fg_supported = True
 
     @classmethod
@@ -389,6 +413,43 @@ class Ps5DebugNgClient:
             self._w.ok("scan end", ReadFailed)
         return hits
 
+    def _scan_ranges(
+        self,
+        pid: int,
+        ranges: list[tuple[int, int]],
+        vtype: ValueType,
+        value: float | int,
+        progress: ProgressFn | None,
+        cancel: threading.Event | None,
+    ) -> list[ScanHit]:
+        """Exact-value turbo scan over address ranges, in slices for progress/Cancel."""
+        self._auth()
+        slices = [
+            (s, min(SCAN_SLICE, end - s))
+            for start, end in ranges
+            for s in range(start, end, SCAN_SLICE)
+        ]
+        total = sum(n for _, n in slices) or 1
+        done, hits = 0, []
+        t0 = time.monotonic()
+        for s, n in slices:
+            if cancel is not None and cancel.is_set():
+                raise ScanCancelled("scan cancelled by the player")
+            hits.extend(self._scan_slice(pid, s, n, vtype, value))
+            done += n
+            if progress:
+                progress(done / total)
+        log.info(
+            "action=scan_stats requests=%d ranges=%d mib=%.0f seconds=%.1f turbo=%s flags=%#x",
+            len(slices),
+            len(ranges),
+            total / 2**20,
+            time.monotonic() - t0,
+            self._turbo,
+            self._turbo_flags,
+        )
+        return hits
+
     def scan_start(
         self,
         pid: int,
@@ -403,36 +464,14 @@ class Ps5DebugNgClient:
             # Unknown-value first scans must stay on the console (architecture Q3);
             # waiting on console test S2 and an architect decision.
             raise ScanNotSupported("unknown-value search isn't available on the PS5 yet")
-        self._auth()
-        slices = [
-            (s, min(SCAN_SLICE, end - s))
-            for start, end in merge_ranges(regions)
-            for s in range(start, end, SCAN_SLICE)
-        ]
-        total = sum(n for _, n in slices) or 1
-        done, hits = 0, []
-        t0 = time.monotonic()
-        for s, n in slices:
-            if cancel is not None and cancel.is_set():
-                raise ScanCancelled("scan cancelled by the player")
-            hits.extend(self._scan_slice(pid, s, n, vtype, value))
-            done += n
-            if progress:
-                progress(done / total)
-        log.info(
-            "action=scan_stats requests=%d regions=%d mib=%.0f seconds=%.1f turbo=%s flags=%#x",
-            len(slices),
-            len(regions),
-            total / 2**20,
-            time.monotonic() - t0,
-            self._turbo,
-            self._turbo_flags,
-        )
-        self._scan = LocalScanSession(
-            lambda a, n: self.read(pid, a, n), lambda spans: self.read_many(pid, spans)
-        )
+        ranges = merge_ranges(regions)
+        hits = self._scan_ranges(pid, ranges, vtype, value, progress, cancel)
+        # PROC_SCAN_GET (bulk read) timed out on PS5Debug-NG 1.3 (console test C3),
+        # so only plain reads are used for re-checking candidates.
+        self._scan = LocalScanSession(lambda a, n: self.read(pid, a, n))
         self._scan.set_results(vtype, hits)
         self._scan_pid = pid
+        self._scan_ranges_list = ranges
         return len(hits)
 
     def scan_next(
@@ -442,9 +481,26 @@ class Ps5DebugNgClient:
         progress: ProgressFn | None = None,
         cancel: threading.Event | None = None,
     ) -> int:
-        if self._scan is None:
+        """Narrow down. Few candidates: read them. Many: for an exact number, scan
+        again on the console over the ranges that still hold candidates and keep the
+        overlap (one read per candidate is ~36 ms on the PS5, far too slow)."""
+        scan = self._scan
+        if scan is None or scan.vtype is None or self._scan_pid is None:
             raise ValueError("no scan to narrow down; start a new search")
-        return self._scan.next(cmp, value, progress, cancel)
+        spans = read_spans([h.address for h in scan.hits], scan.vtype.size)
+        if len(spans) <= MAX_READ_SPANS:
+            return scan.next(cmp, value, progress, cancel)
+        if cmp is not Compare.EXACT or value is None:
+            raise ValueError(
+                f"{len(scan.hits):,} matches is too many to compare. Type the number you "
+                "see now to narrow it down first."
+            )
+        addrs = {h.address for h in scan.hits}
+        ranges = ranges_with(self._scan_ranges_list, sorted(addrs))
+        new = self._scan_ranges(self._scan_pid, ranges, scan.vtype, value, progress, cancel)
+        scan.set_results(scan.vtype, [h for h in new if h.address in addrs])
+        self._scan_ranges_list = ranges
+        return len(scan.hits)
 
     def scan_results(self, limit: int) -> list[ScanHit]:
         return [] if self._scan is None else self._scan.results(limit)

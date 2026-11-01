@@ -336,7 +336,26 @@ def test_scan_exact_and_next(turbo):
     server.fake.poke(PID, HEALTH_ADDR, struct.pack("<i", 90))
     assert cl.scan_next(Compare.EXACT, 90) == 1
     assert cl.scan_results(10)[0].address == HEALTH_ADDR
-    assert Cmd.PROC_SCAN_GET in server.commands
+    assert Cmd.PROC_SCAN_GET not in server.commands  # timed out on real NG 1.3 (C3)
+    cl.close()
+
+
+def test_next_scan_rescans_on_console_when_many_candidates(monkeypatch):
+    from cheatmaker.console import ps5debug_ng
+
+    monkeypatch.setattr(ps5debug_ng, "MAX_READ_SPANS", 0)
+    server = FakeNgServer()
+    cl = Ps5DebugNgClient.connect("127.0.0.1", server.port, timeout=3)
+    regions = [m for m in cl.maps(PID) if m.writable]
+    assert cl.scan_start(PID, regions, ValueType.INT32, Compare.EXACT, 100) == 2
+    server.fake.poke(PID, HEALTH_ADDR, struct.pack("<i", 90))
+    server.fake.poke(PID, HEAP_BASE + 0x300, struct.pack("<i", 90))  # new 90, not a candidate
+    reads_before = server.commands.count(Cmd.PROC_READ)
+    assert cl.scan_next(Compare.EXACT, 90) == 1
+    assert cl.scan_results(5)[0].address == HEALTH_ADDR
+    assert server.commands.count(Cmd.PROC_READ) == reads_before, "no per-candidate reads"
+    with pytest.raises(ValueError, match="too many to compare"):
+        cl.scan_next(Compare.DECREASED, None)
     cl.close()
 
 
@@ -393,3 +412,10 @@ def test_parallel_compare_flag_used_and_dropped_if_refused(refuse):
     if refuse:
         assert server.scan_flags[1:] and all(f == 0 for f in server.scan_flags[1:])
     cl.close()
+
+
+def test_ranges_with():
+    from cheatmaker.console.ps5debug_ng import ranges_with
+
+    r = [(0x1000, 0x2000), (0x3000, 0x4000), (0x5000, 0x6000)]
+    assert ranges_with(r, [0x1500, 0x5000, 0x7000, 0x10]) == [(0x1000, 0x2000), (0x5000, 0x6000)]
