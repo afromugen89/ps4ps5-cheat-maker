@@ -22,3 +22,4 @@ Findings that changed the code:
 - Exact 4-byte search: ~3 minutes, 637,388 matches. Misses the 60 s target (AC-3.5).
 - Next build (parallel compare + timing log) to re-measure.
 - Re-measured on fa89a9c (parallel compare on, flags=0x80): 101.7 s, 2,842 requests, 24,677 regions, 11,857 MiB, 570,058 matches. About 117 MiB/s. Still over 60 s.
+- Decision (Kein, 2026-11-01): accept ~100 s on big PS5 games; AC-3.5 now 2 min for large games, 60 s for smaller; progress bar shows time left (f3ff28e).
