@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 
 from PySide6.QtCore import Qt
@@ -19,11 +20,14 @@ from PySide6.QtWidgets import (
 )
 
 from cheatmaker import formats
+from cheatmaker.core import updater as up
 from cheatmaker.core.cheats import Cheat, versions_differ
 from cheatmaker.core.values import parse_number
 from cheatmaker.ui import hints
 from cheatmaker.ui.controller import Controller
 from cheatmaker.ui.find_wizard import fmt_value
+
+log = logging.getLogger(__name__)
 
 COL_ON, COL_NAME, COL_VALUE, COL_KEEPS, COL_DETAILS = range(5)
 
@@ -61,6 +65,13 @@ class CheatsView(QWidget):
         self.lock_btn = QPushButton("Lock it")
         self.open_btn = QPushButton("Open cheat file...")
         self.save_btn = QPushButton("Save...")
+        self.update_btn = QPushButton("Update for this version")
+        self.update_btn.setToolTip(
+            "Find these cheats in the game version you're running and move them there"
+        )
+        self.update_btn.setVisible(False)
+        self._learning = False
+        self._learn_tried: set[tuple[str, str, int]] = set()
         buttons = QHBoxLayout()
         for w in (self.delete_btn, self.lock_btn, self.open_btn, self.save_btn):
             buttons.addWidget(w)
@@ -68,7 +79,10 @@ class CheatsView(QWidget):
         buttons.addWidget(self.show_details)
         lay = QVBoxLayout(self)
         lay.addWidget(self.hint)
-        lay.addWidget(self.warning)
+        warn = QHBoxLayout()
+        warn.addWidget(self.warning, 1)
+        warn.addWidget(self.update_btn)
+        lay.addLayout(warn)
         lay.addWidget(self.table, 1)
         lay.addLayout(buttons)
 
@@ -79,8 +93,11 @@ class CheatsView(QWidget):
         self.lock_btn.clicked.connect(lambda: self._with_selected(self.open_lock))
         self.open_btn.clicked.connect(self.do_open)
         self.save_btn.clicked.connect(lambda: self.open_save())
+        self.update_btn.clicked.connect(self.do_update)
         ctl.cheats_changed.connect(self.fill)
+        ctl.cheats_changed.connect(self._maybe_learn)
         ctl.game_changed.connect(lambda _g: self._check_version())
+        ctl.connection_changed.connect(lambda _up: self._check_version())
         self.fill()
 
     @property
@@ -200,6 +217,7 @@ class CheatsView(QWidget):
         """AC-7.2: warn when the file was made for another version (or game)."""
         cf, g = self.ctl.cheat_file, self.ctl.session.game
         text = ""
+        can_update = False
         if cf and g:
             if cf.title_id.upper() != g.title_id:
                 text = f"This cheat file is for {cf.title_id}; you're running {g.title_id}."
@@ -208,5 +226,94 @@ class CheatsView(QWidget):
                     f"This cheat was made for version {cf.version}; you're running "
                     f"{g.version}. It may not work."
                 )
+                can_update = self.ctl.session.connected and any(c.saveable for c in cf.cheats)
+                if can_update:
+                    text += " Press Update for this version to move the cheats."
         self.warning.setText(text)
         self.warning.setVisible(bool(text))
+        self.update_btn.setVisible(can_update)
+        self._maybe_learn()
+
+    # -- v2: follow game updates ------------------------------------------------
+    def _maybe_learn(self) -> None:
+        """While the file's own version runs, learn a signature for each code line so
+        the cheats can be moved after the next game update. Reads only."""
+        cf, g = self.ctl.cheat_file, self.ctl.session.game
+        if self._learning or not (cf and g and self.ctl.session.connected):
+            return
+        if cf.title_id.upper() != g.title_id or versions_differ(cf.version, g.version):
+            return
+        path = up.signatures_path(g.title_id, g.version)
+        try:
+            known = up.load_signatures(path)
+        except (OSError, ValueError) as exc:
+            log.warning("action=learn_signature reason=%s", exc)
+            known = {}
+        todo = [
+            loc.offset
+            for loc in up.patch_lines(cf)
+            if loc.offset not in known
+            and (g.title_id, g.version, loc.offset) not in self._learn_tried
+        ]
+        if not todo:
+            return
+        for off in todo:
+            self._learn_tried.add((g.title_id, g.version, off))
+        self._learning = True
+        session, title_id, version = self.ctl.session, g.title_id, g.version
+
+        def work() -> int:
+            sigs = up.learn(cf, up.read_code_image(session))
+            up.save_signatures(path, title_id, version, sigs)
+            return len(sigs)
+
+        def done(n: int) -> None:
+            self._learning = False
+            log.info("action=learn_signatures saved=%d version=%s", n, version)
+
+        def failed(exc: BaseException) -> None:
+            self._learning = False
+            log.warning("action=learn_signatures reason=%s", exc)
+
+        self.ctl.tasks.run(work, done, failed)
+
+    def do_update(self) -> None:
+        cf, g = self.ctl.cheat_file, self.ctl.session.game
+        if not (cf and g):
+            return
+        session = self.ctl.session
+        old_path = up.signatures_path(cf.title_id, cf.version)
+        self.update_btn.setEnabled(False)
+        self.hint.setText(hints.UPDATE_RUNNING)
+
+        def work():
+            image = up.read_code_image(session)
+            new, report = up.update_file(cf, up.load_signatures(old_path), image, g.version)
+            up.save_signatures(
+                up.signatures_path(g.title_id, g.version),
+                g.title_id,
+                g.version,
+                up.learn(new, image),
+            )
+            return new, report
+
+        self.ctl.tasks.run(work, self._updated, self._update_failed)
+
+    def _updated(self, result) -> None:
+        new, report = result
+        self.update_btn.setEnabled(True)
+        self.ctl.live.mark_all_off()
+        self.ctl.cheat_file = new
+        self.ctl.cheats_changed.emit()
+        self._check_version()
+        summary = report.summary(new.version)
+        self.warning.setText(summary)
+        self.warning.setVisible(True)
+        self.ctl.message.emit(summary)
+        if report.moved:
+            self.hint.setText(hints.UPDATE_DONE)
+
+    def _update_failed(self, exc: BaseException) -> None:
+        self.update_btn.setEnabled(True)
+        self.fill()
+        self.ctl.fail(exc, "update_version")

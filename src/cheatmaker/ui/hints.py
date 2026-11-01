@@ -62,3 +62,9 @@ PLAYER_ONLY_TESTING = (
     "stop dying too, pick the next field and Test it again. If it works, press Keep it."
 )
 PLAYER_ONLY_NOT_LANDED = "The PS5 said OK but the code didn't change. Try again."
+
+UPDATE_RUNNING = "Reading the game's code to find your cheats in this version..."
+UPDATE_DONE = (
+    "Cheats moved to this version. Tick each one to test it in game, then press Save: "
+    "the file is named for this version, so CheatRunner picks it up."
+)

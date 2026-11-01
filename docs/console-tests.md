@@ -56,3 +56,26 @@ can't be saved into GoldHEN / CheatRunner files (those hold fixed byte patches).
 Log lines: `action=player_only_collect` (hook, cave, table addresses, objects count).
 While collecting, the app briefly hooks the instruction and uses the last 512 bytes of
 the game's data area as a table (only if they are zero; cleared afterwards).
+
+## C9 Cheats that survive a game update (v2, added 2026-11-01)
+
+Part A, any time (reads only, writes nothing to the PS5):
+
+1. Run Returnal 03.000.005, connect, **Open cheat file...** and pick Celogamez's
+   `PPSA01285_03.000.005.json` (or any of your own saved files for this version).
+2. The app learns a signature for each code line in the background. Check the log for
+   `action=learn_signature offset=0x277b43f sig=C4 C1 7A 11 8C 24 AC 02 00 00 ...` and the
+   file `%APPDATA%\CheatMaker\signatures\PPSA01285_03.000.005.json`.
+
+Part B, after the next Returnal update (or with any game where you have an older file):
+
+1. Run the new version, open the old file. The warning says "made for version ...", and
+   an **Update for this version** button appears.
+2. Press it. Expect "Updated N of M cheats for version ...". Cheats it couldn't move are
+   listed with the reason.
+3. Tick each moved cheat and test it in game, then **Save**. The file is named for the new
+   version.
+
+Log lines: `action=read_code`, `action=update_version from=... to=... moved=... failed=...`.
+Without Part A's signatures, the app tries each line's original bytes alone (6+ bytes)
+and lists those cheats as "found from their original bytes only (test them)".
