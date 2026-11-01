@@ -322,10 +322,11 @@ class Ps5DebugNgClient:
         with self._lock:
             for i in range(0, len(data), MAX_BODY):
                 part = data[i : i + MAX_BODY]
-                self._w.request(
-                    Cmd.PROC_WRITE, struct.pack("<IQI", pid, addr + i, len(part)) + part
-                )
+                # The server acks the 16-byte header, THEN reads the bytes to write
+                # (sending them inside the request hung NG 1.3 in console test C3).
+                self._w.request(Cmd.PROC_WRITE, struct.pack("<IQI", pid, addr + i, len(part)))
                 self._w.ok(f"write {addr + i:#x}", WriteFailed)
+                self._w.send(part)
                 self._w.ok(f"write {addr + i:#x}", WriteFailed)
 
     def read_many(self, pid: int, spans: list[tuple[int, int]]) -> list[bytes]:

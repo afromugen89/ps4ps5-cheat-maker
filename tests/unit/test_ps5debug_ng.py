@@ -155,12 +155,15 @@ class FakeNgServer:
                 return
             c.sendall(OK + data)
         elif cmd == Cmd.PROC_WRITE:
-            pid, addr, n = struct.unpack("<IQI", body[:16])
+            assert len(body) == 16, "data must follow the ack, not ride in the request"
+            pid, addr, n = struct.unpack("<IQI", body)
+            c.sendall(OK)
+            data = self._recv(c, n)
             try:
-                f.write(pid, addr, body[16 : 16 + n])
-                c.sendall(OK + OK)
+                f.write(pid, addr, data)
+                c.sendall(OK)
             except Exception:
-                c.sendall(OK + ERR)
+                c.sendall(ERR)
         elif cmd == Cmd.PROC_AUTH:
             magic, _flags = struct.unpack("<II", body)
             assert magic == 0xBB40E64D
