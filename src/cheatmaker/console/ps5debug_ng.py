@@ -43,6 +43,17 @@ SCAN_TIMEOUT = 60.0  # one scan slice runs on the console and may take a while
 SENTINEL_U64 = 0xFFFFFFFFFFFFFFFF
 TSE_PARALLEL_COMPARE = 0x100  # turbo engine bit: server can compare on several threads
 TS_PARALLEL_COMPARE = 0x80  # turbo request flag asking for that
+# Unknown-value search keeps a snapshot ON THE CONSOLE (NG scan_turbo.c), so 12 GiB of
+# game memory never crosses the network. Engine bits / request flags from PROTOCOL.md.
+TSE_SNAPSHOT = 0x08
+TSE_SNAPSHOT_SEGMENTS = 0x10
+TSE_FLOAT_POLICY = 0x400
+TS_SERVER_RESIDENT = 0x02
+TS_SNAPSHOT = 0x04
+TS_SNAPSHOT_SEGMENTS = 0x10
+TS_FLOAT_SIMPLE = 0x200
+"""Floats only: skip values whose exponent is far from 1.0 (garbage bit patterns)."""
+SNAP_SEGMENT_MAX = 0x8000_0000  # a segment length is a u32
 AUTH_MAGIC = 0xBB40E64D
 INTERRUPT_PORT = 755
 INTERRUPT_SIZE = 0x4A0
@@ -73,6 +84,10 @@ class Cmd(IntEnum):
     PROC_SCAN_GET = 0xBDAACC03
     TURBOSCAN_CAPS = 0xBDAACC10
     TURBOSCAN_START = 0xBDAACC11
+    TURBOSCAN_COUNT = 0xBDAACC12
+    TURBOSCAN_GET = 0xBDAACC13
+    TURBOSCAN_END = 0xBDAACC14
+    TURBOSCAN_CANCEL = 0xBDAACC17
     DEBUG_ATTACH = 0xBDBB0001
     DEBUG_DETACH = 0xBDBB0002
     DEBUG_SET_WATCHPOINT = 0xBDBB0004
@@ -90,6 +105,14 @@ _NG_VTYPE = {
     ValueType.DOUBLE: 9,
 }
 _NG_EXACT = 0
+_NG_UNKNOWN = 11
+_NG_COMPARE = {
+    Compare.EXACT: 0,
+    Compare.INCREASED: 5,
+    Compare.DECREASED: 7,
+    Compare.CHANGED: 9,
+    Compare.UNCHANGED: 10,
+}
 _NG_FUZZY = 1
 """FuzzyValue: |typed - memory| < 1.0, float/double only. Legacy ExactValue on floats
 is a near-bit-exact match, so typing 80 misses health that is really 79.6 (C3)."""
@@ -206,6 +229,9 @@ class Ps5DebugNgClient:
         self._authed = False
         self._turbo: bool | None = None
         self._turbo_flags = 0
+        self._engines = 0
+        self._resident: tuple[int, ValueType, int] | None = None  # pid, type, float flags
+        self._resident_count = 0
         self._scan: LocalScanSession | None = None
         self._scan_pid: int | None = None
         self._scan_ranges_list: list[tuple[int, int]] = []
@@ -232,6 +258,7 @@ class Ps5DebugNgClient:
         self._w = _Wire(self._open(self.host, self.port))
         self._authed = False
         self._scan = None
+        self._resident = None  # the console frees it when the socket closes
 
     def close(self) -> None:
         with contextlib.suppress(OSError):
@@ -371,6 +398,7 @@ class Ps5DebugNgClient:
                 self._turbo = self._w.status() == Status.SUCCESS
                 if self._turbo:
                     ver, engines, threads, _r = struct.unpack("<IIII", self._w.recv(16))
+                    self._engines = engines
                     if engines & TSE_PARALLEL_COMPARE:
                         self._turbo_flags = TS_PARALLEL_COMPARE
                     log.info(
@@ -472,11 +500,10 @@ class Ps5DebugNgClient:
         progress: ProgressFn | None = None,
         cancel: threading.Event | None = None,
     ) -> int:
-        if cmp is not Compare.EXACT or value is None:
-            # Unknown-value first scans must stay on the console (architecture Q3);
-            # waiting on console test S2 and an architect decision.
-            raise ScanNotSupported("unknown-value search isn't available on the PS5 yet")
+        self.scan_cancel()
         ranges = merge_ranges(regions)
+        if cmp is not Compare.EXACT or value is None:
+            return self._snapshot_start(pid, ranges, vtype, progress, cancel)
         hits = self._scan_ranges(pid, ranges, vtype, value, progress, cancel)
         # PROC_SCAN_GET (bulk read) timed out on PS5Debug-NG 1.3 (console test C3),
         # so only plain reads are used for re-checking candidates.
@@ -486,6 +513,155 @@ class Ps5DebugNgClient:
         self._scan_ranges_list = ranges
         return len(hits)
 
+    # -- unknown value: snapshot kept on the console ---------------------------
+    def _snapshot_start(
+        self,
+        pid: int,
+        ranges: list[tuple[int, int]],
+        vtype: ValueType,
+        progress: ProgressFn | None,
+        cancel: threading.Event | None,
+    ) -> int:
+        need = TSE_SNAPSHOT | TSE_SNAPSHOT_SEGMENTS
+        if not self._has_turbo() or self._engines & need != need:
+            raise ScanNotSupported(
+                "This PS5Debug-NG can't search without a number. Update it to 1.3.2 or later."
+            )
+        self._auth()
+        segs = [
+            (s, min(SNAP_SEGMENT_MAX, end - s))
+            for start, end in ranges
+            for s in range(start, end, SNAP_SEGMENT_MAX)
+        ]
+        float_flags = TS_FLOAT_SIMPLE if vtype.is_float and self._engines & TSE_FLOAT_POLICY else 0
+        flags = TS_SNAPSHOT | TS_SNAPSHOT_SEGMENTS | float_flags
+        hdr = struct.pack(
+            "<IQIBBBII", pid, 0, 0, _NG_VTYPE[vtype], _NG_UNKNOWN, alignment_for(vtype), 0, flags
+        )
+        t0 = time.monotonic()
+        cancelled = False
+        with self._lock, self._timeout(SCAN_TIMEOUT):
+            self._w.request(Cmd.TURBOSCAN_START, hdr)
+            self._w.ok("snapshot start", ReadFailed)
+            self._w.ok("snapshot start", ReadFailed)  # no seed value for unknown
+            self._w.send(
+                struct.pack("<I", len(segs)) + b"".join(struct.pack("<QI", a, n) for a, n in segs)
+            )
+            _slots, total = struct.unpack("<QQ", self._w.recv(16))
+            while (done := self._w.u64()) != SENTINEL_U64:
+                if progress and total:
+                    progress(min(done / total, 1.0))
+                if cancel is not None and cancel.is_set() and not cancelled:
+                    cancelled = self._send_cancel(pid)
+            ok, count = struct.unpack("<IQ", self._w.recv(12))
+            self._w.ok("snapshot end", ReadFailed)
+        log.info(
+            "action=snapshot type=%s ok=%d count=%d segments=%d mib=%.0f seconds=%.1f flags=%#x",
+            vtype.name,
+            ok,
+            count,
+            len(segs),
+            sum(n for _, n in segs) / 2**20,
+            time.monotonic() - t0,
+            flags,
+        )
+        if cancelled or (cancel is not None and cancel.is_set()):
+            self._end_resident()
+            raise ScanCancelled("scan cancelled by the player")
+        if not ok:
+            raise ScanNotSupported(
+                "The PS5 didn't have room to remember the game's memory. Try a number search, "
+                "or free up space on the PS5."
+            )
+        if progress:
+            progress(1.0)
+        self._resident = (pid, vtype, float_flags)
+        self._resident_count = count
+        return count
+
+    def _resident_next(
+        self,
+        cmp: Compare,
+        value: float | int | None,
+        progress: ProgressFn | None,
+        cancel: threading.Event | None,
+    ) -> int:
+        assert self._resident is not None
+        pid, vtype, float_flags = self._resident
+        code = _NG_COMPARE[cmp]
+        if cmp is Compare.EXACT and vtype.is_float:
+            code = _NG_FUZZY
+        val = vtype.encode(value) if cmp.needs_value and value is not None else b""
+        total = max(self._resident_count, 1)
+        cancelled = False
+        with self._lock, self._timeout(SCAN_TIMEOUT):
+            self._w.request(
+                Cmd.TURBOSCAN_COUNT,
+                struct.pack(
+                    "<IQBBII",
+                    pid,
+                    0,
+                    _NG_VTYPE[vtype],
+                    code,
+                    len(val),
+                    TS_SERVER_RESIDENT | float_flags,
+                ),
+            )
+            self._w.ok("narrow down", ReadFailed)
+            if val:
+                self._w.send(val)
+            while (done := self._w.u64()) != SENTINEL_U64:
+                if progress:
+                    progress(min(done / total, 1.0))
+                if cancel is not None and cancel.is_set() and not cancelled:
+                    cancelled = self._send_cancel(pid)
+            count = self._w.u64()
+            self._w.ok("narrow down end", ReadFailed)
+        log.info("action=resident_next cmp=%s count=%d", cmp.value, count)
+        if cancelled:
+            self._end_resident()
+            raise ScanCancelled("scan cancelled; start a new search")
+        self._resident_count = count
+        return count
+
+    def _resident_results(self, limit: int) -> list[ScanHit]:
+        assert self._resident is not None
+        _pid, vtype, _ = self._resident
+        n = vtype.size
+        with self._lock:
+            self._w.request(Cmd.TURBOSCAN_GET, struct.pack("<III", 0, limit, 0))
+            self._w.ok("get matches", ReadFailed)
+            hdr = self._w.u32()
+            count, stride = hdr & 0x7FFFFFFF, 8 + n * (3 if hdr & 0x80000000 else 2)
+            data = self._w.recv(count * stride) if count else b""
+            self._w.ok("get matches end", ReadFailed)
+        return [
+            ScanHit(struct.unpack_from("<Q", data, i)[0], data[i + 8 : i + 8 + n])
+            for i in range(0, len(data), stride)
+        ]
+
+    def _send_cancel(self, pid: int) -> bool:
+        """Cancel has to arrive on a second connection: this one is busy streaming."""
+        try:
+            other = Ps5DebugNgClient.connect(self.host, self.port)
+            try:
+                other._auth()
+                other._w.request(Cmd.TURBOSCAN_CANCEL, struct.pack("<I", pid))
+                other._w.status()
+            finally:
+                other.close()
+        except Exception as exc:  # best effort: the scan then just runs to the end
+            log.warning("couldn't cancel the scan on the PS5: %s", exc)
+        return True
+
+    def _end_resident(self) -> None:
+        if self._resident is None:
+            return
+        self._resident = None
+        with contextlib.suppress(Exception), self._lock:
+            self._w.request(Cmd.TURBOSCAN_END)
+            self._w.status()
+
     def scan_next(
         self,
         cmp: Compare,
@@ -493,9 +669,12 @@ class Ps5DebugNgClient:
         progress: ProgressFn | None = None,
         cancel: threading.Event | None = None,
     ) -> int:
-        """Narrow down. Few candidates: read them. Many: for an exact number, scan
-        again on the console over the ranges that still hold candidates and keep the
-        overlap (one read per candidate is ~36 ms on the PS5, far too slow)."""
+        """Narrow down. Snapshot search: compare on the console. Few candidates: read
+        them. Many: for an exact number, scan again on the console over the ranges
+        that still hold candidates and keep the overlap (one read per candidate is
+        ~36 ms on the PS5, far too slow)."""
+        if self._resident is not None:
+            return self._resident_next(cmp, value, progress, cancel)
         scan = self._scan
         if scan is None or scan.vtype is None or self._scan_pid is None:
             raise ValueError("no scan to narrow down; start a new search")
@@ -515,9 +694,12 @@ class Ps5DebugNgClient:
         return len(scan.hits)
 
     def scan_results(self, limit: int) -> list[ScanHit]:
+        if self._resident is not None:
+            return self._resident_results(limit)
         return [] if self._scan is None else self._scan.results(limit)
 
     def scan_cancel(self) -> None:
+        self._end_resident()
         self._scan = None
         self._scan_pid = None
 

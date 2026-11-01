@@ -51,7 +51,10 @@ class FakeNgServer:
         foreground: bool | str = True,
         parallel: bool = False,
         refuse_flags: bool = False,
+        snapshot: bool = False,
     ) -> None:
+        self.snapshot = snapshot
+        self.resident: dict | None = None  # {"pid","vt","fmt","size","vals": {addr: bytes}}
         self.parallel, self.refuse_flags = parallel, refuse_flags
         self.scan_flags: list[int] = []
         self.scan_compares: list[int] = []
@@ -176,8 +179,22 @@ class FakeNgServer:
             self.authed = ans == bytes(x ^ ks[i] for i, x in enumerate(chal))
             c.sendall(OK if self.authed else struct.pack("<I", Status.DATA_NULL))
         elif cmd == Cmd.TURBOSCAN_CAPS:
-            caps = struct.pack("<IIII", 1, 0x100 if self.parallel else 0, 8, 0)
+            engines = (0x100 if self.parallel else 0) | (0x418 if self.snapshot else 0)
+            caps = struct.pack("<IIII", 1, engines, 8, 0)
             c.sendall(OK + caps if self.turbo else ERR)
+        elif cmd == Cmd.TURBOSCAN_START and struct.unpack("<I", body[23:27])[0] & 0x04:
+            self._snapshot_start(c, body)
+        elif cmd == Cmd.TURBOSCAN_COUNT:
+            self._resident_count(c, body)
+        elif cmd == Cmd.TURBOSCAN_GET:
+            start, count, _flags = struct.unpack("<III", body)
+            r = self.resident or {"vals": {}}
+            items = sorted(r["vals"].items())[start : start + count]
+            recs = b"".join(struct.pack("<Q", a) + v + v for a, v in items)
+            c.sendall(OK + struct.pack("<I", len(items)) + recs + OK)
+        elif cmd == Cmd.TURBOSCAN_END:
+            self.resident = None
+            c.sendall(OK)
         elif cmd in (Cmd.TURBOSCAN_START, Cmd.PROC_SCAN_START):
             assert self.authed
             pid, addr, n, vt, ct, align, lv = struct.unpack("<IQIBBBI", body[:23])
@@ -226,6 +243,53 @@ class FakeNgServer:
             c.sendall(OK)
         else:
             c.sendall(ERR)
+
+    def _snapshot_start(self, c, body):
+        assert self.authed and len(body) == 27
+        pid, _a, _n, vt, ct, align, lv, flags = struct.unpack("<IQIBBBII", body)
+        assert ct == 11 and lv == 0 and flags & 0x10
+        self.scan_flags.append(flags)
+        c.sendall(OK + OK)  # both acks before the segment list (real NG 1.3)
+        (nseg,) = struct.unpack("<I", self._recv(c, 4))
+        segs = [struct.unpack("<QI", self._recv(c, 12)) for _ in range(nseg)]
+        fmt = {5: "<i", 7: "<q", 8: "<f", 9: "<d"}[vt]
+        size = struct.calcsize(fmt)
+        vals = {}
+        for a, n in segs:
+            data = self.fake.read(pid, a, n)
+            for o in range(0, n - size + 1, align):
+                chunk = data[o : o + size]
+                if chunk != bytes(size):  # zero slots are dropped by default
+                    vals[a + o] = chunk
+        total = sum(n for _, n in segs)
+        c.sendall(struct.pack("<QQ", total // align, total))
+        c.sendall(struct.pack("<Q", total) + struct.pack("<Q", SENTINEL_U64))
+        self.resident = {"pid": pid, "fmt": fmt, "size": size, "vals": vals}
+        c.sendall(struct.pack("<IQ", 1, len(vals)) + OK)
+
+    def _resident_count(self, c, body):
+        pid, _base, _vt, ct, lv, flags = struct.unpack("<IQBBII", body)
+        assert flags & 0x02 and self.resident is not None
+        self.scan_compares.append(ct)
+        c.sendall(OK)
+        needle = self._recv(c, lv) if lv else b""
+        r = self.resident
+        fmt = r["fmt"]
+        keep = {}
+        for a, old in r["vals"].items():
+            now = self.fake.read(pid, a, r["size"])
+            o, v = struct.unpack(fmt, old)[0], struct.unpack(fmt, now)[0]
+            if ct == 0:
+                ok = now == needle
+            elif ct == 1:
+                ok = abs(struct.unpack(fmt, needle)[0] - v) < 1
+            else:
+                ok = {5: v > o, 7: v < o, 9: v != o, 10: v == o}[ct]
+            if ok:
+                keep[a] = now  # baseline refreshes: next compare is since this scan
+        r["vals"] = keep
+        c.sendall(struct.pack("<Q", 1) + struct.pack("<Q", SENTINEL_U64))
+        c.sendall(struct.pack("<Q", len(keep)) + OK)
 
     def _dial_back(self):
         import time
@@ -376,9 +440,50 @@ def test_next_scan_rescans_on_console_when_many_candidates(monkeypatch):
     cl.close()
 
 
-def test_unknown_scan_not_supported_yet(client):
-    with pytest.raises(ScanNotSupported):
+def test_unknown_scan_needs_snapshot_engine(client):
+    with pytest.raises(ScanNotSupported, match="Update it"):
         client.scan_start(PID, client.maps(PID), ValueType.FLOAT, Compare.UNKNOWN, None)
+
+
+def test_unknown_value_then_went_down_on_console():
+    """Health hunt: unknown first search, then Went down / Same / Went up (C4 follow-up)."""
+    server = FakeNgServer(snapshot=True)
+    cl = Ps5DebugNgClient.connect("127.0.0.1", server.port, timeout=3)
+    regions = [m for m in cl.maps(PID) if m.writable]
+    seen = []
+    first = cl.scan_start(PID, regions, ValueType.FLOAT, Compare.UNKNOWN, None, seen.append)
+    assert first > 1 and seen[-1] == 1.0
+    assert server.scan_flags[-1] & 0x200, "float searches skip garbage floats"
+    server.fake.poke(PID, BAR_ADDR, struct.pack("<f", 50.0))
+    assert cl.scan_next(Compare.DECREASED, None) == 1
+    assert cl.scan_next(Compare.UNCHANGED, None) == 1
+    server.fake.poke(PID, BAR_ADDR, struct.pack("<f", 60.0))
+    assert cl.scan_next(Compare.INCREASED, None) == 1
+    [hit] = cl.scan_results(10)
+    assert hit.address == BAR_ADDR and struct.unpack("<f", hit.value)[0] == 60.0
+    assert cl.scan_next(Compare.CHANGED, None) == 0
+    assert server.scan_compares[-4:] == [7, 10, 5, 9]
+    cl.scan_cancel()
+    assert server.resident is None, "new search frees the console's snapshot"
+    cl.close()
+
+
+def test_unknown_then_exact_number_on_console():
+    server = FakeNgServer(snapshot=True)
+    cl = Ps5DebugNgClient.connect("127.0.0.1", server.port, timeout=3)
+    regions = [m for m in cl.maps(PID) if m.writable]
+    cl.scan_start(PID, regions, ValueType.INT32, Compare.UNKNOWN, None)
+    server.fake.poke(PID, HEALTH_ADDR, struct.pack("<i", 77))
+    assert cl.scan_next(Compare.EXACT, 77) == 1
+    assert cl.scan_results(5)[0].address == HEALTH_ADDR
+    assert server.scan_compares[-1] == 0
+    cl.close()
+
+
+def test_unknown_scan_segments_split_at_u32():
+    from cheatmaker.console import ps5debug_ng
+
+    assert ps5debug_ng.SNAP_SEGMENT_MAX <= 0xFFFFFFFF
 
 
 def test_watch_writes(client, server):

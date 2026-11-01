@@ -24,7 +24,17 @@ and the AC-8.1 usability test) is not done.
 - `.shn` is written exactly like the real GoldHEN files (declares utf-16, stored as ASCII with CRLF).
 - Saved cheats that came from a value write their value once when toggled (files can't freeze).
 
-## ARCHITECT CONSULTATION NEEDED
+## Unknown-value search on the PS5 (resolved 2026-11-01)
+
+Kein asked for it to be built. It uses PS5Debug-NG's own snapshot engine, so memory stays
+on the console: `TURBOSCAN_START` with `TS_SNAPSHOT | TS_SNAPSHOT_SEGMENTS` (compare 11,
+no seed), then `TURBOSCAN_COUNT` with `TS_SERVER_RESIDENT` for Went up (5) / Went down (7)
+/ Changed (9) / Same (10) / exact (0, fuzzy 1 for floats), `TURBOSCAN_GET` for the rows,
+`TURBOSCAN_END` to free it, and `0xBDAACC17` cancel on a second connection. Wire order was
+confirmed on Kein's PS5 (NG 1.3, engines 0xfff). Float snapshots set `TS_FLOAT_SIMPLE`.
+The snapshot is tied to the connection, so a reconnect means starting the search again.
+
+## ARCHITECT CONSULTATION (original question, kept for history)
 
 ```
 Decision: How the first "unknown value" search runs on the real PS5.
