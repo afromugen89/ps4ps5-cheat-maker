@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import re
 import struct
 from enum import Enum
 
@@ -138,3 +139,31 @@ def guess_types(value: float | int) -> list[ValueType]:
     elif 0 <= iv <= 0x7FFF:
         order += [ValueType.INT16]
     return [*order, ValueType.DOUBLE] if ValueType.DOUBLE not in order else order
+
+
+_RANGE = re.compile(r"^\s*(-?[^\s-][^-]*?)\s*(?:-|to|\.\.)\s*(-?[^\s-].*?)\s*$", re.IGNORECASE)
+
+
+def parse_filter(text: str) -> tuple[float, float] | None:
+    """What to keep in the match list: "100" or "90-110" / "90 to 110".
+
+    Returns (low, high), or None for an empty box. Raises ValueError for text
+    that isn't a number or a range. A single number keeps values within
+    FLOAT_TOLERANCE of it, so a float showing 86.7 still matches a typed 87.
+    """
+    if not text.strip():
+        return None
+    m = _RANGE.match(text)
+    if m:
+        lo, hi = float(parse_number(m.group(1))), float(parse_number(m.group(2)))
+        return (min(lo, hi), max(lo, hi))
+    n = float(parse_number(text))
+    return (n - FLOAT_TOLERANCE, n + FLOAT_TOLERANCE)
+
+
+def in_filter(value: float | int, keep: tuple[float, float] | None) -> bool:
+    if keep is None:
+        return True
+    if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
+        return False
+    return keep[0] <= value <= keep[1]

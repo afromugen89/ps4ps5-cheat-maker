@@ -27,7 +27,7 @@ from cheatmaker.core import pointers as ptr
 from cheatmaker.core.pointers import Chain
 from cheatmaker.core.scanner import MAX_SHOW, Match
 from cheatmaker.core.templates import TEMPLATES, make_cheat
-from cheatmaker.core.values import Compare, ValueType, parse_number
+from cheatmaker.core.values import Compare, ValueType, in_filter, parse_filter, parse_number
 from cheatmaker.errors import ReadFailed
 from cheatmaker.ui import hints
 from cheatmaker.ui.controller import Controller
@@ -118,6 +118,11 @@ class FindWizard(QWidget):
         self.add_btn = QPushButton("Add address")
         self.remove_btn = QPushButton("Remove")
         self.pointer_btn = QPushButton("Pointer scan")
+        self.filter = QLineEdit()
+        self.filter.setPlaceholderText("Only list values, e.g. 100 or 90-110")
+        self.filter.setToolTip("Hides listed rows whose value doesn't match. No new search.")
+        self.filter.setClearButtonEnabled(True)
+        self.filter_count = QLabel("")
 
         self.table = QTableWidget(0, 2)
         self.table.setHorizontalHeaderLabels(["Value now", "Address"])
@@ -160,6 +165,11 @@ class FindWizard(QWidget):
         lay.addLayout(cmp_row)
         lay.addLayout(prog)
         lay.addLayout(add_row)
+        filt = QHBoxLayout()
+        filt.addWidget(QLabel("Filter list by value:"))
+        filt.addWidget(self.filter, 1)
+        filt.addWidget(self.filter_count)
+        lay.addLayout(filt)
         lay.addWidget(self.table, 1)
         lay.addLayout(act)
         lay.addWidget(self.advanced)
@@ -182,6 +192,7 @@ class FindWizard(QWidget):
         self.pointer_btn.clicked.connect(self.do_pointer_scan)
         self.table.itemSelectionChanged.connect(self._update_buttons)
         self.show_n.valueChanged.connect(self._set_show_limit)
+        self.filter.textChanged.connect(lambda _t: self._fill_table())
 
         self.timer = QTimer(self)
         self.timer.setInterval(LIVE_MS)
@@ -391,9 +402,32 @@ class FindWizard(QWidget):
                     frozen = f" (pointer {chain.label()} leads nowhere right now)"
             self.table.setItem(i, 0, QTableWidgetItem(fmt_value(m.value) + frozen))
             self.table.setItem(i, 1, QTableWidgetItem(f"{m.address:#x}"))
+        self._apply_filter()
         if keep_row is not None and keep_row < len(self.rows):
-            self.table.selectRow(keep_row)
+            if self.table.isRowHidden(keep_row):
+                self.table.clearSelection()
+            else:
+                self.table.selectRow(keep_row)
         self._update_buttons()
+
+    def _apply_filter(self) -> None:
+        """Hide rows whose live value doesn't match the filter box. Rows are hidden,
+        not removed, so table row i is still self.rows[i]."""
+        try:
+            keep = parse_filter(self.filter.text())
+            self.filter.setStyleSheet("")
+        except ValueError:
+            keep = None  # half-typed, e.g. "90-": show everything until it parses
+            self.filter.setStyleSheet("color: #c0392b;")
+        shown = 0
+        for i, m in enumerate(self.rows):
+            hide = keep is not None and (m.raw == b"" or not in_filter(m.value, keep))
+            self.table.setRowHidden(i, hide)
+            shown += not hide
+        if keep is None or not self.rows:
+            self.filter_count.setText("")
+        else:
+            self.filter_count.setText(f"{shown} of {len(self.rows)} shown")
 
     def _vtype(self) -> ValueType:
         assert self.ctl.scanner.vtype is not None

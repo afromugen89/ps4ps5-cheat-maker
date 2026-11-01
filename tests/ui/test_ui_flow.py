@@ -442,3 +442,26 @@ def test_show_up_to_n_matches_is_saved(win, fake):
     assert Settings.load().show_matches == 1
     win.find.show_n.setValue(50)
     assert win.find.table.rowCount() == 2
+
+
+def test_filter_listed_rows_by_value(win, fake):
+    connect(win)
+    search(win, "100")
+    f = win.find
+    assert f.table.rowCount() == 2
+    other = next(m.address for m in f.rows if m.address != HEALTH_ADDR)
+    fake.poke(PID, other, struct.pack("<i", 250))
+    f.refresh_live()
+    f.filter.setText("200-300")
+    hidden = [f.table.isRowHidden(i) for i in range(2)]
+    assert sorted(hidden) == [False, True], "one row matches 250"
+    assert f.filter_count.text() == "1 of 2 shown"
+    shown = hidden.index(False)
+    f.table.selectRow(shown)
+    assert f.selected().address == other, "hidden rows keep the row -> match mapping"
+    f.filter.setText("90-")  # half typed: show everything
+    assert not any(f.table.isRowHidden(i) for i in range(2)) and f.filter_count.text() == ""
+    f.filter.setText("100")
+    assert f.rows[[f.table.isRowHidden(i) for i in range(2)].index(False)].address == HEALTH_ADDR
+    f.filter.clear()
+    assert not any(f.table.isRowHidden(i) for i in range(2))

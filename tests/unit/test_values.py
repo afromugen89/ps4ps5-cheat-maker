@@ -2,7 +2,15 @@ import struct
 
 import pytest
 
-from cheatmaker.core.values import Compare, ValueType, guess_types, matches, parse_number
+from cheatmaker.core.values import (
+    Compare,
+    ValueType,
+    guess_types,
+    in_filter,
+    matches,
+    parse_filter,
+    parse_number,
+)
 
 
 @pytest.mark.parametrize(
@@ -62,3 +70,34 @@ def test_guess_types():
     assert guess_types(100)[:2] == [ValueType.INT32, ValueType.FLOAT]
     assert ValueType.INT16 in guess_types(100)
     assert guess_types(2**40)[0] is ValueType.INT64
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("", None),
+        ("100", (99.5, 100.5)),
+        ("90-110", (90.0, 110.0)),
+        ("90 to 110", (90.0, 110.0)),
+        ("110-90", (90.0, 110.0)),
+        ("-5 - 5", (-5.0, 5.0)),
+        ("-10", (-10.5, -9.5)),
+        ("1,000 .. 2,000", (1000.0, 2000.0)),
+    ],
+)
+def test_parse_filter(text, expected):
+    assert parse_filter(text) == expected
+
+
+@pytest.mark.parametrize("text", ["abc", "90-", "1-x"])
+def test_parse_filter_rejects(text):
+    with pytest.raises(ValueError):
+        parse_filter(text)
+
+
+def test_in_filter():
+    assert in_filter(100, parse_filter("100"))
+    assert not in_filter(101, parse_filter("100"))
+    assert in_filter(86.7, parse_filter("87"))  # rounded float on screen
+    assert in_filter(5, None)
+    assert not in_filter(float("nan"), (0.0, 1.0))
