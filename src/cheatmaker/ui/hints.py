@@ -47,3 +47,18 @@ POINTER_NONE = "No pointers found. Try more levels or a bigger max offset."
 POINTER_RECHECKED = (
     "{kept} of {before} pointers still lead here. Pick one and press Use this pointer."
 )
+PLAYER_ONLY_START = (
+    "Player only: press Collect, then fight for 20 seconds: get hit AND hit enemies. The app "
+    "notes which characters this instruction changes, then finds what marks you."
+)
+PLAYER_ONLY_FIGHT = "Collecting... get hit and hit some enemies now."
+PLAYER_ONLY_PICK = (
+    "Pick the field that marks you (the top one is the best guess), check the value, and "
+    "press Test it. Then take a hit: your value should stay, enemies should still die."
+)
+PLAYER_ONLY_NONE = "No field tells you apart from the others. Collect again with more enemies."
+PLAYER_ONLY_TESTING = (
+    "On. Take a hit: your value should stay while enemies still lose health. If enemies "
+    "stop dying too, pick the next field and Test it again. If it works, press Keep it."
+)
+PLAYER_ONLY_NOT_LANDED = "The PS5 said OK but the code didn't change. Try again."

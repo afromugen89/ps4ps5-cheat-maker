@@ -42,3 +42,17 @@ If anything fails: press **Copy log** and paste it into the thread.
 
 Pass: at least one pointer survives two restarts. Pointer cheats are live only; they
 can't be saved into GoldHEN / CheatRunner files (those hold fixed byte patches).
+
+## C8 Lock it, player only (added 2026-11-01)
+
+1. Find health, make a cheat, Lock it -> Start, take a hit. Tick Advanced to see the
+   instructions; for Returnal 03.000.005 the one to pick is `vmovss [r12+2ACh],xmm1`
+   (offset 0x277B43F, see Celogamez's file).
+2. Pick it, press **Player only...**, then **Collect** and fight for 20 s: get hit and hit
+   enemies. Expect a field list with `+0x8: you 0x40048` near the top.
+3. Keep the value (e.g. 999), **Test it**, take hits: health stays, enemies still die.
+4. **Keep it**, Save, load in CheatRunner after a restart.
+
+Log lines: `action=player_only_collect` (hook, cave, table addresses, objects count).
+While collecting, the app briefly hooks the instruction and uses the last 512 bytes of
+the game's data area as a table (only if they are zero; cleared afterwards).

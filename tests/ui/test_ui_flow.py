@@ -386,3 +386,48 @@ def test_pointer_scan_use_and_recheck_after_restart(win, fake):
     f.set_value.setText("999")
     f.set_btn.click()
     assert i32(fake, moved) == 999
+
+
+def test_player_only_collect_test_keep(qtbot, monkeypatch):
+    from cheatmaker.core import cave as cv
+    from cheatmaker.core.cheats import Cheat, Location, LocationKind
+    from cheatmaker.core.values import ValueType
+    from cheatmaker.ui import player_only_dialog as pod
+    from tests.unit import test_cave as tc
+
+    fake, _s = tc.game()
+    ctl = Controller(lambda ip, port: fake, Settings.load(), TaskRunner(sync=True))
+    ctl.session.connect("1.2.3.4")
+    ctl.session.refresh_game()
+    health = Cheat(
+        "Infinite Health",
+        [Location(LocationKind.SESSION_ADDRESS, tc.PLAYER + tc.HP, b"\0\0zD", b"\0\0zD")],
+        value_type=ValueType.FLOAT,
+    )
+    ctl.ensure_file().cheats.append(health)
+    real = cv.collect_objects
+
+    def fake_collect(session, writer, seconds, cancel=None):
+        table = cv.find_table(session)
+
+        def fight(_t):
+            for obj in (tc.PLAYER, tc.ENEMY1, tc.ENEMY2):
+                slot = (obj >> 4) & (cv.TABLE_SLOTS - 1)
+                fake.poke(tc.PID, table + slot * 8, struct.pack("<Q", obj))
+
+        return real(session, writer, 0.25, cancel, sleep=fight)
+
+    monkeypatch.setattr(pod.cv, "collect_objects", fake_collect)
+    dlg = pod.PlayerOnlyDialog(ctl, health, tc.WRITER)
+    qtbot.addWidget(dlg)
+    assert dlg.player_obj == tc.PLAYER and dlg.value.text() == "1000"
+    dlg.collect_btn.click()
+    assert dlg.fields.count() >= 1 and dlg.fields.item(0).text().startswith("+0x8: you 0x40048")
+    dlg.value.setText("999")
+    dlg.test_btn.click()
+    assert fake.peek(tc.PID, tc.HOOK, 1) == b"\xe9"
+    assert dlg.hint.text().startswith("On.")
+    dlg.keep_btn.click()
+    kept = ctl.cheat_file.cheats[0]
+    assert kept.saveable and len(kept.locations) == 2
+    ctl.shutdown()

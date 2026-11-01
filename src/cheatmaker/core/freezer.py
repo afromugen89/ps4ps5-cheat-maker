@@ -138,7 +138,8 @@ class LiveCheats:
         self.active.pop(id(cheat), None)
         if restore and self.session.client is not None:
             client = self.session.client
-            for pid, addr, data in self._writes(cheat, False):
+            # Undo in reverse: a jump into a code cave must go before the cave does.
+            for pid, addr, data in reversed(self._writes(cheat, False)):
                 client.write(pid, addr, data)
 
     def refresh(self, cheat: Cheat) -> None:
