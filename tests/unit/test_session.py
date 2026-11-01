@@ -2,7 +2,7 @@ import pytest
 
 from cheatmaker.console.fake import PROT_R, PROT_W, PROT_X
 from cheatmaker.core.cheats import LocationKind
-from cheatmaker.core.session import Session, parse_version
+from cheatmaker.core.session import Session, clean_host, parse_version
 from cheatmaker.errors import ConnectionLost, GameNotFound, UnsupportedServer
 from tests.conftest import HEALTH_ADDR, MODULE_BASE, PID, STATIC_ADDR, build_fake
 
@@ -109,3 +109,24 @@ def test_game_changed_callback(session, fake):
 @pytest.mark.parametrize("text,expected", [("1.3", (1, 3)), ("v1.3.2", (1, 3, 2)), ("", ())])
 def test_parse_version(text, expected):
     assert parse_version(text) == expected
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "http://192.168.0.193/",
+        "http://192.168.0.193:744",
+        " 192.168.0.193 ",
+        "192.168.0.193:744",
+        "192.168.0.193",
+    ],
+)
+def test_clean_host(text):
+    assert clean_host(text) == "192.168.0.193"
+
+
+def test_connect_accepts_pasted_url(fake):
+    seen = []
+    s = Session(lambda ip, port: seen.append(ip) or fake)
+    s.connect("http://192.168.0.193/")
+    assert seen == ["192.168.0.193"] and s.ip == "192.168.0.193"

@@ -58,7 +58,8 @@ class ConnectView(QWidget):
             return None
 
     def _connected(self, game: GameInfo | None) -> None:
-        self.ctl.settings.last_ip = self.ip.text().strip()
+        self.ip.setText(self.ctl.session.ip)
+        self.ctl.settings.last_ip = self.ctl.session.ip
         self.ctl.settings.save()
         self.ctl.connection_changed.emit(True)
         if game is None:

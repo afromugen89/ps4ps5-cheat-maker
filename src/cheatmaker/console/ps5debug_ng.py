@@ -111,14 +111,16 @@ class _Wire:
 
     def __init__(self, sock: socket.socket) -> None:
         self.sock = sock
+        self.last_cmd = "-"  # named in errors so a log shows which command failed
 
     def send(self, data: bytes) -> None:
         try:
             self.sock.sendall(data)
         except OSError as exc:
-            raise ConnectionLost(f"send failed: {exc}") from exc
+            raise ConnectionLost(f"send failed after {self.last_cmd}: {exc}") from exc
 
     def request(self, cmd: int, body: bytes = b"") -> None:
+        self.last_cmd = Cmd(cmd).name if cmd in Cmd._value2member_map_ else f"{cmd:#010x}"
         self.send(struct.pack("<III", MAGIC, int(cmd), len(body)) + body)
 
     def recv(self, n: int) -> bytes:
@@ -127,9 +129,9 @@ class _Wire:
             try:
                 chunk = self.sock.recv(min(n - len(buf), 1 << 20))
             except OSError as exc:  # includes timeout
-                raise ConnectionLost(f"receive failed: {exc}") from exc
+                raise ConnectionLost(f"receive failed after {self.last_cmd}: {exc}") from exc
             if not chunk:
-                raise ConnectionLost("the PS5 closed the connection")
+                raise ConnectionLost(f"the PS5 closed the connection after {self.last_cmd}")
             buf += chunk
         return bytes(buf)
 
@@ -153,9 +155,9 @@ class _Wire:
 
 
 class Ps5DebugNgClient:
-    def __init__(self, sock: socket.socket, host: str) -> None:
+    def __init__(self, sock: socket.socket, host: str, port: int = 744) -> None:
         self._w = _Wire(sock)
-        self.host = host
+        self.host, self.port = host, port
         self._lock = threading.RLock()  # freezer thread and UI share the socket
         self._authed = False
         self._turbo: bool | None = None
@@ -166,13 +168,24 @@ class Ps5DebugNgClient:
     @classmethod
     def connect(cls, host: str, port: int = 744, timeout: float = 8.0) -> Ps5DebugNgClient:
         """Open the connection. Fails within ``timeout`` seconds (AC-1.2: under 10 s)."""
+        return cls(cls._open(host, port, timeout), host, port)
+
+    @staticmethod
+    def _open(host: str, port: int, timeout: float = 8.0) -> socket.socket:
         try:
             sock = socket.create_connection((host, port), timeout=timeout)
         except OSError as exc:
             raise ConsoleUnreachable(f"can't connect to {host}:{port}: {exc}") from exc
         sock.settimeout(min(timeout, IO_TIMEOUT))
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        return cls(sock, host)
+        return sock
+
+    def _reconnect(self) -> None:
+        """Open a fresh socket after the server dropped us (scan auth is per socket)."""
+        self.close()
+        self._w = _Wire(self._open(self.host, self.port))
+        self._authed = False
+        self._scan = None
 
     def close(self) -> None:
         with contextlib.suppress(OSError):
@@ -212,11 +225,21 @@ class Ps5DebugNgClient:
             return out
 
     def foreground_app(self) -> ForegroundApp | None:
+        """Title + version of the running game. Not every PS5Debug-NG build has this
+        command; some answer with an error, some drop the connection. Either way we
+        stop asking and the session falls back to the process list."""
         if not self._fg_supported:
             return None
         with self._lock:
-            self._w.request(Cmd.CONSOLE_FOREGROUND_APP)
-            if self._w.status() != Status.SUCCESS:
+            try:
+                self._w.request(Cmd.CONSOLE_FOREGROUND_APP)
+                status = self._w.status()
+            except ConnectionLost as exc:
+                log.warning("foreground-app command dropped the connection (%s); reconnecting", exc)
+                self._fg_supported = False
+                self._reconnect()
+                return None
+            if status != Status.SUCCESS:
                 log.info("foreground-app command not supported; using the process list")
                 self._fg_supported = False
                 return None

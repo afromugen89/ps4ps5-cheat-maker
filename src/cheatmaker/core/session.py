@@ -43,6 +43,17 @@ class GameInfo:
         return "PS4 game" if self.is_ps4 else "PS5 game"
 
 
+def clean_host(text: str) -> str:
+    """Accept what people paste: "http://192.168.0.193/", "192.168.0.193:744", spaces."""
+    host = text.strip()
+    if "://" in host:
+        host = host.split("://", 1)[1]
+    host = host.split("/", 1)[0]
+    if host.count(":") == 1:  # host:port (an IPv6 address has more colons)
+        host = host.split(":", 1)[0]
+    return host.strip()
+
+
 def parse_version(text: str) -> tuple[int, ...]:
     nums = re.findall(r"\d+", text)
     return tuple(int(n) for n in nums)
@@ -69,7 +80,7 @@ class Session:
 
     def connect(self, ip: str, port: int = 744) -> str:
         """Open the connection and check the PS5Debug-NG version. Returns the version."""
-        ip = ip.strip()
+        ip = clean_host(ip)
         if not ip:
             raise ValueError("Type your PS5's IP address first.")
         self.disconnect()

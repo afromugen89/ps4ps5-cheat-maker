@@ -49,6 +49,7 @@ class FakeNgServer:
         self.authed = False
         self.watch_rips: list[int] = []
         self.commands: list[int] = []
+        self.connections = 0
         self.sock = socket.socket()
         self.sock.bind(("127.0.0.1", 0))
         self.sock.listen(1)
@@ -66,19 +67,26 @@ class FakeNgServer:
         return buf
 
     def _serve(self):
-        c, _ = self.sock.accept()
-        with c:
+        while True:  # one client at a time; a dropped client may reconnect
             try:
-                while True:
-                    magic, cmd, ln = struct.unpack("<III", self._recv(c, 12))
-                    assert magic == MAGIC
-                    body = self._recv(c, ln) if ln else b""
-                    self.commands.append(cmd)
-                    if cmd == 0xDEAD:
-                        return
-                    self._handle(c, cmd, body)
-            except (EOFError, OSError):
+                c, _ = self.sock.accept()
+            except OSError:
                 return
+            self.connections += 1
+            with c:
+                try:
+                    while True:
+                        magic, cmd, ln = struct.unpack("<III", self._recv(c, 12))
+                        assert magic == MAGIC
+                        body = self._recv(c, ln) if ln else b""
+                        self.commands.append(cmd)
+                        if cmd == 0xDEAD:
+                            return
+                        if cmd == Cmd.CONSOLE_FOREGROUND_APP and self.foreground == "drop":
+                            break  # like a PS5Debug-NG build without this command
+                        self._handle(c, cmd, body)
+                except (EOFError, OSError):
+                    continue
 
     def _handle(self, c, cmd, body):
         f = self.fake
@@ -239,6 +247,34 @@ def test_foreground_unsupported_falls_back():
     assert cl.foreground_app() is None  # not asked again
     assert server.commands.count(Cmd.CONSOLE_FOREGROUND_APP) == 1
     cl.close()
+
+
+def test_foreground_drop_reconnects_and_falls_back():
+    server = FakeNgServer(foreground="drop")
+    cl = Ps5DebugNgClient.connect("127.0.0.1", server.port, timeout=3)
+    assert cl.version() == "1.3"
+    assert cl.foreground_app() is None
+    assert cl.version() == "1.3", "works again on the new connection"
+    assert cl.foreground_app() is None
+    assert server.connections == 2 and server.commands.count(Cmd.CONSOLE_FOREGROUND_APP) == 1
+    cl.close()
+
+
+def test_session_detects_game_when_foreground_drops():
+    from cheatmaker.core.session import Session
+
+    server = FakeNgServer(foreground="drop")
+    s = Session(lambda ip, port: Ps5DebugNgClient.connect(ip, server.port, timeout=3))
+    s.connect("127.0.0.1")
+    g = s.refresh_game()
+    assert g.title_id == "PPSA01234" and g.pid == PID
+    s.disconnect()
+
+
+def test_connection_lost_names_the_command(client):
+    client._w.request(0xDEAD)
+    with pytest.raises(ConnectionLost, match="after 0x0000dead"):
+        client._w.status()
 
 
 def test_read_write(client, server):

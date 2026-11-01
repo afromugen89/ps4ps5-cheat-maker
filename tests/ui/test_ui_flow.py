@@ -67,6 +67,12 @@ def test_connect_shows_game_and_remembers_ip(win):  # AC-1.1, AC-1.3, AC-2.1
     w2.deleteLater()
 
 
+def test_connect_cleans_pasted_url(win):
+    connect(win, "http://192.168.0.193/")
+    assert win.connect_view.ip.text() == "192.168.0.193"
+    assert Settings.load().last_ip == "192.168.0.193"
+
+
 def test_connect_unreachable_message(qtbot):  # AC-1.2
     from cheatmaker.errors import ConsoleUnreachable
 
