@@ -1,0 +1,316 @@
+"""Find a value (AC-3), set / freeze it (AC-4), make a cheat from it (AC-5)."""
+
+from __future__ import annotations
+
+import threading
+
+from PySide6.QtCore import QTimer
+from PySide6.QtWidgets import (
+    QComboBox,
+    QGroupBox,
+    QHBoxLayout,
+    QHeaderView,
+    QLabel,
+    QLineEdit,
+    QProgressBar,
+    QPushButton,
+    QTableWidget,
+    QTableWidgetItem,
+    QVBoxLayout,
+    QWidget,
+)
+
+from cheatmaker.core.scanner import FEW_MATCHES, Match
+from cheatmaker.core.templates import TEMPLATES, make_cheat
+from cheatmaker.core.values import Compare, ValueType, parse_number
+from cheatmaker.ui import hints
+from cheatmaker.ui.controller import Controller
+from cheatmaker.ui.tasks import _Signals
+
+LIVE_MS = 500
+
+
+def fmt_value(v: float | int) -> str:
+    return f"{v:,.2f}" if isinstance(v, float) else f"{v:,}"
+
+
+class FindWizard(QWidget):
+    def __init__(self, ctl: Controller) -> None:
+        super().__init__()
+        self.ctl = ctl
+        self.unknown_mode = False
+        self.rows: list[Match] = []
+        self._cancel: threading.Event | None = None
+        self._progress = _Signals()
+        self._progress.done.connect(lambda p: self.progress.setValue(int(p * 100)))
+
+        self.hint = QLabel(hints.FIND_START)
+        self.hint.setWordWrap(True)
+        self.number = QLineEdit()
+        self.number.setPlaceholderText("The number you see, e.g. 2450")
+        self.search_btn = QPushButton("Search")
+        self.unknown_btn = QPushButton("I don't know the number")
+        self.new_btn = QPushButton("Start over")
+        self.count = QLabel("")
+        self.up_btn = QPushButton("Went up")
+        self.down_btn = QPushButton("Went down")
+        self.changed_btn = QPushButton("Changed")
+        self.same_btn = QPushButton("Same")
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 100)
+        self.cancel_btn = QPushButton("Cancel")
+
+        self.advanced = QGroupBox("Advanced")
+        self.advanced.setCheckable(True)
+        self.advanced.setChecked(False)
+        self.vtype = QComboBox()
+        self.vtype.addItem("Pick for me", None)
+        for vt in ValueType:
+            self.vtype.addItem(vt.label, vt)
+        adv = QHBoxLayout(self.advanced)
+        adv.addWidget(QLabel("Number type:"))
+        adv.addWidget(self.vtype)
+        self.advanced.toggled.connect(lambda _on: self._fill_table())
+
+        self.table = QTableWidget(0, 2)
+        self.table.setHorizontalHeaderLabels(["Value now", "Address"])
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+
+        self.set_value = QLineEdit()
+        self.set_value.setPlaceholderText("New value")
+        self.set_btn = QPushButton("Set")
+        self.freeze_btn = QPushButton("Freeze")
+        self.template = QComboBox()
+        for t in TEMPLATES:
+            self.template.addItem(t.name, t)
+        self.make_btn = QPushButton("Make a cheat")
+
+        top = QHBoxLayout()
+        for w in (self.number, self.search_btn, self.unknown_btn, self.new_btn):
+            top.addWidget(w)
+        cmp_row = QHBoxLayout()
+        cmp_row.addWidget(self.count, 1)
+        for w in (self.up_btn, self.down_btn, self.changed_btn, self.same_btn):
+            cmp_row.addWidget(w)
+        prog = QHBoxLayout()
+        prog.addWidget(self.progress, 1)
+        prog.addWidget(self.cancel_btn)
+        act = QHBoxLayout()
+        for w in (self.set_value, self.set_btn, self.freeze_btn, self.template, self.make_btn):
+            act.addWidget(w)
+        lay = QVBoxLayout(self)
+        lay.addWidget(self.hint)
+        lay.addLayout(top)
+        lay.addLayout(cmp_row)
+        lay.addLayout(prog)
+        lay.addWidget(self.table, 1)
+        lay.addLayout(act)
+        lay.addWidget(self.advanced)
+
+        self.search_btn.clicked.connect(self.do_search)
+        self.number.returnPressed.connect(self.do_search)
+        self.unknown_btn.clicked.connect(self.do_unknown)
+        self.new_btn.clicked.connect(self.do_reset)
+        self.up_btn.clicked.connect(lambda: self.do_compare(Compare.INCREASED))
+        self.down_btn.clicked.connect(lambda: self.do_compare(Compare.DECREASED))
+        self.changed_btn.clicked.connect(lambda: self.do_compare(Compare.CHANGED))
+        self.same_btn.clicked.connect(lambda: self.do_compare(Compare.UNCHANGED))
+        self.cancel_btn.clicked.connect(self.do_cancel)
+        self.set_btn.clicked.connect(self.do_set)
+        self.freeze_btn.clicked.connect(self.do_freeze)
+        self.make_btn.clicked.connect(self.do_make)
+        self.table.itemSelectionChanged.connect(self._update_buttons)
+
+        self.timer = QTimer(self)
+        self.timer.setInterval(LIVE_MS)
+        self.timer.timeout.connect(self.refresh_live)
+        ctl.game_changed.connect(lambda _g: self.do_reset())
+        ctl.connection_changed.connect(lambda _up: self._update_buttons())
+        self._update_buttons()
+
+    # -- state ----------------------------------------------------------------
+    def _ready(self) -> bool:
+        return self.ctl.session.connected and self.ctl.session.game is not None
+
+    def _update_buttons(self) -> None:
+        busy = self._cancel is not None
+        ready = self._ready() and not busy
+        active = self.ctl.scanner.active
+        self.search_btn.setEnabled(ready)
+        self.search_btn.setText("Search again" if active else "Search")
+        self.unknown_btn.setEnabled(ready and not active)
+        self.new_btn.setEnabled(ready and active)
+        for b in (self.up_btn, self.down_btn, self.changed_btn, self.same_btn):
+            b.setEnabled(ready and active)
+        self.cancel_btn.setEnabled(busy)
+        sel = ready and self.selected() is not None
+        for w in (self.set_btn, self.freeze_btn, self.make_btn):
+            w.setEnabled(sel)
+        m = self.selected()
+        self.freeze_btn.setText(
+            "Unfreeze" if m and m.address in self.ctl.frozen_addresses else "Freeze"
+        )
+
+    def selected(self) -> Match | None:
+        rows = self.table.selectionModel().selectedRows()
+        if not rows or rows[0].row() >= len(self.rows):
+            return None
+        return self.rows[rows[0].row()]
+
+    def _after_scan(self, count: int) -> None:
+        self._cancel = None
+        self.progress.setValue(100)
+        sc = self.ctl.scanner
+        self.count.setText(f"{count:,} matches")
+        if count == 0:
+            self.hint.setText(hints.FIND_NONE)
+        elif sc.few_left:
+            self.hint.setText(hints.FIND_FEW)
+        else:
+            self.hint.setText(hints.FIND_UNKNOWN if self.unknown_mode else hints.FIND_NARROW)
+        self.refresh_live()
+        self._update_buttons()
+
+    def _scan_failed(self, exc: BaseException) -> None:
+        self._cancel = None
+        self.progress.setValue(0)
+        self._update_buttons()
+        self.ctl.fail(exc, "scan")
+
+    def _run_scan(self, fn) -> None:
+        self._cancel = threading.Event()
+        cancel = self._cancel
+        self.progress.setValue(0)
+        self._update_buttons()
+        self.ctl.tasks.run(
+            lambda: fn(self._progress.done.emit, cancel), self._after_scan, self._scan_failed
+        )
+
+    # -- actions --------------------------------------------------------------
+    def do_search(self) -> None:
+        try:
+            value = parse_number(self.number.text())
+        except ValueError as exc:
+            self.ctl.fail(exc, "scan")
+            return
+        sc = self.ctl.scanner
+        if sc.active:
+            self._run_scan(lambda p, c: sc.next_scan(Compare.EXACT, value, p, c))
+        else:
+            self.unknown_mode = False
+            vt = self.vtype.currentData() if self.advanced.isChecked() else None
+            self._run_scan(lambda p, c: sc.first_scan(value, vt, p, c))
+
+    def do_unknown(self) -> None:
+        self.unknown_mode = True
+        vt = self.vtype.currentData() if self.advanced.isChecked() else None
+        self._run_scan(lambda p, c: self.ctl.scanner.first_scan(None, vt, p, c))
+
+    def do_compare(self, cmp: Compare) -> None:
+        self._run_scan(lambda p, c: self.ctl.scanner.next_scan(cmp, None, p, c))
+
+    def do_cancel(self) -> None:
+        if self._cancel is not None:
+            self._cancel.set()
+
+    def do_reset(self) -> None:
+        try:
+            self.ctl.scanner.reset()
+        except Exception as exc:
+            self.ctl.fail(exc, "scan")
+        self.unknown_mode = False
+        self.rows = []
+        self.count.setText("")
+        self.number.clear()
+        self.table.setRowCount(0)
+        self.timer.stop()
+        self.hint.setText(hints.FIND_START if self._ready() else hints.NO_GAME)
+        self._update_buttons()
+
+    def refresh_live(self) -> None:
+        """AC-3.4: with 10 or fewer matches, show them with live values."""
+        sc = self.ctl.scanner
+        if not (sc.few_left and self._ready()):
+            self.timer.stop()
+            self.rows = []
+            self._fill_table()
+            return
+        try:
+            self.rows = sc.matches(FEW_MATCHES)
+        except Exception as exc:
+            self.timer.stop()
+            self.ctl.fail(exc, "read")
+            return
+        self._fill_table()
+        if not self.timer.isActive():
+            self.timer.start()
+
+    def _fill_table(self) -> None:
+        keep = self.table.selectionModel().selectedRows()
+        keep_row = keep[0].row() if keep else None
+        self.table.setColumnHidden(1, not self.advanced.isChecked())
+        self.table.setRowCount(len(self.rows))
+        for i, m in enumerate(self.rows):
+            frozen = " (frozen)" if m.address in self.ctl.frozen_addresses else ""
+            self.table.setItem(i, 0, QTableWidgetItem(fmt_value(m.value) + frozen))
+            self.table.setItem(i, 1, QTableWidgetItem(f"{m.address:#x}"))
+        if keep_row is not None and keep_row < len(self.rows):
+            self.table.selectRow(keep_row)
+        self._update_buttons()
+
+    def _vtype(self) -> ValueType:
+        assert self.ctl.scanner.vtype is not None
+        return self.ctl.scanner.vtype
+
+    def do_set(self) -> None:
+        m = self.selected()
+        if m is None:
+            return
+        try:
+            data = self._vtype().encode(parse_number(self.set_value.text()))
+            g = self.ctl.session.require_game()
+            self.ctl.session.require_client().write(g.pid, m.address, data)
+            if m.address in self.ctl.frozen_addresses:
+                self.ctl.freezer.freeze(f"find:{m.address}", [(g.pid, m.address, data)])
+        except Exception as exc:
+            self.ctl.fail(exc, "write")
+            return
+        self.refresh_live()
+
+    def do_freeze(self) -> None:
+        m = self.selected()
+        if m is None:
+            return
+        key = f"find:{m.address}"
+        if m.address in self.ctl.frozen_addresses:
+            self.ctl.freezer.unfreeze(key)
+            self.ctl.frozen_addresses.discard(m.address)
+        else:
+            try:
+                g = self.ctl.session.require_game()
+                raw = self.ctl.session.require_client().read(g.pid, m.address, self._vtype().size)
+            except Exception as exc:
+                self.ctl.fail(exc, "read")
+                return
+            self.ctl.freezer.freeze(key, [(g.pid, m.address, raw)])
+            self.ctl.frozen_addresses.add(m.address)
+        self._fill_table()
+
+    def do_make(self) -> None:
+        m = self.selected()
+        if m is None:
+            return
+        template = self.template.currentData()
+        try:
+            kind, offset = self.ctl.session.classify(m.address)
+            value = parse_number(self.set_value.text()) if self.set_value.text().strip() else None
+            cheat = make_cheat(template, kind, offset, self._vtype(), m.raw, value)
+        except Exception as exc:
+            self.ctl.fail(exc, "make_cheat")
+            return
+        self.ctl.ensure_file().cheats.append(cheat)
+        self.ctl.cheats_changed.emit()
+        self.ctl.message.emit(f'Made "{cheat.name}". Tick it to turn it on.')

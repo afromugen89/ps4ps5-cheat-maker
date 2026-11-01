@@ -38,6 +38,8 @@ log = logging.getLogger(__name__)
 MAGIC = 0xFFAABBCC
 MAX_BODY = 0x100000  # 1 MiB per read/write request
 SCAN_SLICE = 64 * 1024 * 1024  # first scan in slices so Cancel and progress respond
+IO_TIMEOUT = 4.0  # short, so a dropped PS5 is noticed within 5 s while freezing (AC-1.4)
+SCAN_TIMEOUT = 60.0  # one scan slice runs on the console and may take a while
 SENTINEL_U64 = 0xFFFFFFFFFFFFFFFF
 AUTH_MAGIC = 0xBB40E64D
 INTERRUPT_PORT = 755
@@ -168,13 +170,22 @@ class Ps5DebugNgClient:
             sock = socket.create_connection((host, port), timeout=timeout)
         except OSError as exc:
             raise ConsoleUnreachable(f"can't connect to {host}:{port}: {exc}") from exc
-        sock.settimeout(timeout)
+        sock.settimeout(min(timeout, IO_TIMEOUT))
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         return cls(sock, host)
 
     def close(self) -> None:
         with contextlib.suppress(OSError):
             self._w.sock.close()
+
+    @contextlib.contextmanager
+    def _timeout(self, seconds: float):
+        old = self._w.sock.gettimeout()
+        self._w.sock.settimeout(seconds)
+        try:
+            yield
+        finally:
+            self._w.sock.settimeout(old)
 
     # -- info ----------------------------------------------------------------
     def version(self) -> str:
@@ -251,7 +262,7 @@ class Ps5DebugNgClient:
     def read_many(self, pid: int, spans: list[tuple[int, int]]) -> list[bytes]:
         """Bulk fetch with CMD_PROC_SCAN_GET (one round trip for many spans)."""
         self._auth()
-        with self._lock:
+        with self._lock, self._timeout(SCAN_TIMEOUT):
             body = struct.pack("<II", pid, len(spans)) + b"".join(
                 struct.pack("<QI", a, n) for a, n in spans
             )
@@ -304,7 +315,7 @@ class Ps5DebugNgClient:
         cmd = Cmd.TURBOSCAN_START if turbo else Cmd.PROC_SCAN_START
         body = hdr + (struct.pack("<I", 0) if turbo else b"")
         hits = []
-        with self._lock:
+        with self._lock, self._timeout(SCAN_TIMEOUT):
             self._w.request(cmd, body)
             self._w.ok("scan start", ReadFailed)
             self._w.send(vbytes)
