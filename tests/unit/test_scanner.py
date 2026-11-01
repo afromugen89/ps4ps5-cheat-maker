@@ -94,3 +94,10 @@ def test_logs_value_and_few_match_addresses(session, fake, caplog):
     text = caplog.text
     assert "value=100" in text and "value=90 count=1" in text
     assert f"action=matches addrs={HEALTH_ADDR:#x}" in text
+
+
+def test_eight_byte_types_keep_4_byte_alignment():
+    # Returnal keeps INT64 counters on 4-byte boundaries (console test C3).
+    from cheatmaker.console.local_scan import alignment_for
+
+    assert alignment_for(ValueType.INT64) == 4 and alignment_for(ValueType.DOUBLE) == 4

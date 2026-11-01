@@ -6,7 +6,10 @@ FIND_START = "Type a number you see in the game (like your gold), then press Sea
 FIND_UNKNOWN = "Now make the value change in the game, then press Went up, Went down or Same."
 FIND_NARROW = "Change the number in the game (spend gold, take damage), then type the new number."
 FIND_NONE = "Nothing found. Check the number and search again, or try Advanced > type."
-FIND_FEW = "Found it! Pick a row, then make a cheat, set it, or freeze it."
+FIND_FEW = (
+    "Found it! Pick a row, then make a cheat, set it, or freeze it. If the game puts "
+    "the number back, search again with Advanced > 8-byte whole number."
+)
 CHEATS_EMPTY = "No cheats yet. Find a value first, or open a cheat file."
 CHEATS = "Tick a cheat to try it. When you're happy, press Save."
 CHEATS_SESSION = (

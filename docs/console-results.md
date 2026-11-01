@@ -28,3 +28,4 @@ Findings that changed the code:
 - C3 Set value: NG 1.3 expects PROC_WRITE as header (pid, addr, size) -> OK -> data bytes -> OK. Sending the bytes inside the request hung the server. Confirmed on the PS5 by writing back an unchanged value; fixed in the client.
 - C3 Obolites (Returnal): INT32 search 10 -> 51 -> 13 -> 35 left 4 heap addresses; Set/Freeze wrote all 4 and they held 1,000,000, but the in-game count reverted on each pickup. All 4 are copies (UI/event objects that point at each other); the real counter was not found as INT32. Writes themselves verified.
 - C3 PASSED (Kein, 2026-11-01): Set and Freeze hold the value in game after re-searching.
+  - Returnal Obolites real counter is INT64 at 4-byte-aligned addresses (0x1020f48f34, 0x1020f49354). INT64 first search 7,737 matches in 152.9 s (over the 2-min AC-3.5 target), then 2 matches. INT32 hits were display copies. Hint now suggests 8-byte search when Set doesn't stick.
