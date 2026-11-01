@@ -54,6 +54,8 @@ class FindWizard(QWidget):
         self.ctl = ctl
         self.unknown_mode = False
         self.rows: list[Match] = []
+        self.row_types: list[ValueType] = []
+        self.manual: dict[int, ValueType] = {}  # addresses the player typed in
         self._cancel: threading.Event | None = None
         self._progress = _Signals()
         self._progress.done.connect(self._on_progress)
@@ -87,6 +89,15 @@ class FindWizard(QWidget):
         adv.addWidget(self.vtype)
         self.advanced.toggled.connect(lambda _on: self._fill_table())
 
+        self.add_addr = QLineEdit()
+        self.add_addr.setPlaceholderText("Address, e.g. 0x12e0ea60ac")
+        self.add_type = QComboBox()
+        for vt in ValueType:
+            self.add_type.addItem(vt.label, vt)
+        self.add_type.setCurrentIndex(list(ValueType).index(ValueType.FLOAT))
+        self.add_btn = QPushButton("Add address")
+        self.remove_btn = QPushButton("Remove")
+
         self.table = QTableWidget(0, 2)
         self.table.setHorizontalHeaderLabels(["Value now", "Address"])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
@@ -113,6 +124,10 @@ class FindWizard(QWidget):
         prog = QHBoxLayout()
         prog.addWidget(self.progress, 1)
         prog.addWidget(self.cancel_btn)
+        add_row = QHBoxLayout()
+        add_row.addWidget(self.add_addr, 1)
+        for w in (self.add_type, self.add_btn, self.remove_btn):
+            add_row.addWidget(w)
         act = QHBoxLayout()
         for w in (self.set_value, self.set_btn, self.freeze_btn, self.template, self.make_btn):
             act.addWidget(w)
@@ -121,6 +136,7 @@ class FindWizard(QWidget):
         lay.addLayout(top)
         lay.addLayout(cmp_row)
         lay.addLayout(prog)
+        lay.addLayout(add_row)
         lay.addWidget(self.table, 1)
         lay.addLayout(act)
         lay.addWidget(self.advanced)
@@ -137,12 +153,15 @@ class FindWizard(QWidget):
         self.set_btn.clicked.connect(self.do_set)
         self.freeze_btn.clicked.connect(self.do_freeze)
         self.make_btn.clicked.connect(self.do_make)
+        self.add_btn.clicked.connect(self.do_add_address)
+        self.add_addr.returnPressed.connect(self.do_add_address)
+        self.remove_btn.clicked.connect(self.do_remove_address)
         self.table.itemSelectionChanged.connect(self._update_buttons)
 
         self.timer = QTimer(self)
         self.timer.setInterval(LIVE_MS)
         self.timer.timeout.connect(self.refresh_live)
-        ctl.game_changed.connect(lambda _g: self.do_reset())
+        ctl.game_changed.connect(lambda _g: self._new_game())
         ctl.connection_changed.connect(lambda _up: self._update_buttons())
         self._update_buttons()
 
@@ -164,16 +183,22 @@ class FindWizard(QWidget):
         sel = ready and self.selected() is not None
         for w in (self.set_btn, self.freeze_btn, self.make_btn):
             w.setEnabled(sel)
+        self.add_btn.setEnabled(ready)
         m = self.selected()
+        self.remove_btn.setEnabled(sel and m is not None and m.address in self.manual)
         self.freeze_btn.setText(
             "Unfreeze" if m and m.address in self.ctl.frozen_addresses else "Freeze"
         )
 
-    def selected(self) -> Match | None:
+    def _selected_row(self) -> int | None:
         rows = self.table.selectionModel().selectedRows()
         if not rows or rows[0].row() >= len(self.rows):
             return None
-        return self.rows[rows[0].row()]
+        return rows[0].row()
+
+    def selected(self) -> Match | None:
+        i = self._selected_row()
+        return None if i is None else self.rows[i]
 
     def _on_progress(self, fraction: float) -> None:
         self.progress.setValue(int(fraction * 100))
@@ -253,19 +278,28 @@ class FindWizard(QWidget):
         self._update_buttons()
 
     def refresh_live(self) -> None:
-        """AC-3.4: with 10 or fewer matches, show them with live values."""
+        """AC-3.4: with 10 or fewer matches, show them with live values. Typed-in
+        addresses are listed under the matches."""
         sc = self.ctl.scanner
-        if not (sc.few_left and self._ready()):
+        show_matches = sc.few_left and self._ready()
+        if not (show_matches or (self.manual and self._ready())):
             self.timer.stop()
-            self.rows = []
+            self.rows, self.row_types = [], []
             self._fill_table()
             return
         try:
-            self.rows = sc.matches(FEW_MATCHES)
+            rows = sc.matches(FEW_MATCHES) if show_matches else []
+            types = [self._vtype()] * len(rows) if rows else []
+            seen = {m.address for m in rows}
+            for addr, vt in self.manual.items():
+                if addr not in seen:
+                    rows.append(self._read_match(addr, vt))
+                    types.append(vt)
         except Exception as exc:
             self.timer.stop()
             self.ctl.fail(exc, "read")
             return
+        self.rows, self.row_types = rows, types
         self._fill_table()
         if not self.timer.isActive():
             self.timer.start()
@@ -277,6 +311,8 @@ class FindWizard(QWidget):
         self.table.setRowCount(len(self.rows))
         for i, m in enumerate(self.rows):
             frozen = " (frozen)" if m.address in self.ctl.frozen_addresses else ""
+            if m.address in self.manual:
+                frozen += f" (added, {self.manual[m.address].label})"
             self.table.setItem(i, 0, QTableWidgetItem(fmt_value(m.value) + frozen))
             self.table.setItem(i, 1, QTableWidgetItem(f"{m.address:#x}"))
         if keep_row is not None and keep_row < len(self.rows):
@@ -287,15 +323,71 @@ class FindWizard(QWidget):
         assert self.ctl.scanner.vtype is not None
         return self.ctl.scanner.vtype
 
+    def _row_type(self) -> ValueType:
+        i = self._selected_row()
+        assert i is not None
+        return self.row_types[i]
+
+    def _read_match(self, addr: int, vt: ValueType) -> Match:
+        g = self.ctl.session.require_game()
+        raw = self.ctl.session.require_client().read(g.pid, addr, vt.size)
+        return Match(addr, vt.decode(raw), raw)
+
+    def _new_game(self) -> None:
+        self.manual.clear()  # addresses belong to the old game's memory
+        self.do_reset()
+
+    def do_add_address(self) -> None:
+        text = self.add_addr.text().strip().replace(" ", "")
+        try:
+            addr = int(text, 16)
+            if addr <= 0:
+                raise ValueError
+        except ValueError:
+            self.ctl.fail(
+                ValueError(f'"{text}" isn\'t an address. Type it like 0x12e0ea60ac.'), "add"
+            )
+            return
+        vt = self.add_type.currentData()
+        try:
+            self._read_match(addr, vt)
+        except Exception:
+            self.ctl.fail(
+                ValueError(
+                    f"Nothing is at {addr:#x} in the game right now. Addresses change when "
+                    "the game restarts or an area unloads."
+                ),
+                "add",
+            )
+            return
+        log.info("action=add_address addr=%#x type=%s", addr, vt.name)
+        self.manual[addr] = vt
+        self.add_addr.clear()
+        self.refresh_live()
+        self.table.selectRow(next(i for i, m in enumerate(self.rows) if m.address == addr))
+
+    def do_remove_address(self) -> None:
+        m = self.selected()
+        if m is None or m.address not in self.manual:
+            return
+        if m.address in self.ctl.frozen_addresses:
+            self.ctl.freezer.unfreeze(f"find:{m.address}")
+            self.ctl.frozen_addresses.discard(m.address)
+        del self.manual[m.address]
+        self.refresh_live()
+
     def do_set(self) -> None:
         m = self.selected()
         if m is None:
             return
         try:
-            data = self._vtype().encode(parse_number(self.set_value.text()))
+            data = self._row_type().encode(parse_number(self.set_value.text()))
             g = self.ctl.session.require_game()
             log.info(
-                "action=write type=%s addr=%#x bytes=%s", self._vtype().name, m.address, data.hex()
+                "action=write type=%s addr=%#x bytes=%s",
+                self._row_type().name,
+                m.address,
+                data.hex(),
             )
             self.ctl.session.require_client().write(g.pid, m.address, data)
             if m.address in self.ctl.frozen_addresses:
@@ -316,7 +408,9 @@ class FindWizard(QWidget):
         else:
             try:
                 g = self.ctl.session.require_game()
-                raw = self.ctl.session.require_client().read(g.pid, m.address, self._vtype().size)
+                raw = self.ctl.session.require_client().read(
+                    g.pid, m.address, self._row_type().size
+                )
             except Exception as exc:
                 self.ctl.fail(exc, "read")
                 return
@@ -332,7 +426,7 @@ class FindWizard(QWidget):
         try:
             kind, offset = self.ctl.session.classify(m.address)
             value = parse_number(self.set_value.text()) if self.set_value.text().strip() else None
-            cheat = make_cheat(template, kind, offset, self._vtype(), m.raw, value)
+            cheat = make_cheat(template, kind, offset, self._row_type(), m.raw, value)
         except Exception as exc:
             self.ctl.fail(exc, "make_cheat")
             return

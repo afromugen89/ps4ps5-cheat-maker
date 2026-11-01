@@ -305,3 +305,33 @@ def test_copy_log(win, monkeypatch):  # AC-9.4
 def test_every_screen_has_a_hint(win):  # AC-8.2
     assert win.find.hint.text() and win.cheats.hint.text()
     assert win.connect_view.game.text() == hints.CONNECT
+
+
+def test_type_in_address_then_set_freeze_remove(win, fake):
+    from cheatmaker.core.values import ValueType
+
+    connect(win)
+    f = win.find
+    f.add_type.setCurrentIndex(list(ValueType).index(ValueType.INT32))
+    f.add_addr.setText(f"{HEALTH_ADDR:#x}")
+    f.add_btn.click()
+    assert f.table.rowCount() == 1 and f.table.item(0, 0).text().startswith("100")
+    assert "added, " in f.table.item(0, 0).text() and f.selected().address == HEALTH_ADDR
+    f.set_value.setText("555")
+    f.set_btn.click()
+    assert i32(fake, HEALTH_ADDR) == 555
+    f.freeze_btn.click()
+    assert HEALTH_ADDR in win.ctl.frozen_addresses
+    f.remove_btn.click()
+    assert f.table.rowCount() == 0 and HEALTH_ADDR not in win.ctl.frozen_addresses
+
+
+def test_type_in_bad_or_unmapped_address(win):
+    connect(win)
+    win.find.add_addr.setText("hello")
+    win.find.add_btn.click()
+    assert "isn't an address" in win.status.text()
+    win.find.add_addr.setText("0x10")
+    win.find.add_btn.click()
+    assert win.status.text().startswith("Nothing is at 0x10")
+    assert win.find.table.rowCount() == 0
