@@ -22,7 +22,7 @@ from enum import IntEnum
 
 from cheatmaker.console.client import ForegroundApp, MemMap, ProcInfo, ProgressFn, ScanHit
 from cheatmaker.console.local_scan import LocalScanSession, alignment_for
-from cheatmaker.core.values import Compare, ValueType
+from cheatmaker.core.values import Compare, ValueType, matches
 from cheatmaker.errors import (
     ConnectionLost,
     ConsoleUnreachable,
@@ -86,6 +86,9 @@ _NG_VTYPE = {
     ValueType.DOUBLE: 9,
 }
 _NG_EXACT = 0
+_NG_FUZZY = 1
+"""FuzzyValue: |typed - memory| < 1.0, float/double only. Legacy ExactValue on floats
+is a near-bit-exact match, so typing 80 misses health that is really 79.6 (C3)."""
 _DR7_LEN = {1: 0, 2: 1, 4: 3, 8: 2}
 _DR7_WRITE = 1
 
@@ -379,13 +382,14 @@ class Ps5DebugNgClient:
         self, pid: int, start: int, length: int, vtype: ValueType, value: float | int
     ) -> list[ScanHit]:
         vbytes = vtype.encode(value)
+        compare = _NG_FUZZY if vtype.is_float else _NG_EXACT
         hdr = struct.pack(
             "<IQIBBBI",
             pid,
             start,
             length,
             _NG_VTYPE[vtype],
-            _NG_EXACT,
+            compare,
             alignment_for(vtype),
             len(vbytes),
         )
@@ -412,6 +416,9 @@ class Ps5DebugNgClient:
                     rel = struct.unpack_from("<I", block, off)[0]
                     hits.append(ScanHit(start + rel, block[off + 4 : off + stride]))
             self._w.ok("scan end", ReadFailed)
+        if vtype.is_float:
+            # Fuzzy is +-1.0; keep the app's own +-0.5 rounding rule so PC and PS5 agree.
+            hits = [h for h in hits if matches(vtype, Compare.EXACT, h.value, target=value)]
         return hits
 
     def _scan_ranges(

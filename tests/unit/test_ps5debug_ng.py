@@ -32,7 +32,7 @@ from cheatmaker.errors import (
     ScanNotSupported,
     WriteFailed,
 )
-from tests.conftest import GOLD_ADDR, HEALTH_ADDR, HEAP_BASE, PID, build_fake
+from tests.conftest import BAR_ADDR, GOLD_ADDR, HEALTH_ADDR, HEAP_BASE, PID, build_fake
 
 OK = struct.pack("<I", Status.SUCCESS)
 ERR = struct.pack("<I", Status.ERROR)
@@ -54,6 +54,7 @@ class FakeNgServer:
     ) -> None:
         self.parallel, self.refuse_flags = parallel, refuse_flags
         self.scan_flags: list[int] = []
+        self.scan_compares: list[int] = []
         self.fake = build_fake()
         self.turbo, self.foreground = turbo, foreground
         self.authed = False
@@ -178,7 +179,8 @@ class FakeNgServer:
             c.sendall(OK + caps if self.turbo else ERR)
         elif cmd in (Cmd.TURBOSCAN_START, Cmd.PROC_SCAN_START):
             assert self.authed
-            pid, addr, n, _vt, _ct, align, lv = struct.unpack("<IQIBBBI", body[:23])
+            pid, addr, n, vt, ct, align, lv = struct.unpack("<IQIBBBI", body[:23])
+            self.scan_compares.append(ct)
             assert (cmd == Cmd.TURBOSCAN_START) == (len(body) == 27)
             if len(body) == 27:
                 self.scan_flags.append(struct.unpack("<I", body[23:])[0])
@@ -189,10 +191,17 @@ class FakeNgServer:
             needle = self._recv(c, lv)
             c.sendall(OK)
             data = f.read(pid, addr, n)
+
+            def hit(chunk: bytes) -> bool:
+                if ct == 1:  # FuzzyValue: |scan - mem| < 1.0, float/double only
+                    code = {8: "<f", 9: "<d"}[vt]
+                    return abs(struct.unpack(code, needle)[0] - struct.unpack(code, chunk)[0]) < 1
+                return chunk == needle
+
             entries = b"".join(
-                struct.pack("<I", o) + needle
+                struct.pack("<I", o) + data[o : o + lv]
                 for o in range(0, n - lv + 1, align)
-                if data[o : o + lv] == needle
+                if hit(data[o : o + lv])
             )
             if entries:
                 c.sendall(struct.pack("<Q", len(entries)) + entries)
@@ -422,3 +431,32 @@ def test_ranges_with():
 
     r = [(0x1000, 0x2000), (0x3000, 0x4000), (0x5000, 0x6000)]
     assert ranges_with(r, [0x1500, 0x5000, 0x7000, 0x10]) == [(0x1000, 0x2000), (0x5000, 0x6000)]
+
+
+def test_float_search_matches_rounded_number_on_console(monkeypatch):
+    """Health shown as 80 may be 79.6: float searches use NG FuzzyValue (C3)."""
+    from cheatmaker.console import ps5debug_ng
+
+    monkeypatch.setattr(ps5debug_ng, "MAX_READ_SPANS", 0)  # force console re-scan
+    server = FakeNgServer()
+    cl = Ps5DebugNgClient.connect("127.0.0.1", server.port, timeout=3)
+    regions = [m for m in cl.maps(PID) if m.writable]
+    assert BAR_ADDR in {h.address for h in _first(cl, regions, 87)}
+    server.fake.poke(PID, BAR_ADDR, struct.pack("<f", 79.6))
+    assert cl.scan_next(Compare.EXACT, 80) == 1
+    assert cl.scan_results(5)[0].address == BAR_ADDR
+    server.fake.poke(PID, BAR_ADDR, struct.pack("<f", 80.7))
+    assert cl.scan_next(Compare.EXACT, 80) == 0, "keeps the app's +-0.5 rule"
+    assert set(server.scan_compares) == {1}
+    cl.close()
+
+
+def test_whole_number_search_stays_exact(client, server):
+    regions = [m for m in client.maps(PID) if m.writable]
+    client.scan_start(PID, regions, ValueType.INT32, Compare.EXACT, 100)
+    assert set(server.scan_compares) == {0}
+
+
+def _first(cl, regions, value):
+    cl.scan_start(PID, regions, ValueType.FLOAT, Compare.EXACT, value)
+    return cl.scan_results(100)
