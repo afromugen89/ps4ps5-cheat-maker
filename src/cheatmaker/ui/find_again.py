@@ -317,8 +317,10 @@ class LearnDialog(QDialog):
         self.start_btn = QPushButton("Start")
         self.cancel_btn = QPushButton("Cancel")
         self.close_btn = QPushButton("Close")
+        self.pc_off_btn = QPushButton("Also make a PC-off cheat")
+        self.pc_off_btn.setToolTip(hints.PC_OFF_TIP)
         row = QHBoxLayout()
-        for w in (self.start_btn, self.cancel_btn, self.close_btn):
+        for w in (self.start_btn, self.cancel_btn, self.pc_off_btn, self.close_btn):
             row.addWidget(w)
         lay = QVBoxLayout(self)
         lay.addWidget(self.hint)
@@ -328,6 +330,7 @@ class LearnDialog(QDialog):
         self.start_btn.clicked.connect(self.do_start)
         self.cancel_btn.clicked.connect(self.do_cancel)
         self.close_btn.clicked.connect(self.accept)
+        self.pc_off_btn.clicked.connect(self.do_pc_off)
         self._update()
 
     def _update(self) -> None:
@@ -335,6 +338,28 @@ class LearnDialog(QDialog):
         self.start_btn.setEnabled(not busy and self.learned is None)
         self.pointers.setEnabled(not busy and self.learned is None)
         self.cancel_btn.setEnabled(busy)
+        hook = self.learned.obj.hook if self.learned is not None else None
+        self.pc_off_btn.setVisible(hook is not None and hook.filter.kind != "none")
+
+    def do_pc_off(self) -> None:
+        """AC-13.1: one routine that finds the value and keeps it at the cheat's value
+        for you only. Plain code lines, so it saves to GoldHEN / CheatRunner."""
+        if self.learned is None or self.cheat.value is None or self.cheat.value_type is None:
+            return
+        try:
+            pc_off = ah.hook_cheat(
+                self.ctl.session,
+                self.learned.obj,
+                f"{self.cheat.name} (works with the PC off)",
+                self.cheat.value_type.encode(self.cheat.value),
+            )
+        except CheatMakerError as exc:
+            self.ctl.fail(exc, "pc_off_cheat")
+            return
+        self.ctl.ensure_file().cheats.append(pc_off)
+        self.ctl.cheats_changed.emit()
+        self.pc_off_btn.setEnabled(False)
+        self.ctl.message.emit(hints.PC_OFF_MADE.format(name=pc_off.name))
 
     def _on_step(self, step: str) -> None:
         text = hints.FIND_NEXT_STEPS.get(step, "")

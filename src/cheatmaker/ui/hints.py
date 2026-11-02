@@ -117,3 +117,8 @@ SAVE_APP_ONLY = (
     "notes for this game and come back next time."
 )
 SAVE_HOOK = "Also put the find-it-again hook in the file (ready before the PC connects)"
+PC_OFF_TIP = (
+    "Makes a cheat from the same place in the game's code that keeps your value (only "
+    "yours) and can be saved for CheatRunner, so it works after a restart without the PC."
+)
+PC_OFF_MADE = 'Made "{name}". Tick it to test it, then Save: it works with the PC off.'

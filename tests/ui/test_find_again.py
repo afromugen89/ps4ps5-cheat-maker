@@ -256,3 +256,19 @@ def test_find_it_again_button_and_value_edit_is_remembered(win, console):
     saved = pj.load(pj.project_path(fg.TITLE, fg.VERSION))
     assert saved.cheats[0].value == 20000.0
     assert saved.objects[0].field("Infinite Health").range[1] >= 20000
+
+
+def test_pc_off_cheat_keeps_the_value_after_a_restart(win, console):  # AC-13.1
+    connect(win)
+    dlg = learn(win, add_health_cheat(win, console.game))
+    assert not dlg.pc_off_btn.isHidden()
+    dlg.pc_off_btn.click()
+    pc_off = win.ctl.cheat_file.cheats[-1]
+    assert pc_off.saveable and pc_off.name == "Infinite Health (works with the PC off)"
+    win.ctl.shutdown()
+    run2 = console.restart(2)  # CheatRunner loads the saved lines into the new run
+    for loc in pc_off.locations:
+        run2.fake.poke(fg.PID, fg.BASE + loc.offset, loc.on)
+    run2.set_health(12.0)
+    run2.fake.read(fg.PID, fg.BASE, 1)  # a frame runs
+    assert run2.health() == 999.0
