@@ -328,25 +328,29 @@ def learn(
     obj_addr = address
 
     say("watch")
-    cands = ah.find_hooks(session, address, vtype.size, watch_seconds)
+    # Only instructions whose registers proved [reg + disp] == the value's address.
+    cands = [c for c in ah.find_hooks(session, address, vtype.size, watch_seconds) if c.confirmed]
     if cands:
-        best = cands[0]
-        obj_addr = best.object_for(address)
-        fld.off = best.disp
+        obj_addr = cands[0].object_for(address)
+        fld.off = cands[0].disp
         obj.vtable = ah.object_vtable(session, obj_addr)
-        fallback = None
-        if obj.vtable is None:
-            say("collect")
-            fallback = _field_filter(session, best, obj_addr, collect_seconds, cancel)
-        try:
-            hook = ah.plan_hook(session, best, obj.vtable, fallback)
-            say("prove")
-            ah.prove_slot(session, game.module_base + hook.slot, prove_seconds)
-        except (FindFailed, LockFailed) as exc:
-            notes.append(str(exc))
+        hookable = _hookable(session, [c for c in cands if c.object_for(address) == obj_addr])
+        if hookable is None:
+            notes.append("No place in the game's code is safe to hook for this value.")
         else:
-            obj.anchors.append(hook)
-            methods.append("hook_slot")
+            fallback = None
+            if obj.vtable is None:
+                say("collect")
+                fallback = _field_filter(session, hookable, obj_addr, collect_seconds, cancel)
+            try:
+                hook = ah.plan_hook(session, hookable, obj.vtable, fallback)
+                say("prove")
+                ah.prove_slot(session, game.module_base + hook.slot, prove_seconds)
+            except (FindFailed, LockFailed) as exc:
+                notes.append(str(exc))
+            else:
+                obj.anchors.append(hook)
+                methods.append("hook_slot")
         if obj.vtable is not None:
             obj.anchors.append(VtableAnchor())
             methods.append("vtable_scan")
@@ -378,6 +382,20 @@ def learn(
         ",".join(methods),
     )
     return Learned(obj, methods, notes)
+
+
+def _hookable(session: Session, cands: list[ah.HookCandidate]) -> ah.HookCandidate | None:
+    """The best candidate that can be hooked alone (5+ bytes, no call, see hook_span)."""
+    game = session.require_game()
+    client = session.require_client()
+    for c in cands:
+        try:
+            cv.hook_span(lambda a, n: client.read(game.pid, a, n), c.address, single=True)
+        except LockFailed as exc:
+            log.info("action=learn skip hook at=%#x: %s", c.address, exc)
+            continue
+        return c
+    return None
 
 
 def _field_filter(
@@ -432,6 +450,7 @@ class Tracker:
         self._clock = clock
         self._maps: MapIndex | None = None
         self._last_try = -TRACK_RETRY_S
+        self.pending: int | None = None  # a weak object's new place, not confirmed yet
         self._lock = threading.Lock()
 
     def _map_index(self, fresh: bool = False) -> MapIndex:
@@ -440,19 +459,38 @@ class Tracker:
             self._maps = MapIndex(self.session.require_client().maps(game.pid))
         return self._maps
 
+    @property
+    def strong(self) -> bool:
+        """The object has a class (vtable) check. Without one, verify only sees that the
+        fields look plausible, which another object can pass too."""
+        return self.obj.vtable is not None
+
     def current(self) -> int | None:
+        """The verified address, or None (then nothing may be written). A weak object
+        (no vtable check) that moved is never followed by itself: the new place waits
+        in ``pending`` until the player confirms it (accept_pending)."""
         with self._lock:
+            if self.pending is not None:
+                return None
             if (
                 self.address is not None
                 and verify(self.session, self.obj, self.address, self._map_index()) is None
             ):
-                return self.address
+                moved = None if self.strong else self._slot_elsewhere()
+                if moved is None:
+                    return self.address
+                self.pending, self.confirmed = moved, False
+                log.info(
+                    "action=tracker object=%s game code now sees %#x: waiting for the player",
+                    self.obj.id,
+                    moved,
+                )
+                return None
             now = self._clock()
             if now - self._last_try < TRACK_RETRY_S:
-                self.address = None
                 return None
             self._last_try = now
-            old, self.address = self.address, None
+            old = self.address
             out = find_again(
                 self.session,
                 self.obj,
@@ -461,15 +499,50 @@ class Tracker:
                 learn_chains=False,
                 maps=self._map_index(fresh=True),
             )
-            if out.found:
-                self.address = out.address
+            if not out.found or out.address is None:
+                return None
+            if not self.strong and out.address != old:
+                self.pending, self.confirmed = out.address, False
                 log.info(
-                    "action=tracker object=%s moved from=%s to=%#x",
+                    "action=tracker object=%s moved from=%s to=%#x: waiting for the player",
                     self.obj.id,
                     f"{old:#x}" if old else "-",
                     out.address,
                 )
+                return None
+            self.address = out.address
+            log.info(
+                "action=tracker object=%s moved from=%s to=%#x",
+                self.obj.id,
+                f"{old:#x}" if old else "-",
+                out.address,
+            )
             return self.address
+
+    def _slot_elsewhere(self) -> int | None:
+        """A weak object's freed memory can still look plausible, so also ask the hook:
+        if the game's code now handles a different (plausible) object, that's a move."""
+        hook = self.obj.hook
+        if hook is None:
+            return None
+        try:
+            addr, _count = ah.read_slot(self.session, hook)
+        except ReadFailed:
+            return None
+        if not addr or addr == self.address:
+            return None
+        return addr if verify(self.session, self.obj, addr, self._map_index()) is None else None
+
+    def accept_pending(self) -> None:
+        """The player confirmed the new place of a weak object."""
+        with self._lock:
+            if self.pending is not None:
+                self.address, self.pending, self.confirmed = self.pending, None, True
+
+    def reject_pending(self) -> None:
+        """Not it: forget where it was, and stay paused until a new search."""
+        with self._lock:
+            self.address = self.pending = None
 
     def field_address(self, name: str) -> int | None:
         base = self.current()

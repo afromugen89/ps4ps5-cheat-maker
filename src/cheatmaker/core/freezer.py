@@ -150,8 +150,7 @@ class LiveCheats:
         if addr is None:
             return None
         game = self.session.require_game()
-        loc = cheat.locations[0]
-        loc.offset = addr  # shown under Advanced; the next run finds it again
+        loc = cheat.locations[0]  # its offset is unused: the Tracker holds the address
         return [(game.pid, addr, loc.on if on else loc.off)]
 
     def _writes(self, cheat: Cheat, on: bool) -> Writes:

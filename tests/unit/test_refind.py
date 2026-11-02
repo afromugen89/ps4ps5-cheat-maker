@@ -242,7 +242,7 @@ def test_freeze_pauses_on_a_new_biome_and_resumes_at_the_new_object():
     clock.sleep(rf.TRACK_RETRY_S)
     fz.tick()
     assert not fz.paused and run2.health() == 999.0
-    assert cheat.locations[0].offset == run2.health_addr
+    assert live.trackers["obj1"].field_address("Health") == run2.health_addr
     live.turn_off(cheat)
 
 
@@ -269,3 +269,67 @@ def test_remember_history():
     rf.remember(p, rf.Outcome("disagree"))
     rf.remember(p, rf.Outcome("failed", seconds=3))
     assert [(h.method, h.verified) for h in p.history] == [("hook_slot", True), ("none", False)]
+
+
+# -- review fixes ------------------------------------------------------------------------
+def test_learn_uses_only_hooks_the_registers_confirm():
+    from cheatmaker.console.client import WatchHit
+
+    game = fg.build()
+    for d in (game.fake.read_hits, game.fake.write_hits):  # no registers in the hits
+        d[game.health_addr] = [WatchHit(h.rip) for h in d[game.health_addr]]
+    with pytest.raises(FindFailed, match="still works for this session"):
+        _learn(game)
+
+
+def test_learn_skips_short_instructions_but_keeps_the_class_search():  # review blocker
+    from cheatmaker.console.client import WatchHit
+
+    game = fg.build()
+    short = fg.BASE + 0x300
+    game.fake.poke(fg.PID, short, bytes.fromhex("894808c34883ec28"))  # +8; ret; sub
+    addr = game.player + 8  # the 4-byte id field, written by the short instruction
+    game.fake.write_hits[addr] = [WatchHit(short + 3, {"rax": game.player})]
+    learned = rf.learn(
+        game.session, addr, ValueType.INT32, "Id", "obj1", watch_seconds=1, prove_seconds=1
+    )
+    assert learned.methods == ["vtable_scan"] and learned.obj.hook is None
+    assert "safe to hook" in learned.notes[0]
+    assert game.fake.peek(fg.PID, short, 4) == bytes.fromhex("894808c3"), "nothing patched"
+
+
+def test_weak_object_that_moves_waits_for_the_player():  # review M4
+    game = fg.build(2)
+    for o in (game.player, *game.enemies):  # no class pointer: verify is weak
+        game.fake.poke(fg.PID, o, bytes(8))
+    game.touched = [game.player]
+    obj = _learn(game, collect_seconds=0.25).obj
+    assert obj.vtable is None and obj.hook.filter.kind == "none"
+    ah.install(game.session, obj)
+    clock = Clock()
+    tracker = rf.Tracker(game.session, obj, game.player, clock=clock)
+    fz = Freezer(game.session)
+    live = LiveCheats(game.session, fz)
+    live.trackers["obj1"] = tracker
+    live.turn_on(_anchored_cheat())
+    assert game.health() == 999.0
+    # new area: the player's old memory still looks plausible, but the game's code now
+    # handles another object (here an enemy): never followed without the player
+    old, enemy = game.player, game.enemies[0]
+    game.touched = [enemy]
+    game.set_health(10.0, enemy)
+    writes = len(game.fake.writes)
+    for _ in range(3):
+        fz.tick()
+        clock.sleep(rf.TRACK_RETRY_S)
+    assert len(game.fake.writes) == writes, "nothing written while unsure"
+    assert tracker.pending == enemy and not tracker.confirmed and fz.paused
+    tracker.reject_pending()
+    assert tracker.address is None and tracker.pending is None
+    fz.tick()
+    assert len(game.fake.writes) == writes
+    tracker.address, tracker.pending = old, enemy  # asked again; this time "yes"
+    tracker.accept_pending()
+    fz.tick()
+    assert tracker.confirmed and tracker.address == enemy
+    assert struct.unpack("<f", game.fake.peek(fg.PID, enemy + fg.HP, 4))[0] == 999.0
