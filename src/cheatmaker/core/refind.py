@@ -290,6 +290,19 @@ def default_range(vtype: ValueType, value: float | int) -> tuple[float, float]:
     return (lo, hi)
 
 
+CLASS_FLOAT_LIMIT = 1e9  # top of a float's range in an object with a class check
+
+
+def class_range(vtype: ValueType, value: float | int) -> tuple[float, float]:
+    """Plausible values when the object's class (vtable) is checked too: the class
+    check tells objects apart, so a counter or currency may grow far past 10x (e.g.
+    100 -> 25,000). The low end stays as ``default_range`` (health never goes < 0)."""
+    lo, _hi = default_range(vtype, value)
+    if vtype.is_float:
+        return (lo, CLASS_FLOAT_LIMIT)
+    return (lo, vtype.int_range()[1])
+
+
 def widen(f: Field, value: float | int) -> None:
     """Make sure the value a cheat writes still counts as plausible."""
     if f.range is not None and not f.range[0] <= value <= f.range[1]:
@@ -334,6 +347,8 @@ def learn(
         obj_addr = cands[0].object_for(address)
         fld.off = cands[0].disp
         obj.vtable = ah.object_vtable(session, obj_addr)
+        if obj.vtable is not None:
+            fld.range = class_range(vtype, value)
         hookable = _hookable(session, [c for c in cands if c.object_for(address) == obj_addr])
         if hookable is None:
             notes.append("No place in the game's code is safe to hook for this value.")
@@ -562,6 +577,7 @@ __all__ = [
     "MapIndex",
     "Outcome",
     "Tracker",
+    "class_range",
     "confirm_pick",
     "default_range",
     "find_again",

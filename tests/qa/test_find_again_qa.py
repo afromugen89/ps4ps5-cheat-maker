@@ -407,7 +407,6 @@ def test_tc02_static_value_learns_without_watching_or_patching():
 
 
 # == TC-31, BUG-08: a value that grows must still be found =============================
-@pytest.mark.xfail(reason="BUG-08: plausible range capped at 10x / 10,000", strict=True)
 def test_tc31_counter_that_grows_past_ten_thousand_is_still_found():
     game = fg.build(1)
     obj = learn_core(game).obj  # learned at 100.0

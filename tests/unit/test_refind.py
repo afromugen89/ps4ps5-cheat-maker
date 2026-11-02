@@ -10,7 +10,7 @@ from cheatmaker.core import anchor_hook as ah
 from cheatmaker.core import refind as rf
 from cheatmaker.core.cheats import Cheat, Location, LocationKind
 from cheatmaker.core.freezer import Freezer, LiveCheats
-from cheatmaker.core.project import ChainAnchor, HookAnchor, StaticAnchor, VtableAnchor
+from cheatmaker.core.project import ChainAnchor, Field, HookAnchor, StaticAnchor, VtableAnchor
 from cheatmaker.core.values import ValueType
 from cheatmaker.errors import FindFailed
 from tests import fakegame as fg
@@ -53,7 +53,8 @@ def test_learn_moving_value_records_hook_and_vtable():  # AC-11.1
     obj = learned.obj
     assert learned.methods == ["hook_slot", "vtable_scan"] and not learned.notes
     assert obj.vtable == fg.PLAYER_VT - fg.BASE
-    assert obj.field("Health").off == fg.HP and obj.field("Health").range == (0, 10_000)
+    assert obj.field("Health").off == fg.HP
+    assert obj.field("Health").range == (0, rf.CLASS_FLOAT_LIMIT), "class check: wide"
     hook = obj.hook
     assert isinstance(hook, HookAnchor) and hook.role == "reader"
     assert isinstance(obj.anchors[-1], VtableAnchor)
@@ -193,10 +194,15 @@ def test_default_range_and_widen():
     assert rf.default_range(ValueType.FLOAT, 87.5) == (0, 10_000)
     assert rf.default_range(ValueType.INT32, 2450) == (0, 24_500)
     assert rf.default_range(ValueType.INT8, 100) == (0, 127)
-    obj = _learn(fg.build(1)).obj
-    f = obj.field("Health")
+    f = Field("Health", 0, ValueType.FLOAT, rf.default_range(ValueType.FLOAT, 87.5))
     rf.widen(f, 99_999.0)
     assert f.range == (0, 99_999.0)
+
+
+def test_class_range_lets_a_counter_grow():  # BUG-08
+    assert rf.class_range(ValueType.FLOAT, 100.0) == (0, rf.CLASS_FLOAT_LIMIT)
+    assert rf.class_range(ValueType.INT32, 2450) == (0, 2**31 - 1)
+    assert rf.class_range(ValueType.INT32, -20) == (-200, 2**31 - 1)
 
 
 # -- freeze follows the object (AC-12.5, C10f) -------------------------------------------------
