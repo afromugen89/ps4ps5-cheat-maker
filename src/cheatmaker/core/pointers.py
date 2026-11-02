@@ -36,7 +36,8 @@ log = logging.getLogger(__name__)
 DEFAULT_DEPTH = 3
 DEFAULT_MAX_OFFSET = 0x1000
 MAX_NODES_PER_LEVEL = 20_000
-"""More nodes than this per level and the search would take hours; keep the nearest."""
+"""More nodes than this per level and the search would take hours; keep the nearest
+(smallest offset to the node they point near), since real links are usually short."""
 MAX_SPAN = 1 << 30
 """One console pass covers node addresses this far apart at most (see _windows)."""
 MAX_WINDOWS = 3
@@ -101,6 +102,12 @@ def _windows(nodes: list[int], max_offset: int) -> list[tuple[int, int]]:
     return sorted((g[0] - max_offset, g[-1]) for g in groups[:MAX_WINDOWS])
 
 
+def keep_nearest(holders: list[int], link: dict[int, tuple[int, int]], limit: int) -> list[int]:
+    """The ``limit`` holders with the smallest offsets (ties: lower address first).
+    Keeping the first ones in memory order instead would cut the true link at random."""
+    return sorted(holders, key=lambda h: (link[h][1], h))[:limit]
+
+
 def find_chains(
     target: int,
     module_base: int,
@@ -162,7 +169,7 @@ def find_chains(
             len(nxt),
         )
         if len(nxt) > MAX_NODES_PER_LEVEL:
-            nxt = nxt[:MAX_NODES_PER_LEVEL]
+            nxt = keep_nearest(nxt, link, MAX_NODES_PER_LEVEL)
         frontier = nxt
         if not frontier:
             break
