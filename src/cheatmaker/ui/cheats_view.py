@@ -25,11 +25,19 @@ from cheatmaker.core.cheats import Cheat, versions_differ
 from cheatmaker.core.values import parse_number
 from cheatmaker.ui import hints
 from cheatmaker.ui.controller import Controller
+from cheatmaker.ui.find_again import FindAgain, LearnDialog
 from cheatmaker.ui.find_wizard import fmt_value
 
 log = logging.getLogger(__name__)
 
 COL_ON, COL_NAME, COL_VALUE, COL_KEEPS, COL_DETAILS = range(5)
+FOUND_AGAIN = "Found again each run"
+
+
+def keeps_text(c: Cheat) -> str:
+    if c.anchor is not None:
+        return FOUND_AGAIN
+    return "This session only" if c.session_only else "Yes"
 
 
 def details(c: Cheat) -> str:
@@ -45,6 +53,10 @@ class CheatsView(QWidget):
         self.ctl = ctl
         self.open_lock: Callable[[Cheat], None] = lambda c: None
         self.open_save: Callable[[], None] = lambda: None
+        self.finder = FindAgain(ctl)
+        self.open_learn: Callable[[Cheat], None] = lambda c: LearnDialog(
+            self.ctl, self.finder, c, self
+        ).exec()
         self.pick_file: Callable[[], str] = self._pick_file
         self._filling = False
 
@@ -63,6 +75,13 @@ class CheatsView(QWidget):
         self.show_details = QCheckBox("Advanced: show details")
         self.delete_btn = QPushButton("Delete")
         self.lock_btn = QPushButton("Lock it")
+        self.learn_btn = QPushButton("Find it next time")
+        self.learn_btn.setToolTip(
+            "Learn how the game keeps this value, so Cheat Maker finds it again by itself "
+            "after a restart or a new area"
+        )
+        self.again_btn = QPushButton("Find it again")
+        self.again_btn.setToolTip("Look for your remembered values in the game now")
         self.open_btn = QPushButton("Open cheat file...")
         self.save_btn = QPushButton("Save...")
         self.update_btn = QPushButton("Update for this version")
@@ -73,7 +92,14 @@ class CheatsView(QWidget):
         self._learning = False
         self._learn_tried: set[tuple[str, str, int]] = set()
         buttons = QHBoxLayout()
-        for w in (self.delete_btn, self.lock_btn, self.open_btn, self.save_btn):
+        for w in (
+            self.delete_btn,
+            self.lock_btn,
+            self.learn_btn,
+            self.again_btn,
+            self.open_btn,
+            self.save_btn,
+        ):
             buttons.addWidget(w)
         buttons.addStretch(1)
         buttons.addWidget(self.show_details)
@@ -91,6 +117,8 @@ class CheatsView(QWidget):
         self.show_details.toggled.connect(lambda _on: self.fill())
         self.delete_btn.clicked.connect(self.do_delete)
         self.lock_btn.clicked.connect(lambda: self._with_selected(self.open_lock))
+        self.learn_btn.clicked.connect(lambda: self._with_selected(self.open_learn))
+        self.again_btn.clicked.connect(lambda: self.finder.start())
         self.open_btn.clicked.connect(self.do_open)
         self.save_btn.clicked.connect(lambda: self.open_save())
         self.update_btn.clicked.connect(self.do_update)
@@ -135,7 +163,7 @@ class CheatsView(QWidget):
                 if c.value is None:
                     val.setFlags(val.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 self.table.setItem(i, COL_VALUE, val)
-                keeps = QTableWidgetItem("This session only" if c.session_only else "Yes")
+                keeps = QTableWidgetItem(keeps_text(c))
                 keeps.setFlags(keeps.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 self.table.setItem(i, COL_KEEPS, keeps)
                 det = QTableWidgetItem(details(c))
@@ -154,7 +182,12 @@ class CheatsView(QWidget):
     def _update_buttons(self) -> None:
         c = self.selected()
         self.delete_btn.setEnabled(c is not None)
-        self.lock_btn.setEnabled(c is not None and c.session_only and self.ctl.session.connected)
+        up = self.ctl.session.connected and self.ctl.session.game is not None
+        located = c is not None and (c.anchor is None or c.anchor[0] in self.ctl.live.trackers)
+        self.lock_btn.setEnabled(located and c.session_only and self.ctl.session.connected)
+        self.learn_btn.setEnabled(up and located and c.session_only and c.value_type is not None)
+        p = self.ctl.project
+        self.again_btn.setEnabled(up and p is not None and bool(p.objects))
         self.save_btn.setEnabled(any(ch.saveable for ch in self.cheats))
 
     def _item_changed(self, item: QTableWidgetItem) -> None:
@@ -165,7 +198,8 @@ class CheatsView(QWidget):
             if item.column() == COL_ON:
                 want = item.checkState() == Qt.CheckState.Checked
                 if want and not c.enabled:
-                    self.ctl.live.turn_on(c)
+                    if self.finder.confirm(c):  # AC-12.2: ask once per run
+                        self.ctl.live.turn_on(c)
                 elif not want and c.enabled:
                     self.ctl.live.turn_off(c)
             elif item.column() == COL_NAME:
@@ -176,6 +210,7 @@ class CheatsView(QWidget):
             elif item.column() == COL_VALUE:
                 c.set_value(parse_number(item.text()))
                 self.ctl.live.refresh(c)
+                self.finder.cheat_changed(c)
         except Exception as exc:
             self.ctl.fail(exc, "toggle" if item.column() == COL_ON else "edit")
             c.enabled = c.enabled and self.ctl.session.connected
@@ -191,6 +226,7 @@ class CheatsView(QWidget):
             except Exception as exc:
                 self.ctl.fail(exc, "toggle")
         self.cheats.remove(c)
+        self.finder.forget(c)
         self.ctl.cheats_changed.emit()
 
     def _pick_file(self) -> str:

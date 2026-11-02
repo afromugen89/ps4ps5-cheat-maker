@@ -40,7 +40,7 @@ def test_every_anchor_kind_round_trips(tmp_path):
         "obj1",
         "Gold",
         None,
-        [pj.Field("Gold", 0x10, ValueType.INT32)],
+        [pj.Field("Gold", 0x10, ValueType.INT32, last=2450)],
         [
             pj.StaticAnchor(0x1234),
             pj.ChainAnchor(0x20, (0x10, 0x40), "Gold"),

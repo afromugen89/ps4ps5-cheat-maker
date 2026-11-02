@@ -8,6 +8,7 @@ from PySide6.QtCore import QObject, Signal
 
 from cheatmaker.core.cheats import CheatFile
 from cheatmaker.core.freezer import Freezer, LiveCheats
+from cheatmaker.core.project import Project
 from cheatmaker.core.scanner import Scanner
 from cheatmaker.core.session import ClientFactory, GameInfo, Session
 from cheatmaker.errors import ConnectionLost
@@ -44,6 +45,8 @@ class Controller(QObject):
         self.cheat_file: CheatFile | None = None
         self.uploader_factory = uploader_factory
         self.frozen_addresses: set[int] = set()
+        self.project: Project | None = None  # v3 "find it again" notes for this game
+        self.before_disconnect: list[Callable[[], None]] = []  # e.g. take hooks out
         self._lost.connect(self.handle_lost)
         self.session.on_game_changed.append(self._on_game)
 
@@ -74,6 +77,7 @@ class Controller(QObject):
     # -- game / file ----------------------------------------------------------
     def _on_game(self, game: GameInfo | None) -> None:
         self.live.mark_all_off()
+        self.live.trackers.clear()  # objects are somewhere else in a new run
         self.freezer.clear()
         self.frozen_addresses.clear()
         if game is not None and (
@@ -91,4 +95,10 @@ class Controller(QObject):
 
     def shutdown(self) -> None:
         self.freezer.stop()
+        if self.session.connected:
+            for fn in list(self.before_disconnect):
+                try:
+                    fn()
+                except Exception as exc:  # closing must go on; the reason is logged
+                    report(exc, "disconnect")
         self.session.disconnect()

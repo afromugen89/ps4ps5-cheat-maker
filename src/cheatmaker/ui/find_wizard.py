@@ -451,6 +451,16 @@ class FindWizard(QWidget):
         self._game_key = key
         self.do_reset()
 
+    def prefill(self, vtype: ValueType, value: float | int | None) -> None:
+        """Find it again failed (AC-12.4): start a new search with the type and the last
+        value already filled in."""
+        self.do_reset()
+        self.advanced.setChecked(True)
+        self.vtype.setCurrentIndex(self.vtype.findData(vtype))
+        if value is not None:
+            self.number.setText(f"{value:g}" if vtype.is_float else str(value))
+        self.hint.setText(hints.FIND_START)
+
     def do_add_address(self) -> None:
         text = self.add_addr.text().strip().replace(" ", "")
         try:

@@ -157,14 +157,17 @@ def find_again(
     *,
     use_hook: bool = True,
     use_scan: bool = True,
-    slot_wait: float = SLOT_WAIT_S,
+    slot_wait: float | None = None,
     learn_chains: bool = True,
     sleep: Sleep = time.sleep,
     clock: Clock = time.monotonic,
     progress: ProgressFn | None = None,
     cancel: threading.Event | None = None,
 ) -> Outcome:
-    """Find ``obj`` in the running game (see the module doc for the order)."""
+    """Find ``obj`` in the running game (see the module doc for the order).
+    ``slot_wait``: how long to wait for the hook to run (default SLOT_WAIT_S)."""
+    if slot_wait is None:
+        slot_wait = SLOT_WAIT_S
     game = session.require_game()
     client = session.require_client()
     started = clock()
@@ -313,7 +316,7 @@ def learn(
     client = session.require_client()
     say = step or (lambda _s: None)
     value = vtype.decode(client.read(game.pid, address, vtype.size))
-    fld = Field(label, 0, vtype, default_range(vtype, value))
+    fld = Field(label, 0, vtype, default_range(vtype, value), value)
     if game.module_base <= address < game.module_end:
         obj = ObjectSpec(obj_id, label, None, [fld], [StaticAnchor(address - game.module_base)])
         log.info("action=learn object=%s kind=static off=%#x", obj_id, address - game.module_base)

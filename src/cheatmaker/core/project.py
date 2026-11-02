@@ -50,6 +50,7 @@ class Field:
     off: int  # from the object start
     vtype: ValueType
     range: tuple[float, float] | None = None  # plausible values, both included
+    last: float | int | None = None  # value when last found: pre-fills the search (AC-12.4)
 
     def plausible(self, raw: bytes) -> bool:
         if len(raw) < self.vtype.size:
@@ -63,6 +64,8 @@ class Field:
         d: dict = {"name": self.name, "off": _hex(self.off), "type": self.vtype.name.lower()}
         if self.range is not None:
             d["range"] = list(self.range)
+        if self.last is not None:
+            d["last"] = self.last
         return d
 
     @classmethod
@@ -73,6 +76,7 @@ class Field:
             _int(d["off"]),
             ValueType[d["type"].upper()],
             (rng[0], rng[1]) if rng is not None else None,
+            d.get("last"),
         )
 
 
