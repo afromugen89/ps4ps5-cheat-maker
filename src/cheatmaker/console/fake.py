@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import struct
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -58,6 +59,9 @@ class FakeConsole:
         self.write_hits: dict[int, list[WatchHit]] = {}
         self.read_hits: dict[int, list[WatchHit]] = {}
         self.watched: list[tuple[int, int, str, float]] = []  # (addr, size, kind, timeout)
+        # Called before every read: lets a test "run the game" between requests
+        # (e.g. tests/fakegame.py runs installed capture routines).
+        self.game_ticks: list[Callable[[], None]] = []
         self.pointer_passes: list[tuple[int, int]] = []
         self.writes: list[tuple[int, int, bytes]] = []
         self._lock = threading.RLock()
@@ -166,6 +170,8 @@ class FakeConsole:
     def read(self, pid: int, addr: int, size: int) -> bytes:
         self._alive()
         with self._lock:
+            for tick in list(self.game_ticks):
+                tick()
             return self.peek(pid, addr, size)
 
     def write(self, pid: int, addr: int, data: bytes) -> None:
