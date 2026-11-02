@@ -487,52 +487,91 @@ class Tracker:
     def current(self) -> int | None:
         """The verified address, or None (then nothing may be written). A weak object
         (no vtable check) that moved is never followed by itself: the new place waits
-        in ``pending`` until the player confirms it (accept_pending)."""
+        in ``pending`` until the player confirms it (accept_pending).
+
+        ``on_lost`` runs after the lock is released, so its console I/O (e.g. putting
+        the hook in) never holds up another thread asking where the object is."""
         with self._lock:
-            if self.pending is not None:
-                return None
-            if (
-                self.address is not None
-                and verify(self.session, self.obj, self.address, self._map_index()) is None
-            ):
-                # The old object can still look right (UE4 frees it later), so also
-                # ask the hook. A hook that keeps every object (filter "none") names
-                # enemies too: it is only asked once the old address stops verifying.
-                # Both verify: the old one may be pending kill (UE4) or a twin of the
-                # same class (co-op, clone). That's two answers (AC-12.3): never
-                # switch by itself; pause and ask the player.
-                if not self._slot_filtered():
-                    return self.address
-                other = self._slot_elsewhere()
-                if other is None:
-                    return self.address
-                self.pending, self.pending_both, self.confirmed = other, True, False
-                log.info(
-                    "action=tracker object=%s game code also sees %#x: asking the player",
-                    self.obj.id,
-                    other,
-                )
-                return None
-            now = self._clock()
-            if now - self._last_try < TRACK_RETRY_S:
-                return None
-            self._last_try = now
-            old = self.address
-            out = find_again(
-                self.session,
-                self.obj,
-                use_scan=False,
-                slot_wait=0,
-                learn_chains=False,
-                maps=self._map_index(fresh=True),
+            addr, lost = self._current()
+        if lost and self.on_lost is not None:
+            self.on_lost()
+        return addr
+
+    def _resolve_pending(self) -> bool:
+        """A question about two verifying objects answers itself once only one still
+        verifies (the old pawn was freed, AC-12.5). True = still waiting."""
+        if not self.pending_both or self.pending is None:
+            return self.pending is not None
+        maps = self._map_index()
+        old_ok = (
+            self.address is not None and verify(self.session, self.obj, self.address, maps) is None
+        )
+        new_ok = verify(self.session, self.obj, self.pending, maps) is None
+        if old_ok and new_ok:
+            return True
+        new, self.pending, self.pending_both = self.pending, None, False
+        if old_ok:
+            log.info("action=tracker object=%s %#x is gone: keeping the old one", self.obj.id, new)
+            return False
+        if not new_ok:  # neither: re-find as usual
+            return False
+        if not self.strong:  # a weak object is never followed by itself
+            self.pending = new
+            return True
+        old = self.address
+        self.address = new
+        log.info(
+            "action=tracker object=%s old %s is gone: follows %#x",
+            self.obj.id,
+            f"{old:#x}" if old else "-",
+            new,
+        )
+        return False
+
+    def _current(self) -> tuple[int | None, bool]:
+        """(address or None, the re-find failed). Called under the lock."""
+        if self._resolve_pending():
+            return None, False
+        if (
+            self.address is not None
+            and verify(self.session, self.obj, self.address, self._map_index()) is None
+        ):
+            # The old object can still look right (UE4 frees it later), so also
+            # ask the hook. A hook that keeps every object (filter "none") names
+            # enemies too: it is only asked once the old address stops verifying.
+            # Both verify: the old one may be pending kill (UE4) or a twin of the
+            # same class (co-op, clone). That's two answers (AC-12.3): never
+            # switch by itself; pause and ask the player.
+            if not self._slot_filtered():
+                return self.address, False
+            other = self._slot_elsewhere()
+            if other is None:
+                return self.address, False
+            self.pending, self.pending_both, self.confirmed = other, True, False
+            log.info(
+                "action=tracker object=%s game code also sees %#x: asking the player",
+                self.obj.id,
+                other,
             )
-            if not out.found or out.address is None:
-                if self.on_lost is not None:
-                    self.on_lost()
-                return None
-            if out.address == old:
-                return self.address
-            return self._move_to(out.address, old, "moved")
+            return None, False
+        now = self._clock()
+        if now - self._last_try < TRACK_RETRY_S:
+            return None, False
+        self._last_try = now
+        old = self.address
+        out = find_again(
+            self.session,
+            self.obj,
+            use_scan=False,
+            slot_wait=0,
+            learn_chains=False,
+            maps=self._map_index(fresh=True),
+        )
+        if not out.found or out.address is None:
+            return None, True
+        if out.address == old:
+            return self.address, False
+        return self._move_to(out.address, old, "moved"), False
 
     def _move_to(self, new: int, old: int | None, why: str) -> int | None:
         """A strong object follows the move; a weak one waits for the player."""
@@ -570,17 +609,22 @@ class Tracker:
             return None
         return addr if verify(self.session, self.obj, addr, self._map_index()) is None else None
 
-    def accept_pending(self) -> None:
-        """The player confirmed the new place of a weak object."""
+    def accept_pending(self, expected: int | None = None) -> None:
+        """The player confirmed the new place. With ``expected``, only if the question
+        is still about that place (it may have answered itself meanwhile)."""
         with self._lock:
+            if expected is not None and self.pending != expected:
+                return
             if self.pending is not None:
                 self.address, self.pending, self.confirmed = self.pending, None, True
                 self.pending_both = False
 
-    def reject_pending(self) -> None:
+    def reject_pending(self, expected: int | None = None) -> None:
         """Not it. If the old place still verified, keep it and never ask about that
         other object again; otherwise forget both and stay paused until a new search."""
         with self._lock:
+            if expected is not None and self.pending != expected:
+                return
             if self.pending_both and self.pending is not None:
                 self.ignored.add(self.pending)
             else:

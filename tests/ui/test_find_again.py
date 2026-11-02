@@ -502,3 +502,28 @@ def test_path_lost_without_a_hook_tells_the_player(win, console):  # BUG-11
     win.status.setText("")
     finder.path_lost(obj)  # said once
     assert win.status.text() == ""
+
+
+def test_open_question_closes_itself_and_a_late_answer_is_ignored(win, qtbot):  # BUG-13
+    finder = win.cheats.finder
+    calls = []
+    finder._ask_still = lambda: calls.append(1) and False  # resolved at the first check
+    assert finder._ask_confirm("Is this it?") is False and calls
+
+
+def test_late_no_after_the_question_answered_itself_keeps_the_cheat(win, console):
+    connect(win)
+    cheat = add_health_cheat(win, console.game)
+    learn(win, cheat)
+    tick(win)
+    tracker = win.ctl.live.trackers["obj1"]
+    old = tracker.address
+    tracker.pending, tracker.pending_both = old + 0x1000, True
+
+    def answer(text):  # meanwhile the freezer saw only the old one verify
+        tracker.pending, tracker.pending_both = None, False
+        return False
+
+    win.cheats.finder.ask_confirm = answer
+    win.cheats.finder.check_pending()
+    assert cheat.enabled and tracker.address == old and tracker.ignored == set()

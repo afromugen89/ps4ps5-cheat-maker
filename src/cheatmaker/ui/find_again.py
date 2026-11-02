@@ -80,6 +80,7 @@ class FindAgain(QObject):
         self.sleep: Callable[[float], None] = time.sleep  # tests: no waiting
         self._lock = threading.Lock()  # installed/_ours are written by worker threads too
         self._asking = False
+        self._ask_still: Callable[[], bool] = lambda: True  # the open question still holds
         self._unreadable: Path | None = None  # a .cmproj that failed to load: kept on save
         self.by_chain: set[str] = set()  # found by a memory path: no hook needed
         self._pid: int | None = None  # the game process the bookkeeping is for
@@ -293,9 +294,10 @@ class FindAgain(QObject):
         """A value found by a memory path stopped checking out (it moved). Simple games
         stay simple only while the path works: now put the hook in (it finds the new
         place on the next freeze tick), or tell the player to press Find it again."""
-        if obj.id not in self.by_chain:
-            return
-        self.by_chain.discard(obj.id)
+        with self._lock:  # runs on the freezer thread: decide once
+            if obj.id not in self.by_chain:
+                return
+            self.by_chain.discard(obj.id)
         session = self.ctl.session
         if obj.hook is not None and session.connected:
             try:
@@ -357,19 +359,26 @@ class FindAgain(QObject):
             mine = [c for c in cheats if c.enabled and c.anchor and c.anchor[0] == obj_id]
             if not mine:
                 continue
-            value = read_field(self.ctl, tracker.obj, tracker.pending, mine[0].anchor[1])
+            pend = tracker.pending
+            value = read_field(self.ctl, tracker.obj, pend, mine[0].anchor[1])
             self._asking = True
+            # The freezer keeps checking while the question is open: if only one
+            # object still verifies the question answers itself and the box closes.
+            self._ask_still = lambda t=tracker, p=pend: t.pending == p
             try:
                 ok = self.ask_confirm(
                     hints.CONFIRM_MOVED.format(name=tracker.obj.label, value=fmt(value))
                 )
             finally:
                 self._asking = False
+                self._ask_still = lambda: True
+            if tracker.pending != pend:  # answered itself meanwhile: the reply is moot
+                continue
             if ok:
-                tracker.accept_pending()
+                tracker.accept_pending(pend)
                 continue
             kept = tracker.pending_both
-            tracker.reject_pending()
+            tracker.reject_pending(pend)
             if kept:  # the first one still checks out: keep changing it
                 self.ctl.message.emit(hints.KEPT_FIRST.format(name=tracker.obj.label))
                 continue
@@ -398,7 +407,13 @@ class FindAgain(QObject):
         return False
 
     def _ask_confirm(self, text: str) -> bool:
-        return QMessageBox.question(None, "Is this it?", text) == QMessageBox.StandardButton.Yes
+        box = QMessageBox(QMessageBox.Icon.Question, "Is this it?", text)
+        box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        watch = QTimer(box)
+        watch.setInterval(250)
+        watch.timeout.connect(lambda: None if self._ask_still() else box.done(0))
+        watch.start()
+        return box.exec() == QMessageBox.StandardButton.Yes
 
     def _ask_pick(self, obj: pj.ObjectSpec, options: list[rf.Found]) -> int | None:
         dlg = PickDialog(self.ctl, obj, options)

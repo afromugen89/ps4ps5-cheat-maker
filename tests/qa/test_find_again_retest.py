@@ -7,8 +7,6 @@ from __future__ import annotations
 import json
 import struct
 
-import pytest
-
 from cheatmaker.console.client import WatchHit
 from cheatmaker.core import anchor_hook as ah
 from cheatmaker.core import project as pj
@@ -175,7 +173,6 @@ def test_r08_twin_no_keeps_the_first_and_never_asks_about_it_again():
         assert tracker.current() == game.player and tracker.pending is None, "no re-ask"
 
 
-@pytest.mark.xfail(reason="BUG-13: unanswered question blocks the auto-resume", strict=True)
 def test_r09_ue4_move_resumes_by_itself_once_the_old_object_is_gone():
     """AC-12.5 'without Kein's action': while the old pawn is pending kill both verify
     (asking is fine), but once the GC frees it only the new one verifies, so the

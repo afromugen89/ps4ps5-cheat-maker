@@ -382,3 +382,41 @@ def test_two_verifying_objects_of_one_class_ask_and_no_keeps_the_first():  # BUG
     assert tracker.current() is None and tracker.pending == other
     tracker.accept_pending()
     assert tracker.current() == other and tracker.confirmed
+
+
+def test_question_answers_itself_when_one_side_is_gone():  # BUG-13
+    game = fg.build(1)
+    obj = _learn(game).obj
+    ah.install(game.session, obj)
+    tracker = rf.Tracker(game.session, obj, game.player, clock=Clock())
+    twin = fg.HEAP + 0x9000
+    game.fake.poke(fg.PID, twin, game.fake.peek(fg.PID, game.player, 0x300))
+    game.touched = [game.player, twin]
+    game.fake.read(fg.PID, fg.BASE, 1)
+    assert tracker.current() is None and tracker.pending == twin
+    game.fake.poke(fg.PID, twin, bytes(0x300))  # the other one is gone: keep ours
+    assert tracker.current() == game.player and tracker.pending is None
+    obj.vtable = None  # a weak object: never followed by itself, even then
+    tracker.pending, tracker.pending_both = twin, True
+    game.fake.poke(fg.PID, twin, game.fake.peek(fg.PID, game.player, 0x300))
+    game.fake.poke(fg.PID, game.player + fg.HP, b"\xff" * 4)  # freed: NaN
+    assert tracker.current() is None and tracker.pending == twin and not tracker.pending_both
+    tracker.accept_pending(expected=twin + 8)  # a stale answer changes nothing
+    assert tracker.pending == twin
+
+
+def test_on_lost_runs_without_the_tracker_lock():  # QA risk, round 5
+    game = fg.build(1)
+    obj = _learn(game).obj
+    tracker = rf.Tracker(game.session, obj, game.player, clock=Clock())
+    free = []
+
+    def lost():
+        ok = tracker._lock.acquire(blocking=False)
+        free.append(ok)
+        if ok:
+            tracker._lock.release()
+
+    tracker.on_lost = lost
+    game.fake.poke(fg.PID, game.player, bytes(0x300))  # gone, and nothing finds it
+    assert tracker.current() is None and free == [True]
