@@ -83,8 +83,19 @@ approved by Kein), steps 1-8, plus the pointer-scan cap fix from step 10. Step 9
 - `core/project.py`: `.cmproj` in app data `projects/{titleid}_{version}.cmproj`
   (objects, fields with plausible range and last value, anchors, live cheats, history).
 - `core/cave.capture_code`: the capture routine (vtable filter `cmp qword [obj], imm32`,
-  Player-only field filter, or none; optional keep-at-value in the same routine). Slot =
-  16 bytes (object address + counter) just below the Player-only table.
+  or `push tmp; mov tmp, imm64; cmp [obj], tmp; pop tmp` for a vtable above 2 GiB;
+  Player-only field filter, or none; optional keep-at-value). Slot = 16 bytes (object
+  address + counter) just below the Player-only table. The keep-value (PC-off) routine
+  has its own room just below the capture routine, so switching only re-aims the jump.
+- Safety rules from review: only an instruction of 5+ bytes is hooked (the jump never
+  covers a `ret`, a branch or code other paths jump into); spans with a `call` are
+  refused; only candidates whose registers prove `[reg+disp]` (64-bit reg, no fs/gs, no
+  index, disp >= 0) are used. Routines are never zeroed after unhooking (a preempted
+  thread may still be inside); install reuses a routine left in place. Hooks the app
+  put in are recorded the moment they go in and come out on close, or when the last
+  cheat on that value is turned off (back in when one is turned on again). A hook
+  CheatRunner loaded is never taken out. An object without a class check (weak) that
+  moves is not followed until the player confirms the new place.
 - `core/anchor_hook.py`: hook candidates from a read-write watch (readers first, must
   be `[reg+disp]`), plan, prove slot (one write watchpoint on the first 8 bytes for 60 s
   in the app, plus a value check of all 16; C10b runs 10 min), install (never twice;
@@ -100,9 +111,7 @@ approved by Kein), steps 1-8, plus the pointer-scan cap fix from step 10. Step 9
   once per run; pick dialog when methods disagree; failed -> search pre-filled; Save
   explains app-only cheats and offers the hook in the file (off by default, D14);
   "Also make a PC-off cheat" (capture + keep value, AC-13.1).
-- Decisions inside the design: hooks the app installed are removed on close, not when
-  a cheat is unticked (the hook finds the value; it changes nothing on its own). The
-  slot proof watches 8 of the 16 bytes (NG watchpoint index 0 only) and checks the
+- Decisions inside the design: the slot proof watches 8 of the 16 bytes (NG watchpoint index 0 only) and checks the
   other 8 by value. Fake-PS5 "two dumps" are generated in code (`tests/fakegame.py`,
   with a tiny interpreter for our routine), not recorded: no Returnal dumps exist yet.
 - Fixed: the pointer scan's 20,000-node cap kept the first nodes in memory order; it
