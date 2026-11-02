@@ -61,13 +61,22 @@ class HookCandidate:
         return value_addr - self.disp
 
 
+_GPR64 = frozenset(
+    getattr(ix.Register, n)
+    for n in ("RAX", "RBX", "RCX", "RDX", "RSI", "RDI", "RBP", *(f"R{i}" for i in range(8, 16)))
+)
+"""Object registers we accept: 64-bit, not RSP (the stack) or RIP."""
+
+
 def _reg_value(name: str) -> int:
     return getattr(ix.Register, name.upper())
 
 
 def candidates_from_hits(hits: list[WatchHit], address: int, read: Read) -> list[HookCandidate]:
-    """The instructions behind ``hits`` that touch ``[reg + disp]`` (one object register,
-    no index). Best first: confirmed by the registers, readers, then most hits."""
+    """The instructions behind ``hits`` that touch ``[reg + disp]`` (one 64-bit object
+    register, no index, no fs/gs segment, disp >= 0 so ``reg`` is the object's start).
+    Best first: confirmed by the registers, 5+ bytes long (patched alone, see
+    cave.hook_span), readers, then most hits."""
     by_rip: dict[int, list[WatchHit]] = {}
     for h in hits:
         by_rip.setdefault(h.rip, []).append(h)
@@ -85,22 +94,32 @@ def candidates_from_hits(hits: list[WatchHit], address: int, read: Read) -> list
         start, code, text = found
         insn = ix.Decoder(64, code, ip=start).decode()
         base, index = insn.memory_base, insn.memory_index
-        if (
-            base in (ix.Register.NONE, ix.Register.RIP, ix.Register.RSP)
-            or index != ix.Register.NONE
-        ):
-            log.info("action=hook_pick skip %s (not [reg+disp])", text)
-            continue
         disp = insn.memory_displacement
         if disp >= 1 << 63:
             disp -= 1 << 64
+        if (
+            base not in _GPR64
+            or index != ix.Register.NONE
+            or insn.memory_segment in (ix.Register.FS, ix.Register.GS)
+            or disp < 0
+        ):
+            log.info("action=hook_pick skip %s (not [reg+disp])", text)
+            continue
         reg = cv.Target(base, disp).base_name
         confirmed = any(
             (v := h.reg(reg)) is not None and (v + disp) & ((1 << 64) - 1) == address for h in group
         )
         role: Role = "writer" if writes_memory(insn) else "reader"
         out.append(HookCandidate(start, code, text, len(group), role, reg, disp, confirmed))
-    out.sort(key=lambda c: (not c.confirmed, c.role != "reader", -c.hits, c.address))
+    out.sort(
+        key=lambda c: (
+            not c.confirmed,
+            len(c.code) < cv.JMP_LEN,
+            c.role != "reader",
+            -c.hits,
+            c.address,
+        )
+    )
     return out
 
 
@@ -157,16 +176,16 @@ def plan_hook(
     fallback: HookFilter | None = None,
 ) -> HookAnchor:
     """Where the routine and slot go, and how it tells the object apart. The slot is
-    not proven yet (see prove_slot)."""
+    not proven yet (see prove_slot). Only an instruction of 5+ bytes is hooked, so the
+    jump never covers a following ``ret`` or a place other code jumps to. Raises
+    LockFailed."""
     game = session.require_game()
     read = _read(session)
-    span = cv.hook_span(read, cand.address)
+    span = cv.hook_span(read, cand.address, single=True)
     orig = b"".join(read(i.ip, i.len) for i in span)
-    if vtable is not None and game.module_base + vtable <= cv.IMM32_MAX:
-        filt = HookFilter("vtable")
-    else:
-        filt = fallback or HookFilter("none")
-    cave = cv.find_cave(session, cv.CAVE_ROOM, skip=CAPTURE_CAVE_SKIP)
+    filt = HookFilter("vtable") if vtable is not None else fallback or HookFilter("none")
+    # Room for two routines: keep-value (PC off) below, capture above (see keep_cave).
+    cave = cv.find_cave(session, 2 * cv.CAVE_ROOM, skip=CAPTURE_CAVE_SKIP) + cv.CAVE_ROOM
     slot = cv.find_slot(session)
     try:
         sig = up.make_signature(read(cand.address, up.SIG_MAX + MAX_INSN), cand.address).text()
@@ -194,6 +213,12 @@ def plan_hook(
     return anchor
 
 
+def keep_cave(anchor: HookAnchor) -> int:
+    """Module offset of the keep-value (PC-off) routine: its own room just below the
+    capture routine, so turning it on never rewrites code the game may be running."""
+    return anchor.cave - cv.CAVE_ROOM
+
+
 def _build(
     session: Session, obj: ObjectSpec, anchor: HookAnchor, value: bytes | None = None
 ) -> tuple[int, bytes, int, bytes]:
@@ -201,6 +226,7 @@ def _build(
     game = session.require_game()
     base = game.module_base
     site = base + anchor.hook
+    cave_off = anchor.cave if value is None else keep_cave(anchor)
     span = cv.decode_at(anchor.orig, site)
     if sum(i.len for i in span) != len(anchor.orig) or any(i.code == ix.Code.INVALID for i in span):
         raise FindFailed("The saved game code doesn't decode. Press Find it next time again.")
@@ -211,30 +237,37 @@ def _build(
             span,
             target,
             base + anchor.slot,
-            base + anchor.cave,
+            base + cave_off,
             f.kind,
             vtable=None if obj.vtable is None else base + obj.vtable,
             field=f.off,
             field_value=f.value,
             value=value,
         )
-    except LockFailed as exc:
+    except (LockFailed, ValueError, RuntimeError) as exc:  # iced raises ValueError
         raise FindFailed(f"Can't build the find-it-again hook: {exc}.") from exc
     if len(code) > cv.CAVE_ROOM:
         raise FindFailed("The find-it-again hook doesn't fit the spare space.")
-    return base + anchor.cave, code, site, cv.jmp_patch(site, base + anchor.cave, len(anchor.orig))
+    try:
+        jmp = cv.jmp_patch(site, base + cave_off, len(anchor.orig))
+    except LockFailed as exc:
+        raise FindFailed(f"Can't build the find-it-again hook: {exc}.") from exc
+    return base + cave_off, code, site, jmp
 
 
 def hook_cheat(session: Session, obj: ObjectSpec, name: str, value: bytes | None = None) -> Cheat:
     """The routine and its jump as two CODE_PATCH lines, for a GoldHEN / CheatRunner
     file (D14, AC-13.1). With ``value`` it also keeps the field at that value for the
-    object it captures (one routine: never two jumps on one instruction)."""
+    object it captures (one routine: never two jumps on one instruction), in its own
+    spare room (``keep_cave``), so switching between the two only re-aims the jump."""
     anchor = obj.hook
     if anchor is None:
         raise FindFailed("This value has no game-code hook to save.")
     game = session.require_game()
     cave, code, site, jmp = _build(session, obj, anchor, value)
     base = game.module_base
+    if value is not None and _read(session)(cave, len(code)) not in (bytes(len(code)), code):
+        raise FindFailed("There's no spare room in the game's code for this cheat.")
     return Cheat(
         name=name,
         locations=[
@@ -278,32 +311,35 @@ def install(session: Session, obj: ObjectSpec) -> str:
             "Another cheat already changes the game's code where Cheat Maker looks for "
             f"{obj.label}. Turn that cheat off, then try again."
         )
-    if now_cave != bytes(len(code)):
-        raise FindFailed("The spare space in the game's code is in use. Restart the game.")
     slot = game.module_base + anchor.slot
-    if read(slot, cv.SLOT_SIZE) != bytes(cv.SLOT_SIZE):
-        raise FindFailed("The game is using the spare memory Cheat Maker needs. Restart it.")
-    client.write(game.pid, cave, code)  # the routine first, then the jump into it
+    if now_cave != code:  # our routine left from an earlier remove is fine as it is
+        if now_cave != bytes(len(code)):
+            raise FindFailed("The spare space in the game's code is in use. Restart the game.")
+        if read(slot, cv.SLOT_SIZE) != bytes(cv.SLOT_SIZE):
+            raise FindFailed("The game is using the spare memory Cheat Maker needs. Restart it.")
+        client.write(game.pid, cave, code)  # the routine first, then the jump into it
+    # UNVERIFIED (C10): the 5-byte jump is not written atomically; a thread could run
+    # a torn instruction at the site in that instant (same as Lock it / Player only).
     client.write(game.pid, site, jmp)
     log.info("action=hook_install hook=%#x cave=%#x slot=%#x", site, cave, slot)
     return "installed"
 
 
 def remove(session: Session, obj: ObjectSpec, sleep: Callable[[float], None] = time.sleep) -> None:
-    """Undo install: the jump first, then (once no thread can be inside) the routine
-    and the slot. Leaves the code alone if it isn't ours."""
+    """Undo install: put the original instruction back and clear the slot. The routine's
+    bytes stay (a thread preempted inside it, or returning into it, must still find
+    valid code); the next install reuses them. Leaves the code alone if it isn't ours."""
     anchor = obj.hook
     if anchor is None:
         return
     game = session.require_game()
     client = session.require_client()
     read = _read(session)
-    cave, code, site, jmp = _build(session, obj, anchor)
+    _cave, _code, site, jmp = _build(session, obj, anchor)
     if read(site, len(jmp)) != jmp:
         return
     client.write(game.pid, site, anchor.orig)
-    sleep(0.5)
-    client.write(game.pid, cave, bytes(len(code)))
+    sleep(0.5)  # let the last pass through the routine finish before clearing the slot
     client.write(game.pid, game.module_base + anchor.slot, bytes(cv.SLOT_SIZE))
     log.info("action=hook_remove hook=%#x", site)
 
@@ -348,6 +384,7 @@ __all__ = [
     "hook_cheat",
     "install",
     "is_installed",
+    "keep_cave",
     "object_vtable",
     "plan_hook",
     "prove_slot",

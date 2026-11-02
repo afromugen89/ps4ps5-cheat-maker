@@ -83,9 +83,11 @@ def test_install_fills_slot_for_the_player_only_and_remove_undoes_it():
     assert ah.install(game.session, obj) == "already", "never patches twice"
     ah.remove(game.session, obj, sleep=lambda _s: None)
     assert game.fake.peek(fg.PID, fg.READER, 10) == fg.VMOVSS_R
-    assert game.fake.peek(fg.PID, fg.BASE + hook.cave, 64) == bytes(64)
+    assert game.fake.peek(fg.PID, fg.BASE + hook.cave, 4) != bytes(4), "routine left in place"
     assert game.fake.peek(fg.PID, fg.BASE + hook.slot, 16) == bytes(16)
     ah.remove(game.session, obj, sleep=lambda _s: None)  # not ours any more: no-op
+    assert ah.install(game.session, obj) == "installed", "reuses the routine left behind"
+    assert ah.read_slot(game.session, hook)[0] == game.player
 
 
 def test_two_runs_same_anchor_follows_the_player():  # AC-14.3
@@ -153,3 +155,59 @@ def test_prove_slot():
     game.fake.poke(fg.PID, slot + 8, b"\x01")
     with pytest.raises(FindFailed, match="isn't free"):
         ah.prove_slot(game.session, slot, seconds=1)
+
+
+def test_short_instruction_is_never_hooked():  # review blocker
+    from cheatmaker.errors import LockFailed
+
+    game = fg.build()
+    short = fg.BASE + 0x300
+    game.fake.poke(fg.PID, short, bytes.fromhex("894808c34883ec28"))  # ...; ret; sub
+    cand = ah.HookCandidate(
+        short, bytes.fromhex("894808"), "mov [rax+8],ecx", 9, "writer", "rax", 8, True
+    )
+    with pytest.raises(LockFailed, match="too short"):
+        ah.plan_hook(game.session, cand, fg.PLAYER_VT - fg.BASE)
+
+
+def test_candidates_prefer_long_instructions_and_skip_odd_forms():
+    code = {
+        0x400100: bytes.fromhex("894808"),  # mov [rax+8],ecx: 3 bytes, confirmed
+        0x400200: bytes.fromhex("898808000000"),  # mov [rax+8],ecx with disp32: 6 bytes
+        0x400300: bytes.fromhex("64894808"),  # mov fs:[rax+8],ecx: segment
+        0x400400: bytes.fromhex("8948f8"),  # mov [rax-8],ecx: negative disp
+        0x400500: bytes.fromhex("67894808"),  # mov [eax+8],ecx: 32-bit base
+    }
+
+    def read(a, n):
+        for start, c in code.items():
+            if a + n == start + len(c):
+                return b"\xcc" * (n - len(c)) + c
+        raise AssertionError(hex(a))
+
+    regs = {"rax": 0x5000 - 8}
+    hits = [WatchHit(s + len(c), regs) for s, c in code.items()]
+    cands = ah.candidates_from_hits(hits, 0x5000, read)
+    assert [c.address for c in cands] == [0x400200, 0x400100]
+
+
+def test_pc_off_cheat_has_its_own_room_and_leaves_the_capture_routine_alone():  # review M2
+    from cheatmaker.core.freezer import Freezer, LiveCheats
+
+    game = fg.build()
+    obj = _player_object(game)
+    ah.install(game.session, obj)
+    capture = game.fake.peek(fg.PID, fg.BASE + obj.hook.cave, 64)
+    keep = ah.hook_cheat(game.session, obj, "Infinite Health", struct.pack("<f", 999.0))
+    cave_loc, _jmp = keep.locations
+    assert cave_loc.offset == ah.keep_cave(obj.hook) == obj.hook.cave - cv.CAVE_ROOM
+    live = LiveCheats(game.session, Freezer(game.session))
+    live.turn_on(keep)
+    assert game.fake.peek(fg.PID, fg.BASE + obj.hook.cave, 64) == capture, "not rewritten"
+    game.set_health(5.0)
+    game.fake.read(fg.PID, fg.BASE, 1)
+    assert game.health() == 999.0
+    assert ah.read_slot(game.session, obj.hook)[0] == game.player, "still captures"
+    live.turn_off(keep)
+    assert game.fake.peek(fg.PID, fg.READER, 10) == fg.VMOVSS_R
+    assert ah.install(game.session, obj) == "installed", "the app can put its hook back"
