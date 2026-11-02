@@ -12,6 +12,7 @@ import logging
 import threading
 import time
 from collections.abc import Callable
+from pathlib import Path
 
 from PySide6.QtCore import QObject, QTimer
 from PySide6.QtWidgets import (
@@ -79,6 +80,7 @@ class FindAgain(QObject):
         self.sleep: Callable[[float], None] = time.sleep  # tests: no waiting
         self._lock = threading.Lock()  # installed/_ours are written by worker threads too
         self._asking = False
+        self._unreadable: Path | None = None  # a .cmproj that failed to load: kept on save
         ctl.game_changed.connect(self.on_game)
         ctl.before_disconnect.append(self.remove_hooks)
         self.pending_timer = QTimer(self)
@@ -123,8 +125,14 @@ class FindAgain(QObject):
         p = self.ctl.project
         if p is None:
             return
+        path = pj.project_path(p.title_id, p.version)
         try:
-            pj.save(pj.project_path(p.title_id, p.version), p)
+            if path == self._unreadable:  # never overwrite it: a newer app may need it
+                bak = pj.set_aside(path)
+                self._unreadable = None
+                if bak is not None:
+                    log.info("action=project_save kept unreadable file as %s", bak.name)
+            pj.save(path, p)
         except OSError as exc:
             log.warning("action=project_save reason=%s", exc)
 
@@ -135,10 +143,13 @@ class FindAgain(QObject):
         if game is None:
             self.ctl.project = None
             return
+        path = pj.project_path(game.title_id, game.version)
+        self._unreadable = None
         try:
-            self.ctl.project = pj.load(pj.project_path(game.title_id, game.version))
+            self.ctl.project = pj.load(path)
         except CheatMakerError as exc:
             self.ctl.project = None
+            self._unreadable = path
             self.ctl.fail(exc, "project_load")
             return
         if self.ctl.project is not None and self.ctl.project.objects:
@@ -225,6 +236,9 @@ class FindAgain(QObject):
                 f = obj.fields[0]
                 lines.append(hints.NOT_FOUND.format(name=obj.label))
                 self.open_search(f.vtype, f.last)
+        if p is not None and p.dropped_hooks:
+            lines.append(hints.OLD_NOTES)
+            p.dropped_hooks = []
         self.save()
         self.ctl.cheats_changed.emit()
         if lines:

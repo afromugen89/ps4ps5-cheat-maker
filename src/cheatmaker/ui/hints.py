@@ -98,6 +98,10 @@ HOOK_NOTE = (
 )
 FINDING = "Finding your values again..."
 FOUND_AGAIN = "Ready: {name} found again by {how} ({secs:.1f} s). Tick it to use it."
+OLD_NOTES = (
+    "These notes come from an older Cheat Maker, so the game's code no longer helps "
+    "find your values. Press Find it next time once more to make it fast again."
+)
 NOT_FOUND = (
     "Couldn't find {name} this time. Search for it again (the type and last value are "
     "filled in), then press Find it next time to update it."

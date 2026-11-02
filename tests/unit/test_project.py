@@ -105,3 +105,46 @@ def test_ids_history_cap_and_put_object():
     assert len(p.history) == pj.MAX_HISTORY and p.history[-1].at == str(pj.MAX_HISTORY + 4)
     with pytest.raises(KeyError):
         p.object("nope")
+
+
+def test_format_1_hooks_are_dropped_on_load(tmp_path):  # re-review: no PC-off room
+    doc = json.loads(GOLDEN.read_text())
+    doc["format_version"] = 1
+    old = tmp_path / "old.cmproj"
+    old.write_text(json.dumps(doc))
+    p = pj.load(old)
+    player = p.object("player")
+    assert player.hook is None and player.anchors_of(pj.ChainAnchor)
+    assert p.dropped_hooks == ["player"]
+    pj.save(old, p)
+    assert json.loads(old.read_text())["format_version"] == pj.FORMAT_VERSION
+    assert pj.load(old).dropped_hooks == []
+
+
+@pytest.mark.parametrize(
+    "patch",
+    [
+        lambda d: d["cheats"][0].update(value="abc"),
+        lambda d: d["cheats"][0].update(value=True),
+        lambda d: d["objects"][0]["fields"][0].update(range="0-10"),
+        lambda d: d["objects"][0]["fields"][0].update(off=1.5),
+        lambda d: d["objects"][0].update(anchors={"kind": "static"}),
+        lambda d: d.update(title_id=7),
+    ],
+)
+def test_wrong_types_are_a_project_error(tmp_path, patch):  # BUG-05
+    doc = json.loads(GOLDEN.read_text())
+    patch(doc)
+    bad = tmp_path / "bad.cmproj"
+    bad.write_text(json.dumps(doc))
+    with pytest.raises(ProjectFileError):
+        pj.load(bad)
+
+
+def test_set_aside_keeps_every_unreadable_file(tmp_path):  # BUG-06
+    path = tmp_path / "g.cmproj"
+    assert pj.set_aside(path) is None
+    for n, want in ((1, "g.cmproj.bak"), (2, "g.cmproj.bak2")):
+        path.write_text(f"v{n}")
+        assert pj.set_aside(path).name == want and not path.exists()
+    assert (tmp_path / "g.cmproj.bak").read_text() == "v1"

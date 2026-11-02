@@ -388,3 +388,20 @@ def test_moved_weak_value_asks_before_writing_again(win, console):  # M4
     win.cheats.finder.check_pending()
     assert not cheat.enabled and tracker.address is None
     assert win.status.text().startswith("OK, nothing was changed")
+
+
+def test_notes_from_an_older_app_drop_the_hook_and_say_so(win, console):  # re-review
+    connect(win)
+    learn(win, add_health_cheat(win, console.game))
+    win.ctl.shutdown()
+    path = pj.project_path(fg.TITLE, fg.VERSION)
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    doc["format_version"] = 1  # its hook has no spare room for a PC-off routine
+    path.write_text(json.dumps(doc), encoding="utf-8")
+    run2 = console.restart(2)
+    connect(win)
+    assert "older Cheat Maker" in win.status.text()
+    assert run2.fake.peek(fg.PID, fg.READER, 10) == fg.VMOVSS_R, "old hook not put in"
+    assert win.ctl.live.trackers["obj1"].address == run2.player, "found by memory search"
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    assert saved["format_version"] == pj.FORMAT_VERSION

@@ -316,7 +316,6 @@ def test_tc33_wide_vtable_routine_is_installed_and_filled_on_a_high_module():
 GOOD_HEAD = {"format": "cheatmaker-project", "title_id": fg.TITLE, "version": fg.VERSION}
 
 
-@pytest.mark.xfail(reason="BUG-05: malformed .cmproj raises a raw Python error", strict=True)
 @pytest.mark.parametrize(
     "doc",
     [
@@ -347,7 +346,6 @@ def test_tc29_minimal_old_project_without_optional_keys_loads():
     assert p.objects[0].label == "o" and p.cheats == [] and p.history == []
 
 
-@pytest.mark.xfail(reason="BUG-05: bad saved cheat value crashes the connect flow", strict=True)
 def test_tc26_bad_cheat_value_in_project_does_not_break_connect(win, console, qtbot):
     write_project(
         {
@@ -370,11 +368,10 @@ def test_tc26_bad_cheat_value_in_project_does_not_break_connect(win, console, qt
     assert errors == [], "a plain message, not an exception in the Qt event loop"
 
 
-@pytest.mark.xfail(
-    reason="BUG-06: unreadable/newer .cmproj overwritten without a backup", strict=True
-)
 def test_tc28_unreadable_project_is_kept_before_a_new_one_is_saved(win, console):
-    newer = json.dumps({**GOOD_HEAD, "format_version": 2, "objects": [], "extra": "data"})
+    newer = json.dumps(
+        {**GOOD_HEAD, "format_version": pj.FORMAT_VERSION + 1, "objects": [], "extra": "data"}
+    )
     write_project(newer)
     connect(win)
     assert "can't be read" in win.status.text()

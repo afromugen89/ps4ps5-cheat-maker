@@ -29,7 +29,10 @@ from cheatmaker.core.values import ValueType
 from cheatmaker.errors import ProjectFileError
 
 FORMAT = "cheatmaker-project"
-FORMAT_VERSION = 1
+# 2: a hook's routine has a spare room below it for the keep-value (PC-off) routine.
+# Hooks saved by format 1 don't, so they are dropped on load (found again by memory
+# search until the player presses Find it next time again).
+FORMAT_VERSION = 2
 EXTENSION = ".cmproj"
 
 Role = Literal["reader", "writer"]
@@ -41,7 +44,33 @@ def _hex(v: int) -> str:
 
 
 def _int(v: str | int) -> int:
+    if isinstance(v, bool) or not isinstance(v, (int, str)):
+        raise ValueError(f"not a number: {v!r}")
     return v if isinstance(v, int) else int(v, 16)
+
+
+def _dict(v: object, what: str) -> dict:
+    if not isinstance(v, dict):
+        raise ValueError(f"{what} is not an object")
+    return v
+
+
+def _list(v: object, what: str) -> list:
+    if not isinstance(v, list):
+        raise ValueError(f"{what} is not a list")
+    return v
+
+
+def _str(v: object, what: str) -> str:
+    if not isinstance(v, str):
+        raise ValueError(f"{what} is not text")
+    return v
+
+
+def _number(v: object, what: str) -> float | int:
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+        raise ValueError(f"{what} is not a number: {v!r}")
+    return v
 
 
 @dataclass
@@ -70,13 +99,18 @@ class Field:
 
     @classmethod
     def from_json(cls, d: dict) -> Field:
+        d = _dict(d, "a field")
         rng = d.get("range")
+        if rng is not None:
+            rng = _list(rng, "range")
+            rng = (_number(rng[0], "range"), _number(rng[1], "range"))
+        last = d.get("last")
         return cls(
-            d["name"],
+            _str(d["name"], "a field name"),
             _int(d["off"]),
-            ValueType[d["type"].upper()],
-            (rng[0], rng[1]) if rng is not None else None,
-            d.get("last"),
+            ValueType[_str(d["type"], "a field type").upper()],
+            rng,
+            None if last is None else _number(last, "last value"),
         )
 
 
@@ -96,6 +130,7 @@ class HookFilter:
 
     @classmethod
     def from_json(cls, d: dict) -> HookFilter:
+        d = _dict(d, "a hook filter")
         if d["kind"] == "field":
             return cls("field", _int(d["off"]), _int(d["value"]))
         if d["kind"] not in ("vtable", "none"):
@@ -172,14 +207,15 @@ Anchor = StaticAnchor | ChainAnchor | HookAnchor | VtableAnchor
 
 
 def anchor_from_json(d: dict) -> Anchor:
+    d = _dict(d, "an anchor")
     kind = d["kind"]
     if kind == "static":
         return StaticAnchor(_int(d["off"]))
     if kind == "chain":
         return ChainAnchor(
             _int(d["base"]),
-            tuple(_int(o) for o in d["offsets"]),
-            d["field"],
+            tuple(_int(o) for o in _list(d["offsets"], "offsets")),
+            _str(d["field"], "a chain field"),
             int(d.get("runs_seen", 1)),
         )
     if kind == "hook_slot":
@@ -189,8 +225,8 @@ def anchor_from_json(d: dict) -> Anchor:
         return HookAnchor(
             _int(d["hook"]),
             d.get("insn", ""),
-            bytes.fromhex(d["orig"]),
-            d["reg"],
+            bytes.fromhex(_str(d["orig"], "orig")),
+            _str(d["reg"], "a register"),
             _int(d["disp"]),
             role,
             HookFilter.from_json(d.get("filter", {"kind": "vtable"})),
@@ -241,13 +277,15 @@ class ObjectSpec:
 
     @classmethod
     def from_json(cls, d: dict) -> ObjectSpec:
+        d = _dict(d, "an object")
         vt = d.get("vtable")
+        oid = _str(d["id"], "an object id")
         return cls(
-            d["id"],
-            d.get("label", d["id"]),
+            oid,
+            _str(d.get("label", oid), "a label"),
             None if vt is None else _int(vt),
-            [Field.from_json(f) for f in d.get("fields", [])],
-            [anchor_from_json(a) for a in d.get("anchors", [])],
+            [Field.from_json(f) for f in _list(d.get("fields", []), "fields")],
+            [anchor_from_json(a) for a in _list(d.get("anchors", []), "anchors")],
         )
 
 
@@ -270,9 +308,16 @@ class ProjectCheat:
 
     @classmethod
     def from_json(cls, d: dict) -> ProjectCheat:
+        d = _dict(d, "a cheat")
         if d["action"] not in ("freeze", "set"):
             raise ValueError(f"unknown action {d['action']!r}")
-        return cls(d["name"], d["object"], d["field"], d["action"], d["value"])
+        return cls(
+            _str(d["name"], "a cheat name"),
+            _str(d["object"], "a cheat's object"),
+            _str(d["field"], "a cheat's field"),
+            d["action"],
+            _number(d["value"], "a cheat value"),
+        )
 
 
 @dataclass
@@ -292,6 +337,7 @@ class HistoryEntry:
 
     @classmethod
     def from_json(cls, d: dict) -> HistoryEntry:
+        d = _dict(d, "a history entry")
         return cls(d["at"], d["method"], float(d["seconds"]), bool(d["verified"]))
 
 
@@ -306,6 +352,9 @@ class Project:
     objects: list[ObjectSpec] = field(default_factory=list)
     cheats: list[ProjectCheat] = field(default_factory=list)
     history: list[HistoryEntry] = field(default_factory=list)
+    # Objects whose hook came from an older file and was dropped (not saved): the
+    # player is asked to press Find it next time again.
+    dropped_hooks: list[str] = field(default_factory=list, compare=False)
 
     def object(self, obj_id: str) -> ObjectSpec:
         for o in self.objects:
@@ -341,17 +390,27 @@ class Project:
 
     @classmethod
     def from_json(cls, d: dict) -> Project:
+        d = _dict(d, "the file")
         if d.get("format") != FORMAT:
             raise ValueError("not a Cheat Maker project file")
-        if int(d.get("format_version", 0)) > FORMAT_VERSION:
-            raise ValueError(f"made by a newer Cheat Maker (format {d['format_version']})")
+        ver = _int(d.get("format_version", 0))
+        if ver > FORMAT_VERSION:
+            raise ValueError(f"made by a newer Cheat Maker (format {ver})")
+        objects = [ObjectSpec.from_json(o) for o in _list(d.get("objects", []), "objects")]
+        dropped = []
+        if ver < 2:  # its hooks have no spare room for the keep-value routine
+            for o in objects:
+                if o.hook is not None:
+                    o.anchors = [a for a in o.anchors if not isinstance(a, HookAnchor)]
+                    dropped.append(o.id)
         return cls(
-            d["title_id"],
-            d["version"],
-            d.get("process", "eboot.bin"),
-            [ObjectSpec.from_json(o) for o in d.get("objects", [])],
-            [ProjectCheat.from_json(c) for c in d.get("cheats", [])],
-            [HistoryEntry.from_json(h) for h in d.get("history", [])],
+            _str(d["title_id"], "title_id"),
+            _str(d["version"], "version"),
+            _str(d.get("process", "eboot.bin"), "process"),
+            objects,
+            [ProjectCheat.from_json(c) for c in _list(d.get("cheats", []), "cheats")],
+            [HistoryEntry.from_json(h) for h in _list(d.get("history", []), "history")],
+            dropped,
         )
 
 
@@ -379,8 +438,22 @@ def load(path: Path) -> Project | None:
         return None
     try:
         return Project.from_json(json.loads(path.read_text(encoding="utf-8")))
-    except (OSError, ValueError, KeyError, TypeError, IndexError) as exc:
+    except (OSError, ValueError, KeyError, TypeError, IndexError, AttributeError) as exc:
         raise ProjectFileError(f"{path.name}: {exc}") from exc
+
+
+def set_aside(path: Path) -> Path | None:
+    """Rename a file that can't be read (broken, or from a newer Cheat Maker) to
+    ``*.cmproj.bak`` (``.bak2``, ... if taken) before a new one is saved over it."""
+    if not path.exists():
+        return None
+    n = 1
+    while True:
+        bak = path.with_name(path.name + (".bak" if n == 1 else f".bak{n}"))
+        if not bak.exists():
+            path.replace(bak)
+            return bak
+        n += 1
 
 
 __all__ = [
@@ -398,4 +471,5 @@ __all__ = [
     "load",
     "project_path",
     "save",
+    "set_aside",
 ]
