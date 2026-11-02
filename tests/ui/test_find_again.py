@@ -272,3 +272,15 @@ def test_pc_off_cheat_keeps_the_value_after_a_restart(win, console):  # AC-13.1
     run2.set_health(12.0)
     run2.fake.read(fg.PID, fg.BASE, 1)  # a frame runs
     assert run2.health() == 999.0
+
+
+def test_advanced_find_again_without_the_hook(win, console):  # C10e
+    connect(win)
+    learn(win, add_health_cheat(win, console.game))
+    assert win.cheats.skip_hook.isHidden()
+    win.cheats.show_details.setChecked(True)
+    assert not win.cheats.skip_hook.isHidden()
+    win.cheats.skip_hook.setChecked(True)
+    win.ctl.live.trackers.clear()
+    win.cheats.again_btn.click()
+    assert "found again by a memory search" in win.status.text()
