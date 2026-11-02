@@ -348,7 +348,11 @@ class FindAgain(QObject):
             if ok:
                 tracker.accept_pending()
                 continue
+            kept = tracker.pending_both
             tracker.reject_pending()
+            if kept:  # the first one still checks out: keep changing it
+                self.ctl.message.emit(hints.KEPT_FIRST.format(name=tracker.obj.label))
+                continue
             for c in mine:
                 self.ctl.live.turn_off(c, restore=False)
             self.ctl.message.emit(hints.CONFIRM_NO.format(name=tracker.obj.label))

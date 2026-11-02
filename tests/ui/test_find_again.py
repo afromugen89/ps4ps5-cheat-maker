@@ -452,3 +452,17 @@ def test_refresh_keeps_our_hooks_only_for_the_same_game_process(win, console):  
     assert "obj1" in finder.installed
     finder.on_game(dataclasses.replace(game, pid=game.pid + 1, version="9"))  # other process
     assert finder.installed == {}
+
+
+def test_no_to_a_twin_keeps_the_cheat_on_the_first_one(win, console):  # BUG-10
+    connect(win)
+    cheat = add_health_cheat(win, console.game)
+    learn(win, cheat)
+    tick(win)
+    tracker = win.ctl.live.trackers["obj1"]
+    old = tracker.address
+    tracker.pending, tracker.pending_both = old + 0x1000, True
+    win.cheats.finder.ask_confirm = lambda text: False
+    win.cheats.finder.check_pending()
+    assert cheat.enabled and tracker.address == old and tracker.pending is None
+    assert win.status.text() == hints.KEPT_FIRST.format(name="Infinite Health")

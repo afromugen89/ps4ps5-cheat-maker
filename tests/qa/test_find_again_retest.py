@@ -28,7 +28,6 @@ from tests.qa.test_find_again_qa import (
 
 
 # == BUG-10: the tracker jumps to another object of the same class =====================
-@pytest.mark.xfail(reason="BUG-10: tracker follows a same-class twin without asking", strict=True)
 def test_r01_second_object_of_the_same_class_is_never_followed_silently():
     """Two live objects of the player's class (a second character, a clone, a co-op
     partner) both go through the hooked code. The player's object still verifies, so

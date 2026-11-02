@@ -465,7 +465,9 @@ class Tracker:
         self._clock = clock
         self._maps: MapIndex | None = None
         self._last_try = -TRACK_RETRY_S
-        self.pending: int | None = None  # a weak object's new place, not confirmed yet
+        self.pending: int | None = None  # a new place, not confirmed by the player yet
+        self.pending_both = False  # the old place still verified when pending was set
+        self.ignored: set[int] = set()  # other objects the player said are not it
         self._lock = threading.Lock()
 
     def _map_index(self, fresh: bool = False) -> MapIndex:
@@ -494,12 +496,21 @@ class Tracker:
                 # The old object can still look right (UE4 frees it later), so also
                 # ask the hook. A hook that keeps every object (filter "none") names
                 # enemies too: it is only asked once the old address stops verifying.
+                # Both verify: the old one may be pending kill (UE4) or a twin of the
+                # same class (co-op, clone). That's two answers (AC-12.3): never
+                # switch by itself; pause and ask the player.
                 if not self._slot_filtered():
                     return self.address
-                moved = self._slot_elsewhere()
-                if moved is None:
+                other = self._slot_elsewhere()
+                if other is None:
                     return self.address
-                return self._move_to(moved, self.address, "game code now sees")
+                self.pending, self.pending_both, self.confirmed = other, True, False
+                log.info(
+                    "action=tracker object=%s game code also sees %#x: asking the player",
+                    self.obj.id,
+                    other,
+                )
+                return None
             now = self._clock()
             if now - self._last_try < TRACK_RETRY_S:
                 return None
@@ -551,7 +562,7 @@ class Tracker:
             addr, _count = ah.read_slot(self.session, hook)
         except ReadFailed:
             return None
-        if not addr or addr == self.address:
+        if not addr or addr == self.address or addr in self.ignored:
             return None
         return addr if verify(self.session, self.obj, addr, self._map_index()) is None else None
 
@@ -560,11 +571,17 @@ class Tracker:
         with self._lock:
             if self.pending is not None:
                 self.address, self.pending, self.confirmed = self.pending, None, True
+                self.pending_both = False
 
     def reject_pending(self) -> None:
-        """Not it: forget where it was, and stay paused until a new search."""
+        """Not it. If the old place still verified, keep it and never ask about that
+        other object again; otherwise forget both and stay paused until a new search."""
         with self._lock:
-            self.address = self.pending = None
+            if self.pending_both and self.pending is not None:
+                self.ignored.add(self.pending)
+            else:
+                self.address = None
+            self.pending, self.pending_both = None, False
 
     def field_address(self, name: str) -> int | None:
         base = self.current()

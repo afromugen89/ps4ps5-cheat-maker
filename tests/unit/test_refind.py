@@ -359,3 +359,26 @@ def test_weak_object_that_moves_waits_for_the_player():  # review M4
     fz.tick()
     assert tracker.confirmed and tracker.address == enemy
     assert struct.unpack("<f", game.fake.peek(fg.PID, enemy + fg.HP, 4))[0] == 999.0
+
+
+def test_two_verifying_objects_of_one_class_ask_and_no_keeps_the_first():  # BUG-10
+    game = fg.build(1)
+    obj = _learn(game).obj
+    ah.install(game.session, obj)
+    tracker = rf.Tracker(game.session, obj, game.player, clock=Clock())
+    twin = fg.HEAP + 0x9000
+    game.fake.poke(fg.PID, twin, game.fake.peek(fg.PID, game.player, 0x300))
+    game.touched = [game.player, twin]  # both go through the hooked code
+    game.fake.read(fg.PID, fg.BASE, 1)
+    assert tracker.current() is None and tracker.pending == twin and tracker.pending_both
+    tracker.reject_pending()  # "No": keep the first, never ask about the twin again
+    assert tracker.current() == game.player and twin in tracker.ignored
+    game.fake.read(fg.PID, fg.BASE, 1)
+    assert tracker.current() == game.player and tracker.pending is None
+    other = fg.HEAP + 0xA000  # later a real move (old one pending kill): "Yes" follows
+    game.fake.poke(fg.PID, other, game.fake.peek(fg.PID, game.player, 0x300))
+    game.touched = [other]
+    game.fake.read(fg.PID, fg.BASE, 1)
+    assert tracker.current() is None and tracker.pending == other
+    tracker.accept_pending()
+    assert tracker.current() == other and tracker.confirmed
