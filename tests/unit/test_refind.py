@@ -218,7 +218,8 @@ def test_freeze_pauses_on_a_new_biome_and_resumes_at_the_new_object():
     out = _again(run2, obj)
     fz = Freezer(run2.session)
     live = LiveCheats(run2.session, fz)
-    live.trackers["obj1"] = rf.Tracker(run2.session, obj, out.address)
+    clock = Clock()
+    live.trackers["obj1"] = rf.Tracker(run2.session, obj, out.address, clock=clock)
     cheat = _anchored_cheat()
     live.turn_on(cheat)
     assert run2.health() == 999.0
@@ -236,6 +237,9 @@ def test_freeze_pauses_on_a_new_biome_and_resumes_at_the_new_object():
     assert run2.fake.peek(fg.PID, old + fg.HP, 4) == bytes(4)
     run2.touched = [run2.player]  # the game's code runs on the new object
     run2.set_health(50.0)
+    fz.tick()
+    assert fz.paused and run2.health() == 50.0, "re-finds at most once a second"
+    clock.sleep(rf.TRACK_RETRY_S)
     fz.tick()
     assert not fz.paused and run2.health() == 999.0
     assert cheat.locations[0].offset == run2.health_addr

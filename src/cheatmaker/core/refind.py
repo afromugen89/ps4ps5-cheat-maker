@@ -159,6 +159,7 @@ def find_again(
     use_scan: bool = True,
     slot_wait: float | None = None,
     learn_chains: bool = True,
+    maps: MapIndex | None = None,
     sleep: Sleep = time.sleep,
     clock: Clock = time.monotonic,
     progress: ProgressFn | None = None,
@@ -171,7 +172,7 @@ def find_again(
     game = session.require_game()
     client = session.require_client()
     started = clock()
-    maps = MapIndex(client.maps(game.pid))
+    maps = maps or MapIndex(client.maps(game.pid))
     read_u64 = ptr.u64_reader(lambda a, n: client.read(game.pid, a, n))
     got: list[Found] = []
 
@@ -407,25 +408,58 @@ def _field_filter(
 
 
 # -- keep it right while freezing ---------------------------------------------------------
+TRACK_RETRY_S = 1.0
+"""While lost, re-find at most this often (each try re-reads the memory map, which is
+large on big games). AC-12.5 allows 5 s."""
+
+
 class Tracker:
     """Where one object is right now, for the freezer (AC-12.5). Every call re-checks
     the object (vtable + fields); when that fails it re-finds with the fast methods
     only (no waiting, no memory search) and returns None until something verifies."""
 
-    def __init__(self, session: Session, obj: ObjectSpec, address: int | None = None) -> None:
+    def __init__(
+        self,
+        session: Session,
+        obj: ObjectSpec,
+        address: int | None = None,
+        clock: Clock = time.monotonic,
+    ) -> None:
         self.session = session
         self.obj = obj
         self.address = address
         self.confirmed = False  # the player said "yes, that's it" this run (AC-12.2)
+        self._clock = clock
+        self._maps: MapIndex | None = None
+        self._last_try = -TRACK_RETRY_S
         self._lock = threading.Lock()
+
+    def _map_index(self, fresh: bool = False) -> MapIndex:
+        if fresh or self._maps is None:
+            game = self.session.require_game()
+            self._maps = MapIndex(self.session.require_client().maps(game.pid))
+        return self._maps
 
     def current(self) -> int | None:
         with self._lock:
-            if self.address is not None and verify(self.session, self.obj, self.address) is None:
+            if (
+                self.address is not None
+                and verify(self.session, self.obj, self.address, self._map_index()) is None
+            ):
                 return self.address
+            now = self._clock()
+            if now - self._last_try < TRACK_RETRY_S:
+                self.address = None
+                return None
+            self._last_try = now
             old, self.address = self.address, None
             out = find_again(
-                self.session, self.obj, use_scan=False, slot_wait=0, learn_chains=False
+                self.session,
+                self.obj,
+                use_scan=False,
+                slot_wait=0,
+                learn_chains=False,
+                maps=self._map_index(fresh=True),
             )
             if out.found:
                 self.address = out.address
