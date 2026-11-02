@@ -97,6 +97,7 @@ class FakeNgServer:
         self.authed = False
         self.watch_rips: list[int] = []
         self.watch_regs: list[dict[str, int]] = []  # sent after watch_rips, full reg64
+        self.dial_port = lambda: 755  # where the client listens (the fixture sets it)
         self.watchpoints: list[tuple[int, ...]] = []
         self.commands: list[int] = []
         self.connections = 0
@@ -342,7 +343,7 @@ class FakeNgServer:
 
         for _ in range(50):
             try:
-                s = socket.create_connection(("127.0.0.1", 755), timeout=1)
+                s = socket.create_connection(("127.0.0.1", self.dial_port()), timeout=1)
                 break
             except OSError:
                 time.sleep(0.05)
@@ -366,6 +367,8 @@ def server():
 @pytest.fixture
 def client(server):
     cl = Ps5DebugNgClient.connect("127.0.0.1", server.port, timeout=3)
+    cl.interrupt_port = 0  # a free port, not the PS5's fixed 755: no clash in parallel runs
+    server.dial_port = lambda: cl.interrupt_bound
     yield cl
     cl.close()
 
@@ -682,3 +685,11 @@ def test_parse_struct_reg_layout():
     assert parse_interrupt(pkt).rip == 3
     with pytest.raises(ProtocolError):
         parse_struct_reg(b"\0" * 100)
+
+
+def test_watch_listens_on_the_ps5s_fixed_port_by_default(server):
+    cl = Ps5DebugNgClient.connect("127.0.0.1", server.port, timeout=3)
+    try:
+        assert cl.interrupt_port == 755 and cl.interrupt_bound == 0
+    finally:
+        cl.close()

@@ -267,6 +267,10 @@ class Ps5DebugNgClient:
         self._w = _Wire(sock)
         self.host, self.port = host, port
         self._lock = threading.RLock()  # freezer thread and UI share the socket
+        # The PS5 dials back here for watchpoint hits. Tests set 0 (any free port) and
+        # read the one bound from interrupt_bound.
+        self.interrupt_port = INTERRUPT_PORT
+        self.interrupt_bound = 0
         self._authed = False
         self._turbo: bool | None = None
         self._turbo_flags = 0
@@ -828,7 +832,8 @@ class Ps5DebugNgClient:
         hits: queue.Queue[WatchHit] = queue.Queue()
         listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        listener.bind(("0.0.0.0", INTERRUPT_PORT))
+        listener.bind(("0.0.0.0", self.interrupt_port))
+        self.interrupt_bound = listener.getsockname()[1]
         listener.listen(1)
         listener.settimeout(timeout_s)
         stop = threading.Event()
