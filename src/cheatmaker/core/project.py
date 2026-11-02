@@ -33,6 +33,7 @@ FORMAT = "cheatmaker-project"
 # Hooks saved by format 1 don't, so they are dropped on load (found again by memory
 # search until the player presses Find it next time again).
 FORMAT_VERSION = 2
+CLASS_FLOAT_LIMIT = 1e9  # top of a float's plausible range when the class is checked
 EXTENSION = ".cmproj"
 
 Role = Literal["reader", "writer"]
@@ -71,6 +72,11 @@ def _number(v: object, what: str) -> float | int:
     if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
         raise ValueError(f"{what} is not a number: {v!r}")
     return v
+
+
+def class_top(vtype: ValueType) -> float | int:
+    """Top of the plausible range for a field of an object with a class check."""
+    return CLASS_FLOAT_LIMIT if vtype.is_float else vtype.int_range()[1]
 
 
 @dataclass
@@ -400,6 +406,10 @@ class Project:
         dropped = []
         if ver < 2:  # its hooks have no spare room for the keep-value routine
             for o in objects:
+                if o.vtable is not None:  # format 1 capped at 10x / 10,000 (BUG-08)
+                    for f in o.fields:
+                        if f.range is not None:
+                            f.range = (f.range[0], class_top(f.vtype))
                 if o.hook is not None:
                     o.anchors = [a for a in o.anchors if not isinstance(a, HookAnchor)]
                     dropped.append(o.id)

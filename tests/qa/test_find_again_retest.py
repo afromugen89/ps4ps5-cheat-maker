@@ -7,8 +7,6 @@ from __future__ import annotations
 import json
 import struct
 
-import pytest
-
 from cheatmaker.console.client import WatchHit
 from cheatmaker.core import anchor_hook as ah
 from cheatmaker.core import project as pj
@@ -80,7 +78,6 @@ def test_r03_chain_found_value_is_followed_after_a_move(win, console):
 
 
 # == BUG-12: notes from format 1 keep the old 10,000 cap ================================
-@pytest.mark.xfail(reason="BUG-12: migrated format-1 field keeps the 10,000 cap", strict=True)
 def test_r04_format1_notes_get_the_class_range_on_migration(win, console):
     connect(win)
     learn_ui(win, add_health_cheat(win, console.game))

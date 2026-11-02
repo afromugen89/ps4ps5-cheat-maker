@@ -116,6 +116,7 @@ def test_format_1_hooks_are_dropped_on_load(tmp_path):  # re-review: no PC-off r
     player = p.object("player")
     assert player.hook is None and player.anchors_of(pj.ChainAnchor)
     assert p.dropped_hooks == ["player"]
+    assert player.field("Health").range == (0, pj.CLASS_FLOAT_LIMIT), "BUG-12: no 10,000 cap"
     pj.save(old, p)
     assert json.loads(old.read_text())["format_version"] == pj.FORMAT_VERSION
     assert pj.load(old).dropped_hooks == []

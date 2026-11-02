@@ -34,6 +34,7 @@ from cheatmaker.console.client import MemMap, ProgressFn
 from cheatmaker.core import anchor_hook as ah
 from cheatmaker.core import cave as cv
 from cheatmaker.core import pointers as ptr
+from cheatmaker.core import project as pj
 from cheatmaker.core import vtable_find as vf
 from cheatmaker.core.project import (
     ChainAnchor,
@@ -290,7 +291,7 @@ def default_range(vtype: ValueType, value: float | int) -> tuple[float, float]:
     return (lo, hi)
 
 
-CLASS_FLOAT_LIMIT = 1e9  # top of a float's range in an object with a class check
+CLASS_FLOAT_LIMIT = pj.CLASS_FLOAT_LIMIT
 
 
 def class_range(vtype: ValueType, value: float | int) -> tuple[float, float]:
@@ -298,9 +299,7 @@ def class_range(vtype: ValueType, value: float | int) -> tuple[float, float]:
     check tells objects apart, so a counter or currency may grow far past 10x (e.g.
     100 -> 25,000). The low end stays as ``default_range`` (health never goes < 0)."""
     lo, _hi = default_range(vtype, value)
-    if vtype.is_float:
-        return (lo, CLASS_FLOAT_LIMIT)
-    return (lo, vtype.int_range()[1])
+    return (lo, pj.class_top(vtype))
 
 
 def widen(f: Field, value: float | int) -> None:
