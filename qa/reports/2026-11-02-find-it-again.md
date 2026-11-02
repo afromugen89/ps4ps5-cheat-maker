@@ -464,3 +464,51 @@ The fix commits only removed the xfail markers from r01-r04 (`git diff 6d9d6d5..
 ### Risks (no bug filed)
 - `path_lost` runs `ah.install` (console writes) on the freezer thread while it holds `Tracker._lock`. This works on FakeConsole. On the console, check in **C10f** that no stall or socket clash occurs when the GUI also talks to the PS5 at that moment.
 - `Tracker.ignored` is never cleared. If the allocator later reuses an ignored address for the real new pawn, the slot path won't offer it while the old object still verifies. The re-find after the old one dies still works.
+
+---
+
+## 10. Final re-test (bbdd0f6), 2026-11-02
+
+**Build:** `bbdd0f6`. Full suite: **519 passed, 24 skipped, 0 xfailed** (checked over 2 full runs). `ruff check .` is clean.
+
+The fix commit only removed the xfail marker from `test_r09`, so it still exercises the bug.
+
+- **BUG-13: closed.** `test_r09` passes. While a question is open, it is re-checked every tick. Once the old pawn is freed and only the new one verifies, the tracker follows the new one by itself (AC-12.5).
+
+**Regression probes, all pass:**
+- `test_r10`: an object with no class check (field filter only) is **never** auto-followed. When the old object dies, the new place stays pending until the player answers.
+- `test_r11`: a late answer (No, after the question already answered itself) is ignored. The freeze stays on the new object and the cheat stays on.
+- `test_r12`: the real `QMessageBox` closes by itself within 250 ms once the question no longer holds. The test is guarded so a regression can't hang the suite.
+- `test_r13`: `path_lost` called from 8 threads at once installs the hook exactly once.
+- `test_r08`: no repeated asks after No.
+
+A first draft of `test_r12` left a `singleShot` timer that fired during a later test (`test_ps5debug_ng::test_next_scan_rescans…`) and made it fail. That was my test's fault, not a product bug; it is fixed with a timer owned by the window.
+
+### All bugs
+
+| Bug | Status |
+|---|---|
+| BUG-01..13 | Closed |
+
+No bugs are open. `tests/qa` holds 59 + 120 emulated + 17 re-test cases, all green.
+
+### Release readiness for console testing: ✅ Ready for C10
+
+Every FakeConsole-testable acceptance criterion (AC-11.1-11.3, AC-12.1-12.5, AC-13.1-13.2, AC-14.3) passes. The capture and keep routines are proven register-, flag- and stack-safe on a real x86 emulator, at the PS5 low module base and above 4 GiB (PS4).
+
+These items can only be settled on hardware:
+
+| Item | Console test |
+|---|---|
+| NG register layout and whether a per-frame reader shows up | C10a |
+| The slot really stays unused by the game | C10b |
+| Real 10 s timing and whether the 5-byte jump write can tear | C10c |
+| CheatRunner's own patch on/off order | C10d |
+| Memory search speed (≤ 3 min) | C10e |
+| UE4 GC timing, the ask/auto-resolve flow, and the freezer-thread hook install not clashing with GUI traffic | C10f |
+| Real PS4 module base | C10g |
+| The full proof on Returnal (health + Obolites, 3 restarts, 2 biomes, 1 death) | C10 / AC-14.1 |
+
+Known accepted limit: if the link drops and the app is then closed without reconnecting, the hook stays in the game until the game restarts.
+
+**Not ready for release** until C10 passes.

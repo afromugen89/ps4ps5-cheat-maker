@@ -188,3 +188,97 @@ def test_r09_ue4_move_resumes_by_itself_once_the_old_object_is_gone():
     game.fake.read(fg.PID, fg.BASE, 1)
     tracker._last_try = -10.0
     assert tracker.current() == new, "only one answer left: follow it"
+
+
+# == final re-test (bbdd0f6) ============================================================
+def test_r10_weak_object_is_never_followed_by_itself_even_when_the_old_one_dies():
+    from cheatmaker.core.project import HookFilter
+    from tests.qa.test_find_again_qa import _move_keeping_old
+
+    game = fg.build(1)
+    obj = learn_core(game).obj
+    obj.vtable = None  # no class check: only the player-only field filter
+    obj.hook.filter = HookFilter("field", 8, 0x40048)
+    ah.install(game.session, obj)
+    tracker = rf.Tracker(game.session, obj, game.player)
+    new = fg.HEAP + 0x6000
+    old = _move_keeping_old(game, new)
+    game.fake.read(fg.PID, fg.BASE, 1)
+    assert tracker.current() is None and tracker.pending == new
+    game.fake.poke(fg.PID, old, bytes(0x300))  # the old one is freed
+    for _ in range(3):
+        game.fake.read(fg.PID, fg.BASE, 1)
+        tracker._last_try = -10.0
+        assert tracker.current() is None, "weak: still waits for the player"
+    assert tracker.pending == new
+
+
+def test_r11_late_answer_after_the_question_answered_itself_is_ignored(win, console):
+    from tests.qa.test_find_again_qa import _move_keeping_old
+
+    connect(win)
+    learn_ui(win, add_health_cheat(win, console.game))
+    set_on(win, 0, True)
+    game = console.game
+    tracker = win.ctl.live.trackers["obj1"]
+    new = fg.HEAP + 0x6000
+    old = _move_keeping_old(game, new)
+    game.fake.read(fg.PID, fg.BASE, 1)
+    assert tracker.current() is None and tracker.pending == new
+
+    def answer_late(_text):  # while the box is open, the GC frees the old pawn
+        game.fake.poke(fg.PID, old, bytes(0x300))
+        tracker.current()
+        return False  # the player clicks No afterwards
+
+    win.cheats.finder.ask_confirm = answer_late
+    win.cheats.finder.check_pending()
+    assert tracker.address == new and tracker.pending is None, "the late No changes nothing"
+    assert win.ctl.cheat_file.cheats[0].enabled
+
+
+def test_r12_question_box_closes_when_the_question_no_longer_holds(win, qtbot):
+    from PySide6.QtCore import QTimer
+    from PySide6.QtWidgets import QApplication
+
+    finder = win.cheats.finder
+    finder._ask_still = lambda: False
+    hung = []
+    guard = QTimer(win)  # owned by the window: never fires in a later test
+    guard.setSingleShot(True)
+    guard.timeout.connect(  # if it didn't close: record it and close it, never hang
+        lambda: hung.append(1) or QApplication.activeModalWidget().done(0)
+    )
+    guard.start(3000)
+    assert finder._ask_confirm("Is this it?") is False
+    guard.stop()
+    assert not hung, "closed by itself"
+
+
+def test_r13_path_lost_installs_the_hook_once_from_many_threads(win, console):
+    import threading
+
+    connect(win)
+    learn_ui(win, add_health_cheat(win, console.game))
+    finder = win.cheats.finder
+    obj = win.ctl.project.objects[0]
+    ah.remove(win.ctl.session, obj, lambda _s: None)
+    finder._unrecord(obj.id)
+    finder.by_chain.add(obj.id)
+    calls = []
+    real = ah.install
+
+    def counting(session, o):
+        calls.append(1)
+        return real(session, o)
+
+    ah_install, ah.install = ah.install, counting
+    try:
+        ts = [threading.Thread(target=finder.path_lost, args=(obj,)) for _ in range(8)]
+        for t in ts:
+            t.start()
+        for t in ts:
+            t.join()
+    finally:
+        ah.install = ah_install
+    assert len(calls) == 1 and obj.id in finder.installed
