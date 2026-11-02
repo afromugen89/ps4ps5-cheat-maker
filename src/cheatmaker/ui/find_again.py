@@ -73,8 +73,31 @@ class FindAgain(QObject):
         self.open_search: Callable[[ValueType, float | int | None], None] = lambda vt, v: None
         self.running = False
         self.sleep: Callable[[float], None] = time.sleep  # tests: no waiting
+        self._lock = threading.Lock()  # installed/_ours are written by worker threads too
+        self._asking = False
         ctl.game_changed.connect(self.on_game)
         ctl.before_disconnect.append(self.remove_hooks)
+        self.pending_timer = QTimer(self)
+        self.pending_timer.setInterval(1000)
+        self.pending_timer.timeout.connect(self.check_pending)
+        self.pending_timer.start()
+
+    # -- hooks we put in ----------------------------------------------------------
+    def record(self, obj: pj.ObjectSpec, pid: int) -> None:
+        """Called the moment our install returns, from any thread, so a disconnect or
+        an error later in the same job still takes the hook out."""
+        with self._lock:
+            self.installed[obj.id] = obj
+            self._ours[obj.id] = pid
+
+    def _unrecord(self, obj_id: str) -> None:
+        with self._lock:
+            self.installed.pop(obj_id, None)
+            self._ours.pop(obj_id, None)
+
+    def is_ours(self, obj_id: str, pid: int) -> bool:
+        with self._lock:
+            return self._ours.get(obj_id) == pid
 
     # -- project -----------------------------------------------------------------
     def ensure_project(self) -> pj.Project:
@@ -141,7 +164,6 @@ class FindAgain(QObject):
             return
         session = self.ctl.session
         objects = list(p.objects)
-        ours = dict(self._ours)
 
         def work():
             pid = session.require_game().pid
@@ -153,8 +175,8 @@ class FindAgain(QObject):
                         state = ah.install(session, obj)
                     except CheatMakerError as exc:
                         log.warning("action=hook_install object=%s reason=%s", obj.id, exc)
-                if state == "already" and ours.get(obj.id) == pid:
-                    state = "installed"  # ours from earlier in this run
+                    if state == "installed":
+                        self.record(obj, pid)
                 results.append((obj, state, rf.find_again(session, obj, use_hook=use_hook)))
             return pid, results
 
@@ -168,13 +190,10 @@ class FindAgain(QObject):
 
     def _done(self, result) -> None:
         self.running = False
-        pid, results = result
+        _pid, results = result
         p = self.ctl.project
         lines = []
-        for obj, state, out in results:
-            if state == "installed":
-                self.installed[obj.id] = obj
-                self._ours[obj.id] = pid
+        for obj, _state, out in results:
             if out.status == "disagree":
                 picked = self.ask_pick(obj, out.options)
                 out = rf.confirm_pick(obj, picked) if picked is not None else out
@@ -198,13 +217,84 @@ class FindAgain(QObject):
             self.ctl.message.emit(" ".join(lines))
 
     def remove_hooks(self) -> None:
+        with self._lock:
+            objs = list(self.installed.values())
+        for obj in objs:
+            self._remove(obj)
+        with self._lock:
+            self.installed.clear()
+            self._ours.clear()
+
+    def _remove(self, obj: pj.ObjectSpec) -> None:
+        try:
+            ah.remove(self.ctl.session, obj, self.sleep)
+        except CheatMakerError as exc:
+            log.warning("action=hook_remove object=%s reason=%s", obj.id, exc)
+        self._unrecord(obj.id)
+
+    def before_on(self, cheat: Cheat) -> None:
+        """Turning on a cheat that is found again: put its hook back if it was taken
+        out when the last one went off, so the value keeps being followed."""
+        if cheat.anchor is None or not self.ctl.session.connected:
+            return
+        tracker = self.ctl.live.trackers.get(cheat.anchor[0])
+        obj = tracker.obj if tracker is not None else None
+        if obj is None or obj.hook is None or obj.has_proven_chain or obj.id in self.installed:
+            return
+        try:
+            if ah.install(self.ctl.session, obj) == "installed":
+                self.record(obj, self.ctl.session.require_game().pid)
+        except CheatMakerError as exc:
+            log.warning("action=hook_install object=%s reason=%s", obj.id, exc)
+
+    def after_off(self, cheat: Cheat) -> None:
+        """AC-11.2: the hook comes out when the last cheat on its value is turned off.
+        A code cheat on the same place (PC-off) takes our hook out with it when it goes
+        off, so hooks we still need are put back."""
+        if not self.ctl.session.connected:
+            return
+        cheats = self.ctl.cheat_file.cheats if self.ctl.cheat_file else []
+        if cheat.anchor is not None:
+            obj_id = cheat.anchor[0]
+            still_on = any(c.enabled and c.anchor and c.anchor[0] == obj_id for c in cheats)
+            obj = self.installed.get(obj_id)
+            if obj is not None and not still_on:
+                self._remove(obj)
+            return
         for obj in list(self.installed.values()):
             try:
-                ah.remove(self.ctl.session, obj, self.sleep)
+                if not ah.is_installed(self.ctl.session, obj):
+                    ah.install(self.ctl.session, obj)
             except CheatMakerError as exc:
-                log.warning("action=hook_remove object=%s reason=%s", obj.id, exc)
-        self.installed.clear()
-        self._ours.clear()
+                log.warning("action=hook_reinstall object=%s reason=%s", obj.id, exc)
+
+    # -- a weak object moved: ask before following it ---------------------------------
+    def check_pending(self) -> None:
+        if self._asking or not self.ctl.session.connected:
+            return
+        cheats = self.ctl.cheat_file.cheats if self.ctl.cheat_file else []
+        for obj_id, tracker in list(self.ctl.live.trackers.items()):
+            if tracker.pending is None:
+                continue
+            mine = [c for c in cheats if c.enabled and c.anchor and c.anchor[0] == obj_id]
+            if not mine:
+                continue
+            value = read_field(self.ctl, tracker.obj, tracker.pending, mine[0].anchor[1])
+            self._asking = True
+            try:
+                ok = self.ask_confirm(
+                    hints.CONFIRM_MOVED.format(name=tracker.obj.label, value=fmt(value))
+                )
+            finally:
+                self._asking = False
+            if ok:
+                tracker.accept_pending()
+                continue
+            tracker.reject_pending()
+            for c in mine:
+                self.ctl.live.turn_off(c, restore=False)
+            self.ctl.message.emit(hints.CONFIRM_NO.format(name=tracker.obj.label))
+            self.ctl.cheats_changed.emit()
 
     # -- confirm before the first write (AC-12.2) -----------------------------------
     def confirm(self, cheat: Cheat) -> bool:
@@ -264,9 +354,6 @@ class FindAgain(QObject):
         tracker = rf.Tracker(self.ctl.session, obj, value_addr - f.off)
         tracker.confirmed = True  # the player just found it by hand
         self.ctl.live.trackers[obj.id] = tracker
-        if state in ("installed", "already"):
-            self.installed[obj.id] = obj
-            self._ours[obj.id] = self.ctl.session.require_game().pid
         self.save()
         self.ctl.cheats_changed.emit()
 
@@ -367,7 +454,7 @@ class LearnDialog(QDialog):
             self.hint.setText(text.format(name=self.cheat.name))
 
     def do_start(self) -> None:
-        cheat, session = self.cheat, self.ctl.session
+        cheat, session, finder = self.cheat, self.ctl.session, self.finder
         if cheat.value_type is None:
             return
         if cheat.enabled:  # our own freeze would hide the game's reads and writes
@@ -398,6 +485,8 @@ class LearnDialog(QDialog):
                     state = ah.install(session, obj)
                 except CheatMakerError as exc:
                     learned.notes.append(str(exc))
+                if state == "installed":  # "already" = loaded by CheatRunner: not ours
+                    finder.record(obj, session.require_game().pid)
             return learned, state
 
         self.ctl.tasks.run(work, self._done, self._failed)

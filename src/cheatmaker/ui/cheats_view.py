@@ -190,7 +190,9 @@ class CheatsView(QWidget):
         self.delete_btn.setEnabled(c is not None)
         up = self.ctl.session.connected and self.ctl.session.game is not None
         located = c is not None and (c.anchor is None or c.anchor[0] in self.ctl.live.trackers)
-        self.lock_btn.setEnabled(located and c.session_only and self.ctl.session.connected)
+        self.lock_btn.setEnabled(
+            c is not None and c.anchor is None and c.session_only and self.ctl.session.connected
+        )
         self.learn_btn.setEnabled(up and located and c.session_only and c.value_type is not None)
         p = self.ctl.project
         self.again_btn.setEnabled(up and p is not None and bool(p.objects))
@@ -205,9 +207,11 @@ class CheatsView(QWidget):
                 want = item.checkState() == Qt.CheckState.Checked
                 if want and not c.enabled:
                     if self.finder.confirm(c):  # AC-12.2: ask once per run
+                        self.finder.before_on(c)
                         self.ctl.live.turn_on(c)
                 elif not want and c.enabled:
                     self.ctl.live.turn_off(c)
+                    self.finder.after_off(c)
             elif item.column() == COL_NAME:
                 name = item.text().strip()
                 if not name:

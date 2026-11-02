@@ -122,3 +122,8 @@ PC_OFF_TIP = (
     "yours) and can be saved for CheatRunner, so it works after a restart without the PC."
 )
 PC_OFF_MADE = 'Made "{name}". Tick it to test it, then Save: it works with the PC off.'
+CONFIRM_MOVED = (
+    "{name} moved (a new area?). Cheat Maker can't be sure it found the right one, so "
+    "it stopped changing it. It shows {value} now.\n\nTake a hit and watch this number. "
+    "Press Yes only if it changes with your {name}."
+)

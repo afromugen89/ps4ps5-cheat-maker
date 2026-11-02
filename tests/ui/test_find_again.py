@@ -284,3 +284,91 @@ def test_advanced_find_again_without_the_hook(win, console):  # C10e
     win.ctl.live.trackers.clear()
     win.cheats.again_btn.click()
     assert "found again by a memory search" in win.status.text()
+
+
+# -- review fixes ------------------------------------------------------------------------
+def test_hook_comes_out_even_if_finding_fails_midway(win, console, monkeypatch):  # M1
+    from cheatmaker.errors import ReadFailed
+    from cheatmaker.ui import find_again as fa
+
+    connect(win)
+    learn(win, add_health_cheat(win, console.game))
+    win.ctl.shutdown()
+    run2 = console.restart(2)
+
+    def boom(*a, **k):
+        raise ReadFailed("the PS5 stopped answering mid-search")
+
+    monkeypatch.setattr(fa.rf, "find_again", boom)
+    connect(win)
+    assert run2.fake.peek(fg.PID, fg.READER, 1) == b"\xe9", "installed before the failure"
+    assert "obj1" in win.cheats.finder.installed, "recorded at once, not in _done"
+    win.ctl.shutdown()
+    assert run2.fake.peek(fg.PID, fg.READER, 10) == fg.VMOVSS_R
+
+
+def test_hook_loaded_by_cheatrunner_is_left_alone(win, console):  # M1
+    from cheatmaker.core import anchor_hook as ah
+    from cheatmaker.core.session import Session
+
+    connect(win)
+    learn(win, add_health_cheat(win, console.game))
+    obj = win.ctl.project.objects[0]
+    win.ctl.shutdown()
+    run2 = console.restart(2)
+    s = Session(lambda ip, port: run2.fake)
+    s.connect("1.2.3.4")
+    s.refresh_game()
+    for loc in ah.hook_cheat(s, obj, "hook").locations:  # CheatRunner turned it on
+        run2.fake.poke(fg.PID, fg.BASE + loc.offset, loc.on)
+    connect(win)
+    assert "obj1" not in win.cheats.finder.installed
+    win.ctl.shutdown()
+    assert run2.fake.peek(fg.PID, fg.READER, 1) == b"\xe9", "not ours: stays in"
+
+
+def test_last_cheat_off_takes_the_hook_out_and_on_puts_it_back(win, console):  # AC-11.2
+    connect(win)
+    learn(win, add_health_cheat(win, console.game))
+    fake = console.game.fake
+    tick(win)
+    assert fake.peek(fg.PID, fg.READER, 1) == b"\xe9"
+    win.cheats.table.item(0, COL_ON).setCheckState(Qt.CheckState.Unchecked)
+    assert fake.peek(fg.PID, fg.READER, 10) == fg.VMOVSS_R
+    assert "obj1" not in win.cheats.finder.installed
+    tick(win)
+    assert fake.peek(fg.PID, fg.READER, 1) == b"\xe9" and "obj1" in win.cheats.finder.installed
+    assert console.game.health() == 999.0
+
+
+def test_pc_off_cheat_off_puts_the_apps_hook_back(win, console):  # M2
+    connect(win)
+    dlg = learn(win, add_health_cheat(win, console.game))
+    fake = console.game.fake
+    obj = win.ctl.project.objects[0]
+    capture_jmp = fake.peek(fg.PID, fg.READER, 5)
+    capture = fake.peek(fg.PID, fg.BASE + obj.hook.cave, 64)
+    dlg.pc_off_btn.click()
+    tick(win, 1)
+    assert fake.peek(fg.PID, fg.BASE + obj.hook.cave, 64) == capture, "running code untouched"
+    assert fake.peek(fg.PID, fg.READER, 5) != capture_jmp, "jump re-aimed to its own routine"
+    win.cheats.table.item(1, COL_ON).setCheckState(Qt.CheckState.Unchecked)
+    assert fake.peek(fg.PID, fg.READER, 5) == capture_jmp, "the app's hook is back"
+
+
+def test_moved_weak_value_asks_before_writing_again(win, console):  # M4
+    connect(win)
+    cheat = add_health_cheat(win, console.game)
+    learn(win, cheat)
+    tick(win)
+    tracker = win.ctl.live.trackers["obj1"]
+    asked = []
+    win.cheats.finder.ask_confirm = lambda text: asked.append(text) or True
+    tracker.pending = console.game.player
+    win.cheats.finder.check_pending()
+    assert "moved" in asked[0] and tracker.pending is None and tracker.confirmed
+    win.cheats.finder.ask_confirm = lambda text: False
+    tracker.pending = console.game.player
+    win.cheats.finder.check_pending()
+    assert not cheat.enabled and tracker.address is None
+    assert win.status.text().startswith("OK, nothing was changed")
