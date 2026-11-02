@@ -87,7 +87,6 @@ def test_tc17_capture_routine_is_invisible_to_the_game(form, base, filt, player,
     assert got["slot"] == ((got["at"], 1) if player or filt == "none" else (0, 0))
 
 
-@pytest.mark.xfail(reason="BUG-04: keep-value routine skips a flag-setting writer", strict=True)
 @pytest.mark.parametrize("flags", [0x202, 0xAC3])
 def test_tc18_keep_routine_on_sub_leaves_flags_as_the_game_expects(flags):
     orig = bytes.fromhex(FORMS["writer sub [rax+2ACh],ecx"])

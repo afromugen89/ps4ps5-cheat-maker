@@ -138,7 +138,7 @@ def test_capture_code_vtable_filter_on_the_returnal_writer():
     assert jne.near_branch_target == CAVE_IP + code.index(b"\x9d"), "skips to popfq"
 
 
-def test_capture_and_keep_value_for_a_writer_replaces_the_write():
+def test_capture_and_keep_value_for_a_writer_writes_over_the_game():  # BUG-04
     span = cv.decode_at(VMOVSS, 0x2B7B43F)
     code = cv.capture_code(
         span,
@@ -152,13 +152,14 @@ def test_capture_and_keep_value_for_a_writer_replaces_the_write():
     )
     t = _text(code)
     assert t[2] == "cmp dword ptr [r12+8],40048h"
-    assert t[6:10] == [
+    assert t[6:11] == [
         "popfq",
         "lea rsp,[rsp+80h]",
-        "mov dword ptr [r12+2ACh],447A0000h",  # 1000.0 instead of the game's write
+        "vmovss [r12+2ACh],xmm1",  # the game's write still runs (flags, neighbours)
+        "mov dword ptr [r12+2ACh],447A0000h",  # then 1000.0 over it
         "jmp 0000000002B7B449h",
     ]
-    assert t[10:] == [
+    assert t[11:] == [
         "popfq",
         "lea rsp,[rsp+80h]",
         "vmovss [r12+2ACh],xmm1",

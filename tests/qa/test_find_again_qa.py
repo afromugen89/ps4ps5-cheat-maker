@@ -254,7 +254,6 @@ def test_tc17_capture_routine_changes_nothing_the_game_can_see(form, vtable, fil
     assert slot_refs == {SLOT, SLOT + 8}
 
 
-@pytest.mark.xfail(reason="BUG-04: keep-value routine skips a flag-setting writer", strict=True)
 def test_tc18_keep_routine_on_a_read_modify_write_keeps_the_games_flags():
     """`sub [rax+2ACh],ecx ; jle dead`: if the routine skips the `sub`, the game's next
     branch sees the flags from before it. Either refuse such a writer for PC-off, or

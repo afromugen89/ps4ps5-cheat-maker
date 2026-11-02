@@ -242,8 +242,9 @@ def capture_code(
         mov [slot], obj                     ; remember where it is now
         inc qword [slot+8]                  ; and that the routine ran
       [ popfq ; lea rsp,[rsp+128]          ; optional "keep at value" (player only):
-        mov [obj+disp], value               ;   writer: instead of the game's write
-        <rest of the hooked code> ; jmp back ;  reader: before the game reads it ]
+        [the game's writer]                 ;   writer: runs, then our value over it
+        mov [obj+disp], value               ;   reader: our value before it reads
+        <rest of the hooked code> ; jmp back ]
       other:
         popfq ; lea rsp,[rsp+128]
         <the original instructions> ; jmp back
@@ -296,11 +297,16 @@ def capture_code(
     ]
     keep: list[ix.Instruction] = []
     if value is not None:
-        rest = span[1:] if writes_memory(span[0]) else span
+        # A writer still runs first (``sub [rax+2ACh],ecx ; jle dead`` must leave the
+        # flags the game's next branch expects, from our kept value), then our value
+        # goes over its write. A reader gets our value before it reads.
+        n = 1 if writes_memory(span[0]) else 0
+        copies = [_label(i.copy(), 0xFFFE_0000 + k) for k, i in enumerate(span)]
         keep = [
             *epilogue(),
+            *copies[:n],
             *_stores(target, value),
-            *[_label(i.copy(), 0xFFFE_0000 + k) for k, i in enumerate(rest)],
+            *copies[n:],
             Ins.create_branch(C.JMP_REL32_64, back),
         ]
     other = epilogue()
