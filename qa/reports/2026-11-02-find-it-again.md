@@ -432,3 +432,35 @@ No GitHub issues were created (per session instructions); the main session files
    - Make pass: `::test_r03…`
 4. **BUG-12 (Low)**: format-1 migration keeps `range [0, 10000]`.
    - Make pass: `::test_r04…`
+
+---
+
+## 9. Re-test 2 (497a988..d4f9702), 2026-11-02
+
+**Build:** `d4f9702`. Full suite: **510 passed, 24 skipped, 1 xfailed**. `ruff check .` is clean.
+
+The fix commits only removed the xfail markers from r01-r04 (`git diff 6d9d6d5.. -- tests/qa`), so those tests still exercise the bugs. r01 now passes because `current()` returns None (paused and asking), not the twin.
+
+| Bug | Status | Notes |
+|---|---|---|
+| BUG-01 (rest) | Closed | `test_r02` passes. Our hooks are forgotten only when the pid changes. When the pid changes, the old process is gone, so that path is accepted. |
+| BUG-10 | Closed | `test_r01` passes. When both objects verify, the tracker pauses and asks. If the player says No, the first object is kept and the other one is ignored: no repeated asks (`test_r08`, passes). |
+| BUG-11 | Closed | `test_r03` passes. `Tracker.on_lost` → `path_lost` installs the hook, and the next ticks find the new place. |
+| BUG-12 | Closed | `test_r04` passes. Migration widens the range for class-checked fields. |
+
+### BUG-13 (new): An unanswered question blocks the AC-12.5 auto-resume after a UE4 move
+- Severity: Medium. Priority: P2. This is a side effect of the BUG-10 fix.
+- Automated test: `tests/qa/test_find_again_retest.py::test_r09_ue4_move_resumes_by_itself_once_the_old_object_is_gone`
+- Steps to reproduce:
+  1. Freeze health.
+  2. The pawn moves, and the old pawn is still alive (pending kill). Both verify, so the tracker pauses and asks. This step is correct.
+  3. The garbage collector frees the old pawn, so now only the new one verifies.
+  4. Nobody answers yet: the player is playing.
+- Expected: AC-12.5, "resumes the freeze without Kein's action". Once only one answer is left, follow it.
+- Actual: `current()` stays None until the dialog is answered, because `if self.pending is not None: return None` runs before anything else.
+- Suggested fix: when `pending_both` is set and the old address stops verifying while the pending one still does, accept the pending one automatically and close or ignore the dialog.
+- Impact for the product owner: after a new biome in Returnal, the freeze can stay paused until he looks at the PC and answers.
+
+### Risks (no bug filed)
+- `path_lost` runs `ah.install` (console writes) on the freezer thread while it holds `Tracker._lock`. This works on FakeConsole. On the console, check in **C10f** that no stall or socket clash occurs when the GUI also talks to the PS5 at that moment.
+- `Tracker.ignored` is never cleared. If the allocator later reuses an ignored address for the real new pawn, the slot path won't offer it while the old object still verifies. The re-find after the old one dies still works.

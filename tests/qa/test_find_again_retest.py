@@ -7,6 +7,8 @@ from __future__ import annotations
 import json
 import struct
 
+import pytest
+
 from cheatmaker.console.client import WatchHit
 from cheatmaker.core import anchor_hook as ah
 from cheatmaker.core import project as pj
@@ -148,3 +150,44 @@ def test_r07_connect_again_with_a_frozen_cheat_takes_out_and_puts_back_once(win,
     assert "obj1" in win.cheats.finder.installed
     win.ctl.shutdown()
     assert fake.peek(fg.PID, fg.READER, 10) == HOOKED
+
+
+# == re-test 2 (497a988..d4f9702) ======================================================
+def _twin_setup():
+    game = fg.build(1)
+    obj = learn_core(game).obj
+    ah.install(game.session, obj)
+    tracker = rf.Tracker(game.session, obj, game.player)
+    assert tracker.current() == game.player
+    return game, obj, tracker
+
+
+def test_r08_twin_no_keeps_the_first_and_never_asks_about_it_again():
+    game, _obj, tracker = _twin_setup()
+    twin = fg.HEAP + 0x9000
+    game.fake.poke(fg.PID, twin, game.fake.peek(fg.PID, game.player, 0x300))
+    game.touched = [*game.touched, twin]
+    game.fake.read(fg.PID, fg.BASE, 1)
+    assert tracker.current() is None and tracker.pending == twin, "paused, asking"
+    tracker.reject_pending()  # "No"
+    for _ in range(3):
+        game.fake.read(fg.PID, fg.BASE, 1)
+        assert tracker.current() == game.player and tracker.pending is None, "no re-ask"
+
+
+@pytest.mark.xfail(reason="BUG-13: unanswered question blocks the auto-resume", strict=True)
+def test_r09_ue4_move_resumes_by_itself_once_the_old_object_is_gone():
+    """AC-12.5 'without Kein's action': while the old pawn is pending kill both verify
+    (asking is fine), but once the GC frees it only the new one verifies, so the
+    freeze must resume even if nobody answered the question."""
+    from tests.qa.test_find_again_qa import _move_keeping_old
+
+    game, _obj, tracker = _twin_setup()
+    new = fg.HEAP + 0x6000
+    old = _move_keeping_old(game, new)
+    game.fake.read(fg.PID, fg.BASE, 1)
+    assert tracker.current() is None  # both verify: pause (and ask)
+    game.fake.poke(fg.PID, old, bytes(0x300))  # garbage collector frees the old pawn
+    game.fake.read(fg.PID, fg.BASE, 1)
+    tracker._last_try = -10.0
+    assert tracker.current() == new, "only one answer left: follow it"
