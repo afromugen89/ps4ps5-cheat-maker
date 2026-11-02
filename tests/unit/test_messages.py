@@ -16,6 +16,8 @@ from cheatmaker.ui.messages import GENERIC, report, user_message
         (e.CheatFileError("x"), "This cheat file can't be read."),
         (e.UploadFailed("x"), "Couldn't send the file to the PS5"),
         (e.LockFailed("nothing"), "Couldn't lock this value (nothing)"),
+        (e.ProjectFileError("x"), 'Cheat Maker\'s saved "find it again" notes'),
+        (e.FindFailed("Couldn't find Health this time."), "Couldn't find Health this time."),
         (ValueError("Type a number first."), "Type a number first."),
         (RuntimeError("boom"), GENERIC),
     ],

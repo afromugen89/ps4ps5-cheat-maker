@@ -29,6 +29,11 @@ _MESSAGES: list[tuple[type[BaseException], str]] = [
         "\"I don't know the number\" isn't ready for the PS5 yet. Search for a number you can "
         "see instead.",
     ),
+    (
+        e.ProjectFileError,
+        "Cheat Maker's saved \"find it again\" notes for this game can't be read. Find the "
+        "value again and press Find it next time.",
+    ),
     (e.CheatFileError, CANT_READ_FILE),
     (e.SaveFailed, "Couldn't save the file. Pick another folder and try again."),
     (
@@ -36,6 +41,7 @@ _MESSAGES: list[tuple[type[BaseException], str]] = [
         "Couldn't send the file to the PS5. Load the ftpsrv payload, or copy the saved file "
         "yourself.",
     ),
+    (e.FindFailed, "{reason}"),
     (e.LockFailed, "Couldn't lock this value ({reason}). It still works for this session."),
     (
         e.ProtocolError,
