@@ -313,3 +313,122 @@ Fix BUG-01, BUG-02 and BUG-03 before C10 if possible (C10c/f/d would otherwise r
    - Fix: reset the scanner and the Find view first, or refuse while a search is open.
 
 No GitHub issues were created (per session instructions); the main session files them.
+
+---
+
+## 8. Re-test after fixes (82aec57..59201ae), 2026-11-02
+
+**Build:** `59201ae`, same environment. Unicorn is now installed in the project venv, so `tests/qa/test_capture_emulated.py` runs.
+
+**How each fix was checked:**
+- Diffing `8b6b875..59201ae -- tests/qa` shows only xfail markers removed. `test_tc28` now writes `pj.FORMAT_VERSION + 1` instead of `2`, which is still "newer than this app". Every QA test still exercises the original bug.
+- I read each fix in `src/`.
+- I probed each fix's side effects.
+
+**Full run:** `pytest -q` gives **500 passed, 24 skipped, 4 xfailed**. `ruff check .` is clean.
+- The 24 skips are emulator cases that are invalid (no filter + enemy).
+- The 4 xfails are new or reopened bugs, listed below.
+- The emulator suite runs 120 capture cases plus 2 keep-on-`sub` flag cases; all pass.
+
+### Status of BUG-01..09
+
+| Bug | Status | Evidence |
+|---|---|---|
+| BUG-01 hook left after reconnect / lost link / refresh | **Partly fixed, reopened** | TC-05, TC-06, TC-07 pass. Fix: `run_before_disconnect` before Connect, plus a `_mine` record so an "already" result for our own hook is recorded as ours. Still open: **Refresh while the PS home screen is in front, then close the app** leaves the hook in (`test_r02…`). Cause: `on_game` (with the "unknown"-version GameInfo) clears `installed` while the game process is still running, so `shutdown` has nothing to remove. A lost link followed by closing without reconnecting is documented as a known limit (C10); that is accepted. |
+| BUG-02 freeze stays on the old object | Fixed | TC-14 passes. `Tracker` reads the slot every tick when the hook filters. **This fix introduced BUG-10.** |
+| BUG-03 PC-off routine zeroed on off | Fixed | TC-19 passes. The routine line's `off == on`, so only the jump toggles. CheatRunner benefits too. |
+| BUG-04 keep routine skips a flag-setting writer | Fixed | TC-18 passes in both the static and the emulated test. The writer runs first and the value is stored after it. Flags now come from `999 - dmg`; `mov` leaves them alone. |
+| BUG-05 malformed `.cmproj` crashes | Fixed | TC-25 (3 cases) and TC-26 pass: type checks in `from_json`, and `AttributeError` is caught. |
+| BUG-06 unreadable file overwritten | Fixed | TC-28 passes. The file is set aside as `.cmproj.bak` (`.bak2`, …) before the first save. |
+| BUG-07 short-chain game gets a hook | Fixed | TC-30 passes. Chains are tried first on connect, and there is no install at learn time when a chain exists. **This fix introduced BUG-11.** |
+| BUG-08 10,000 cap | Fixed for new notes | TC-31 passes: `class_range` gives float ≤ 1e9 and the full int range when a vtable is known. Files migrated from format 1 keep the old cap (BUG-12, Low). Objects without a class check keep the cap by design. |
+| BUG-09 memory search drops the open search | Fixed | TC-34 passes. `Session.take_search` resets the Scanner, and the Find view shows `SEARCH_LOST`. |
+
+### Regression probes (pass)
+
+| Probe | Result | Test |
+|---|---|---|
+| Two values in one game: separate routine rooms (keep and capture) and slots, both hooks installed, both removed on close (`find_cave` / `find_slot` skip reserved rooms) | Pass | `test_find_again_retest.py::test_r05…` |
+| Format-1 notes: hook dropped (never installed), found by memory search, "older Cheat Maker" message, re-saved as format 2 with only `vtable_scan` | Pass | `::test_r06…` |
+| Connect again with a frozen cheat: hook taken out and put back once, still ours, removed on close | Pass | `::test_r07…` |
+| Keep routine on all writer and reader forms (emulator) | Pass | `test_capture_emulated.py` |
+| Scanner reset: Find view cleared with a message | Pass | implementor's `test_find_again_memory_search_tells_the_find_view` |
+
+### New bugs
+
+#### BUG-10: Freeze silently switches to another object of the same class (regression from the BUG-02 fix)
+- Severity: High. Priority: P1.
+- Automated test: `tests/qa/test_find_again_retest.py::test_r01_second_object_of_the_same_class_is_never_followed_silently`
+- Steps to reproduce:
+  1. Learn health and install the hook. Create a Tracker at the player.
+  2. A second live object of the player's class (clone, second character, co-op partner) also runs through the hooked code.
+  3. One frame runs, so the slot holds the twin.
+  4. Call `tracker.current()`.
+- Expected: AC-12.3, "two answers: write nothing, ask". The player's object still verifies, so the tracker keeps it or pauses and asks.
+- Actual: `current()` returns the twin (`0x20009000`), and the freeze now writes the other object without asking.
+- Suspected cause: `refind.Tracker.current()`. The BUG-02 fix moves to `_slot_elsewhere()` whenever the slot names a different verifying object, even though the old one still verifies.
+- Suggested fix:
+  - When both the old and the slot's object verify, treat it as a disagreement: set `pending` and ask, as for weak objects.
+  - Or move only after the old object stops verifying, or after N slot reads in a row show only the new one. The pending-kill object is never handled again by the game code, while a twin keeps appearing alternately.
+- Impact for the product owner: in a game with two characters of the same kind, "infinite health" can jump to the other character.
+
+#### BUG-11: A value found by a memory path is never followed after a move; the freeze pauses for good with no message (regression from the BUG-07 fix)
+- Severity: Medium. Priority: P2.
+- Automated test: `::test_r03_chain_found_value_is_followed_after_a_move`
+- Steps to reproduce:
+  1. Use a short-chain game. Find it next time with a memory path.
+  2. Restart and connect. The value is found by the memory path and no hook is put in.
+  3. Tick the frozen cheat.
+  4. Change biome: the object moves and the path still leads to the old place.
+- Expected: AC-12.5, re-found within 5 s (the hook is available in the notes), or at least a message that the freeze stopped.
+- Actual: `freezer.paused` stays set. The tracker stays at the old address. No hook is installed (`by_chain` blocks `before_on`). The memory search isn't used while tracking, and the status line still says "found again".
+- Suspected cause:
+  - `FindAgain.start` / `before_on` skip the hook for `by_chain` objects.
+  - `Tracker.current()` re-finds only with `use_scan=False` and an empty slot.
+- Suggested fix: when a `by_chain` object's tracker fails to re-find, drop it from `by_chain`, install the saved hook and retry. If nothing works, show "health was lost, press Find it again".
+- Impact for the product owner: on a simple game, the freeze can quietly stop after a level change.
+
+#### BUG-12: Notes migrated from format 1 keep the old 10,000 cap
+- Severity: Low. Priority: P3.
+- Automated test: `::test_r04_format1_notes_get_the_class_range_on_migration`
+- Steps to reproduce:
+  1. Use a format-1 file whose field has `range [0, 10000]` and a known vtable.
+  2. Health is now 25,000.
+  3. Connect.
+- Expected: the class-checked range from the BUG-08 fix applies.
+- Actual: not found; `trackers` is empty.
+- Suspected cause: `Project.from_json` migration (ver < 2) drops hooks but leaves the stored `range`. Suggested fix: when `vtable` is set during migration, widen the range with `class_range`.
+- Impact for the product owner: users upgrading from the previous build can still lose money or counter values above 10,000 until they press Find it next time again.
+
+### Automated tests added in this round
+
+| File | What it covers |
+|---|---|
+| `tests/qa/conftest.py` | Shares the `console` and `win` fixtures. |
+| `tests/qa/test_find_again_retest.py` | 7 tests: r01-r04 are strict xfail for BUG-10, BUG-01 (reopened), BUG-11 and BUG-12; r05-r07 are passing regression checks. |
+
+### Console-only (unchanged mapping)
+
+| Bug | C10 test | What to check on the console |
+|---|---|---|
+| BUG-10 | **C10f** | A second same-class character, if the game has one. |
+| BUG-11 | **C10f / AC-14.2** | A simple game across a level change. |
+| BUG-02 fix | **C10f** | How long UE4 keeps the old pawn alive, and that the freeze moves within 5 s. |
+| Lost-link known limit | **C10c** | If the link drops and the app is closed, the hook stays until the game restarts. |
+
+### Recommendation (re-test)
+
+⚠️ BUG-03..09 are closed. Fix BUG-10 (High) and the BUG-01 remainder before C10f/C10c; BUG-11 can come in the same round. After that, run C10.
+
+### BUGS FOR FEATURE-IMPLEMENTOR (re-test)
+
+1. **BUG-10 (High)**: the Tracker follows the slot to another same-class object while the old one still verifies.
+   - Make pass: `tests/qa/test_find_again_retest.py::test_r01…`, while keeping `test_find_again_qa.py::test_tc14…` green.
+   - Fix: both verify → pending/ask, or require that the old object stops being seen.
+2. **BUG-01 (reopened, High)**: Refresh while the home screen is in front, then close → the hook stays.
+   - Make pass: `::test_r02…`
+   - Fix: in `on_game`, don't clear `installed` when the pid is unchanged, or remove our hooks before switching game.
+3. **BUG-11 (Medium)**: a chain-found object is never re-found after a move, and the freeze is paused with no message.
+   - Make pass: `::test_r03…`
+4. **BUG-12 (Low)**: format-1 migration keeps `range [0, 10000]`.
+   - Make pass: `::test_r04…`
