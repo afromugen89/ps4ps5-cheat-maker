@@ -82,6 +82,7 @@ class FindAgain(QObject):
         self._asking = False
         self._unreadable: Path | None = None  # a .cmproj that failed to load: kept on save
         self.by_chain: set[str] = set()  # found by a memory path: no hook needed
+        self._pid: int | None = None  # the game process the bookkeeping is for
         ctl.game_changed.connect(self.on_game)
         ctl.before_disconnect.append(self.remove_hooks)
         self.pending_timer = QTimer(self)
@@ -144,10 +145,16 @@ class FindAgain(QObject):
             log.warning("action=project_save reason=%s", exc)
 
     def on_game(self, game: GameInfo | None) -> None:
-        with self._lock:
-            self.installed.clear()
-            self._ours.clear()
-        self.by_chain.clear()
+        # A Refresh that sees the same game process (e.g. from the PS home screen,
+        # where the version can't be read) keeps our hooks: they are still in it and
+        # must still come out on close. Only another process, or no game, forgets them.
+        same = game is not None and game.pid == self._pid
+        self._pid = game.pid if game is not None else None
+        if not same:
+            with self._lock:
+                self.installed.clear()
+                self._ours.clear()
+            self.by_chain.clear()
         if game is None:
             self.ctl.project = None
             self.keep_rooms()

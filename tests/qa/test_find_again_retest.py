@@ -47,7 +47,6 @@ def test_r01_second_object_of_the_same_class_is_never_followed_silently():
 
 
 # == BUG-01 (reopened, partial): Refresh from the home screen, then close ================
-@pytest.mark.xfail(reason="BUG-01: hook left in after home-screen Refresh then close", strict=True)
 def test_r02_refresh_from_home_screen_then_close_takes_the_hook_out(win, console):
     connect(win)
     learn_ui(win, add_health_cheat(win, console.game))

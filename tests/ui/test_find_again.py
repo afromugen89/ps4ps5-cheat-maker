@@ -440,3 +440,15 @@ def test_find_again_memory_search_tells_the_find_view(win, console):  # BUG-09
     assert win.find.hint.text() == hints.SEARCH_LOST
     assert win.find.number.text() == "100" and win.find.search_btn.text() == "Search"
     assert not win.find.same_btn.isEnabled()
+
+
+def test_refresh_keeps_our_hooks_only_for_the_same_game_process(win, console):  # BUG-01
+    import dataclasses
+
+    connect(win)
+    learn(win, add_health_cheat(win, console.game))
+    finder, game = win.cheats.finder, win.ctl.session.game
+    finder.on_game(dataclasses.replace(game, version="unknown"))  # home screen Refresh
+    assert "obj1" in finder.installed
+    finder.on_game(dataclasses.replace(game, pid=game.pid + 1, version="9"))  # other process
+    assert finder.installed == {}
