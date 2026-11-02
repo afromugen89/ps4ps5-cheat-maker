@@ -91,15 +91,27 @@ def writer_target(writer: Writer) -> Target:
     return Target(base, disp)
 
 
-def hook_span(read: Read, site: int) -> list[ix.Instruction]:
-    """Whole instructions starting at ``site`` covering at least the 5-byte jmp."""
+def hook_span(read: Read, site: int, single: bool = False) -> list[ix.Instruction]:
+    """Whole instructions starting at ``site`` covering at least the 5-byte jmp.
+
+    Refuses spans that would break the game: a ``ret``/jump/branch before the last
+    instruction (the jump would cover the next function or code reached from
+    elsewhere), and any ``call`` (its return would land in the cave, which may be gone
+    by then). ``single``: the hooked instruction alone must be 5+ bytes, so no other
+    code can jump into the middle of the patch."""
     insns, total = [], 0
     for insn in decode_at(read(site, 32), site):
         if insn.code == ix.Code.INVALID:
             raise LockFailed("couldn't read the game code at the hook")
+        if insn.flow_control in (ix.FlowControl.CALL, ix.FlowControl.INDIRECT_CALL):
+            raise LockFailed("the game code there calls another part of the game")
+        if insns and insns[-1].flow_control != ix.FlowControl.NEXT:
+            raise LockFailed("the instruction is too short to patch safely there")
         insns.append(insn)
         total += insn.len
         if total >= JMP_LEN:
+            if single and len(insns) > 1:
+                raise LockFailed("the instruction is too short to patch safely there")
             return insns
     raise LockFailed("couldn't fit a jump at the hook")
 
@@ -207,6 +219,8 @@ def player_only_code(
 SLOT_SIZE = 16
 """Capture slot: the object address (8 bytes), then a counter of captures (8 bytes)."""
 IMM32_MAX = (1 << 31) - 1
+"""A vtable up to here fits ``cmp qword [obj], imm32``; above it the routine loads it
+into a scratch register first."""
 
 
 def capture_code(
@@ -243,9 +257,18 @@ def capture_code(
     other_ip = 0xFFFF_0000  # placeholder label, resolved by the encoder
     obj = target.base
     if filter_kind == "vtable":
-        if vtable is None or not 0 < vtable <= IMM32_MAX:
+        if vtable is None or not 0 < vtable < 1 << 64:
             raise LockFailed("the character's type can't be checked from this place in memory")
-        check = [Ins.create_mem_i32(C.CMP_RM64_IMM32, _mem(obj), vtable)]
+        if vtable <= IMM32_MAX:
+            check = [Ins.create_mem_i32(C.CMP_RM64_IMM32, _mem(obj), vtable)]
+        else:  # push/mov/pop don't touch the flags, so jne still sees the cmp
+            tmp, _ = _scratch(obj)
+            check = [
+                Ins.create_reg(C.PUSH_R64, tmp),
+                Ins.create_reg_u64(C.MOV_R64_IMM64, tmp, vtable),
+                Ins.create_mem_reg(C.CMP_RM64_R64, _mem(obj), tmp),
+                Ins.create_reg(C.POP_R64, tmp),
+            ]
     elif filter_kind == "field":
         check = [Ins.create_mem_u32(C.CMP_RM32_IMM32, _mem(obj, field), field_value & 0xFFFFFFFF)]
     elif filter_kind == "none":
@@ -368,7 +391,6 @@ def collect_objects(
     cave = find_cave(session, CAVE_ROOM)
     table = find_table(session)
     code = sampler_code(span, target, table, cave)
-    cave_orig = read(cave, len(code))
     client.write(game.pid, cave, code)
     client.write(game.pid, writer.address, jmp_patch(writer.address, cave, len(orig)))
     log.info("action=player_only_collect hook=%#x cave=%#x table=%#x", writer.address, cave, table)
@@ -380,11 +402,12 @@ def collect_objects(
             sleep(0.25)
             waited += 0.25
     finally:
-        client.write(game.pid, writer.address, orig)  # unhook first
-        sleep(0.5)  # let any thread inside the cave leave it
+        client.write(game.pid, writer.address, orig)  # unhook
+        sleep(0.5)  # let threads finish their last pass through the cave
         raw = read(table, TABLE_SIZE)
         client.write(game.pid, table, bytes(TABLE_SIZE))
-        client.write(game.pid, cave, cave_orig)
+        # The cave's code stays: a thread preempted inside it could still be running
+        # it. Nothing jumps there any more, and the next cave goes below it.
     objs = sorted({v for (v,) in struct.iter_unpack("<Q", raw) if v})
     log.info("action=player_only_collect objects=%d", len(objs))
     return objs

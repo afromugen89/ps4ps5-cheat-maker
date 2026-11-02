@@ -185,8 +185,6 @@ def test_capture_without_filter_and_refusals():
     assert t[2:4] == ["mov [7F3FFF0h],r12", "inc qword ptr [7F3FFF8h]"]
     with pytest.raises(LockFailed):  # no vtable known
         cv.capture_code(span, target, SLOT, CAVE_IP, vtable=None)
-    with pytest.raises(LockFailed):  # doesn't fit a sign-extended imm32
-        cv.capture_code(span, target, SLOT, CAVE_IP, vtable=0x8000_0000)
     with pytest.raises(LockFailed, match="tell you apart"):
         cv.capture_code(span, target, SLOT, CAVE_IP, "none", value=b"\0\0\0\0")
     with pytest.raises(ValueError):
@@ -202,3 +200,48 @@ def test_find_slot_below_the_table():
     fake.poke(PID, slot + 4, b"\x01")
     with pytest.raises(LockFailed, match="spare room"):
         cv.find_slot(s)
+
+
+def test_wide_vtable_is_compared_through_a_scratch_register():  # e.g. a higher module base
+    span = cv.decode_at(VMOVSS, 0x2B7B43F)
+    code = cv.capture_code(span, cv.writer_target(WRITER), SLOT, CAVE_IP, vtable=0x8_0040_1000)
+    t = _text(code)
+    assert t[2:7] == [
+        "push rax",
+        "mov rax,800401000h",
+        "cmp [r12],rax",
+        "pop rax",
+        t[6],
+    ] and t[6].startswith("jne")
+    read = bytes.fromhex("488b80ac020000")  # object in rax: the scratch must be another one
+    rspan = cv.decode_at(read + b"\x90" * 8, 0x401000)[:1]
+    rtarget = cv.writer_target(Writer(0x401000, read, "", 1))
+    t = _text(cv.capture_code(rspan, rtarget, SLOT, CAVE_IP, vtable=0x8_0040_1000))
+    assert t[2:5] == ["push rbx", "mov rbx,800401000h", "cmp [rax],rbx"]
+
+
+def _reader(code: bytes, site: int = 0x401000):
+    buf = code + b"\xcc" * 32
+    return lambda a, n: buf[a - site : a - site + n]
+
+
+def test_hook_span_refuses_spans_that_cover_a_return_or_a_call():  # review blocker
+    with pytest.raises(LockFailed, match="too short"):  # mov [rax+8],ecx; ret; sub rsp,28h
+        cv.hook_span(_reader(bytes.fromhex("894808c34883ec28")), 0x401000)
+    with pytest.raises(LockFailed, match="too short"):  # mov [rax],ecx; jmp short; ...
+        cv.hook_span(_reader(bytes.fromhex("8908eb0290909090")), 0x401000)
+    with pytest.raises(LockFailed, match="calls"):  # mov [rax],ecx; call rel32
+        cv.hook_span(_reader(bytes.fromhex("8908e800000000")), 0x401000)
+    two = bytes.fromhex("8948084889c3")  # mov [rax+8],ecx; mov rbx,rax: plain code
+    assert len(cv.hook_span(_reader(two), 0x401000)) == 2
+    with pytest.raises(LockFailed, match="too short"):
+        cv.hook_span(_reader(two), 0x401000, single=True)
+    assert len(cv.hook_span(_reader(VMOVSS), 0x401000, single=True)) == 1
+
+
+def test_collect_leaves_the_sampler_code_for_threads_still_inside():
+    fake, s = game()
+    cave = cv.find_cave(s, cv.CAVE_ROOM)
+    cv.collect_objects(s, WRITER, 0.25, sleep=lambda _t: None)
+    assert fake.peek(PID, HOOK, 10) == VMOVSS, "unhooked"
+    assert fake.peek(PID, cave, 4) != bytes(4), "cave code left in place"
