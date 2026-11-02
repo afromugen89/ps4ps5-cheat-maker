@@ -47,6 +47,7 @@ TABLE_SLOTS = 64
 TABLE_SIZE = TABLE_SLOTS * 8
 COMPARE_BYTES = 0x200  # how much of each object to compare
 CAVE_ROOM = 256  # bytes reserved for one cave
+MAX_SLOTS = 64  # find_slot looks this far below the table for a free 16-byte slot
 SEARCH_TAIL = 0x10000  # look for spare bytes in the last 64 KiB of the code
 RED_ZONE = 128  # SysV leaf functions may use 128 bytes below rsp
 
@@ -331,10 +332,24 @@ def find_slot(session: Session) -> int:
     if not data_maps:
         raise LockFailed("couldn't find the game's data area")
     last = max(data_maps, key=lambda m: m.end)
-    addr = (last.end - TABLE_SIZE - SLOT_SIZE) & ~15
-    if addr < last.start or client.read(game.pid, addr, SLOT_SIZE) != bytes(SLOT_SIZE):
-        raise LockFailed("no spare room in the game's data to remember where things are")
-    return addr
+    top = (last.end - TABLE_SIZE - SLOT_SIZE) & ~15
+    for k in range(MAX_SLOTS):  # the first one not kept by another value's notes
+        addr = top - k * SLOT_SIZE
+        if addr < last.start:
+            break
+        if _reserved(session, addr, SLOT_SIZE):
+            continue
+        if client.read(game.pid, addr, SLOT_SIZE) != bytes(SLOT_SIZE):
+            break
+        return addr
+    raise LockFailed("no spare room in the game's data to remember where things are")
+
+
+def _reserved(session: Session, addr: int, size: int) -> bool:
+    base = session.require_game().module_base
+    return any(
+        addr < base + end and base + start < addr + size for start, end in session.reserved_rooms
+    )
 
 
 # -- where things go ------------------------------------------------------------
@@ -346,7 +361,9 @@ def _module_maps(session: Session) -> list[MemMap]:
 
 def find_cave(session: Session, size: int, skip: int = 0) -> int:
     """A run of zero bytes near the end of the game's code (16-byte aligned).
-    ``skip`` reserves that many bytes at the very end (for another cave)."""
+    ``skip`` reserves that many bytes at the very end (for another cave), and the
+    rooms in ``session.reserved_rooms`` are never used (an earlier sampler's code left
+    in place pushes caves down, but never into a room a .cmproj keeps)."""
     game = session.require_game()
     client = session.require_client()
     code = [m for m in _module_maps(session) if m.executable]
@@ -354,7 +371,12 @@ def find_cave(session: Session, size: int, skip: int = 0) -> int:
         raise LockFailed("couldn't find the game's code")
     last = max(code, key=lambda m: m.end)
     start = max(last.start, last.end - SEARCH_TAIL)
-    data = client.read(game.pid, start, last.end - start)
+    data = bytearray(client.read(game.pid, start, last.end - start))
+    base = game.module_base
+    for lo, hi in session.reserved_rooms:  # rooms saved notes keep: never zero here
+        a, b = max(base + lo, start), min(base + hi, last.end)
+        if a < b:
+            data[a - start : b - start] = b"\xff" * (b - a)
     end = len(data) - skip
     run = 0
     for i in range(end - 1, -1, -1):

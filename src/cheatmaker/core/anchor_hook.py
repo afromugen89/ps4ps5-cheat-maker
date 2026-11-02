@@ -213,6 +213,16 @@ def plan_hook(
     return anchor
 
 
+def reserved_rooms(objects: list[ObjectSpec]) -> list[tuple[int, int]]:
+    """Module-offset ranges the saved hooks keep: keep-value room, capture room, slot."""
+    rooms = []
+    for o in objects:
+        for a in o.anchors_of(HookAnchor):
+            rooms.append((keep_cave(a), a.cave + cv.CAVE_ROOM))
+            rooms.append((a.slot, a.slot + cv.SLOT_SIZE))
+    return rooms
+
+
 def keep_cave(anchor: HookAnchor) -> int:
     """Module offset of the keep-value (PC-off) routine: its own room just below the
     capture routine, so turning it on never rewrites code the game may be running."""

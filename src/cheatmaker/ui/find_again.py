@@ -122,7 +122,13 @@ class FindAgain(QObject):
             self.ctl.project = pj.Project(g.title_id, g.version, g.process)
         return self.ctl.project
 
+    def keep_rooms(self) -> None:
+        """New caves and slots never go where the notes' hooks live (even unused)."""
+        p = self.ctl.project
+        self.ctl.session.reserved_rooms = ah.reserved_rooms(p.objects) if p else []
+
     def save(self) -> None:
+        self.keep_rooms()
         p = self.ctl.project
         if p is None:
             return
@@ -144,6 +150,7 @@ class FindAgain(QObject):
         self.by_chain.clear()
         if game is None:
             self.ctl.project = None
+            self.keep_rooms()
             return
         path = pj.project_path(game.title_id, game.version)
         self._unreadable = None
@@ -154,6 +161,8 @@ class FindAgain(QObject):
             self._unreadable = path
             self.ctl.fail(exc, "project_load")
             return
+        finally:
+            self.keep_rooms()
         if self.ctl.project is not None and self.ctl.project.objects:
             self.ensure_cheats()
             self.ctl.cheats_changed.emit()

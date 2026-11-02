@@ -211,3 +211,21 @@ def test_pc_off_cheat_has_its_own_room_and_leaves_the_capture_routine_alone():  
     live.turn_off(keep)
     assert game.fake.peek(fg.PID, fg.READER, 10) == fg.VMOVSS_R
     assert ah.install(game.session, obj) == "installed", "the app can put its hook back"
+
+
+def test_new_caves_and_slots_avoid_rooms_the_notes_keep():  # re-review leftover 3
+    game = fg.build()
+    first = _player_object(game).hook
+    game.session.reserved_rooms = ah.reserved_rooms(
+        [ObjectSpec("player", "You", None, anchors=[first])]
+    )
+    # an earlier Player-only collect left its sampler's code at the very end
+    sampler = cv.find_cave(game.session, cv.CAVE_ROOM)
+    game.fake.poke(fg.PID, sampler, b"\x90" * cv.CAVE_ROOM)
+    second = _player_object(game).hook
+    keep1, keep2 = ah.keep_cave(first), ah.keep_cave(second)
+    assert second.cave + cv.CAVE_ROOM <= keep1 or keep2 >= first.cave + cv.CAVE_ROOM
+    assert second.slot != first.slot and abs(second.slot - first.slot) >= cv.SLOT_SIZE
+    for lo, hi in game.session.reserved_rooms:  # a new sampler stays out of them too
+        here = cv.find_cave(game.session, cv.CAVE_ROOM) - fg.BASE
+        assert here + cv.CAVE_ROOM <= lo or here >= hi
