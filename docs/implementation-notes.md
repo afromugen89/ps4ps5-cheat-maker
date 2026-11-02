@@ -116,3 +116,20 @@ approved by Kein), steps 1-8, plus the pointer-scan cap fix from step 10. Step 9
   with a tiny interpreter for our routine), not recorded: no Returnal dumps exist yet.
 - Fixed: the pointer scan's 20,000-node cap kept the first nodes in memory order; it
   now keeps the nearest (smallest offset).
+- QA round (2026-11-02, BUG-01..09): Connect again takes hooks out first, and a hook
+  this app put in is still ours after a lost link or a refresh (install's "already"
+  for it is recorded, CheatRunner's are not); the tracker follows the hook's new object
+  while the old one still verifies (filtered hooks only: an unfiltered one names
+  enemies too and is asked only after verify fails); the PC-off cheat leaves its
+  routine in place when off; the keep routine still runs the game's writer, then
+  stores (flags for `sub [rax+2ACh],ecx ; jle`); `.cmproj` format 2 with type checks,
+  unreadable files kept as `.cmproj.bak`, and format-1 hooks dropped (no PC-off room:
+  press Find it next time again); memory paths are tried before any hook; a class
+  check widens the plausible range; Find it again's memory search ends the player's
+  search visibly. New caves and slots skip the rooms the loaded `.cmproj` keeps.
+- **Known limit (C10)**: if the link drops while a hook is in, the app can't take it
+  out; it stays in the game until the game restarts. When the same app reconnects to
+  the same game process it recognises the hook as its own and takes it out on close.
+  After the app itself restarts it can't tell its hook from one CheatRunner loaded
+  (same bytes), so it leaves it in (harmless: the routine only records where the
+  object is). Restart the game to clear it.
