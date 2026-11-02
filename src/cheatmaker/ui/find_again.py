@@ -68,6 +68,10 @@ class FindAgain(QObject):
         self.ctl = ctl
         self.installed: dict[str, pj.ObjectSpec] = {}  # hooks we put in (taken out on close)
         self._ours: dict[str, int] = {}  # object id -> pid we installed its hook in
+        # Hooks this app put in and has not taken out yet, kept across reconnects and
+        # game refreshes (object id -> pid): when install says "already" for one of
+        # these, the bytes are ours, not CheatRunner's, and still come out on close.
+        self._mine: dict[str, int] = {}
         self.ask_confirm: Callable[[str], bool] = self._ask_confirm
         self.ask_pick: Callable[[pj.ObjectSpec, list[rf.Found]], int | None] = self._ask_pick
         self.open_search: Callable[[ValueType, float | int | None], None] = lambda vt, v: None
@@ -89,6 +93,15 @@ class FindAgain(QObject):
         with self._lock:
             self.installed[obj.id] = obj
             self._ours[obj.id] = pid
+            self._mine[obj.id] = pid
+
+    def note_install(self, obj: pj.ObjectSpec, state: str, pid: int) -> None:
+        """Record the result of ``ah.install``: "installed" is ours; "already" is ours
+        too when this app put it in earlier (a Connect again, lost link or refresh)."""
+        with self._lock:
+            mine = self._mine.get(obj.id) == pid
+        if state == "installed" or (state == "already" and mine):
+            self.record(obj, pid)
 
     def _unrecord(self, obj_id: str) -> None:
         with self._lock:
@@ -116,7 +129,9 @@ class FindAgain(QObject):
             log.warning("action=project_save reason=%s", exc)
 
     def on_game(self, game: GameInfo | None) -> None:
-        self.installed.clear()
+        with self._lock:
+            self.installed.clear()
+            self._ours.clear()
         if game is None:
             self.ctl.project = None
             return
@@ -175,8 +190,7 @@ class FindAgain(QObject):
                         state = ah.install(session, obj)
                     except CheatMakerError as exc:
                         log.warning("action=hook_install object=%s reason=%s", obj.id, exc)
-                    if state == "installed":
-                        self.record(obj, pid)
+                    self.note_install(obj, state, pid)
                 results.append((obj, state, rf.find_again(session, obj, use_hook=use_hook)))
             return pid, results
 
@@ -230,6 +244,9 @@ class FindAgain(QObject):
             ah.remove(self.ctl.session, obj, self.sleep)
         except CheatMakerError as exc:
             log.warning("action=hook_remove object=%s reason=%s", obj.id, exc)
+        else:
+            with self._lock:
+                self._mine.pop(obj.id, None)
         self._unrecord(obj.id)
 
     def before_on(self, cheat: Cheat) -> None:
@@ -242,8 +259,8 @@ class FindAgain(QObject):
         if obj is None or obj.hook is None or obj.has_proven_chain or obj.id in self.installed:
             return
         try:
-            if ah.install(self.ctl.session, obj) == "installed":
-                self.record(obj, self.ctl.session.require_game().pid)
+            state = ah.install(self.ctl.session, obj)
+            self.note_install(obj, state, self.ctl.session.require_game().pid)
         except CheatMakerError as exc:
             log.warning("action=hook_install object=%s reason=%s", obj.id, exc)
 
@@ -485,8 +502,8 @@ class LearnDialog(QDialog):
                     state = ah.install(session, obj)
                 except CheatMakerError as exc:
                     learned.notes.append(str(exc))
-                if state == "installed":  # "already" = loaded by CheatRunner: not ours
-                    finder.record(obj, session.require_game().pid)
+                # "already" = loaded by CheatRunner: not ours, unless we put it in
+                finder.note_install(obj, state, session.require_game().pid)
             return learned, state
 
         self.ctl.tasks.run(work, self._done, self._failed)

@@ -50,6 +50,7 @@ class FakeConsole:
         self._procs: dict[int, FakeProcess] = {}
         self.foreground_pid: int | None = None
         self.connected = True
+        self._app_closed = False  # the app closed the link (it can open a new one)
         self.fail_writes = False
         self.supports_unknown_scan = True
         # addr -> RIPs that "write" it while watched (set by tests / dumps)
@@ -107,7 +108,9 @@ class FakeConsole:
         return bytes(r.data[off : off + size])
 
     def disconnect(self) -> None:
+        """The link drops (Wi-Fi, PS5 off): a new connection fails too."""
         self.connected = False
+        self._app_closed = False
 
     @classmethod
     def from_dump(cls, folder: str | Path) -> FakeConsole:
@@ -149,6 +152,11 @@ class FakeConsole:
 
     # -- ConsoleClient -------------------------------------------------------
     def version(self) -> str:
+        # version() is the first request on a new connection: after the app closed
+        # its link (Connect again, a lost-link reset), a factory that hands back this
+        # same console gets a working one, like a new socket would.
+        if not self.connected and self._app_closed:
+            self.connected, self._app_closed = True, False
         self._alive()
         return self.server_version
 
@@ -263,4 +271,6 @@ class FakeConsole:
         return [h.rip for h in self.watch(pid, addr, size, "write", timeout_s)]
 
     def close(self) -> None:
+        if self.connected:
+            self._app_closed = True
         self.connected = False

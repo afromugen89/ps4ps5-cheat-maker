@@ -327,6 +327,22 @@ def test_hook_loaded_by_cheatrunner_is_left_alone(win, console):  # M1
     assert run2.fake.peek(fg.PID, fg.READER, 1) == b"\xe9", "not ours: stays in"
 
 
+def test_hook_we_left_after_a_lost_link_is_ours_next_time(win, console):  # BUG-01
+    connect(win)
+    learn(win, add_health_cheat(win, console.game))
+    finder = win.cheats.finder
+    console.game.fake.disconnect()
+    win.ctl.handle_lost()  # can't take it out now
+    assert console.game.fake.peek(fg.PID, fg.READER, 1) == b"\xe9"
+    console.game.fake.connected = True  # the Wi-Fi is back
+    connect(win)
+    assert "obj1" in finder.installed, "install said 'already', but we put it in"
+    win.ctl.shutdown()
+    assert console.game.fake.peek(fg.PID, fg.READER, 10) == fg.VMOVSS_R
+    assert not finder.is_ours("obj1", fg.PID)
+    assert finder._mine == {}, "taken out: no longer remembered as ours"
+
+
 def test_last_cheat_off_takes_the_hook_out_and_on_puts_it_back(win, console):  # AC-11.2
     connect(win)
     learn(win, add_health_cheat(win, console.game))

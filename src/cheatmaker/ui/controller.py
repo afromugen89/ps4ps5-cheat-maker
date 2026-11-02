@@ -93,12 +93,17 @@ class Controller(QObject):
             self.cheat_file = CheatFile(g.title, g.title_id, g.version)
         return self.cheat_file
 
+    def run_before_disconnect(self) -> None:
+        """Undo what we put in the game (e.g. hooks) while the link still works."""
+        if not self.session.connected:
+            return
+        for fn in list(self.before_disconnect):
+            try:
+                fn()
+            except Exception as exc:  # closing must go on; the reason is logged
+                report(exc, "disconnect")
+
     def shutdown(self) -> None:
         self.freezer.stop()
-        if self.session.connected:
-            for fn in list(self.before_disconnect):
-                try:
-                    fn()
-                except Exception as exc:  # closing must go on; the reason is logged
-                    report(exc, "disconnect")
+        self.run_before_disconnect()
         self.session.disconnect()

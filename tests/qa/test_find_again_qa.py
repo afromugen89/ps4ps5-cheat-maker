@@ -116,7 +116,6 @@ HOOKED = fg.VMOVSS_R  # the reader the fake game's learn picks
 
 
 # == TC-05/06/07, BUG-01: the hook must come out on every disconnect (AC-11.2) ==========
-@pytest.mark.xfail(reason="BUG-01: hook left in after pressing Connect again", strict=True)
 def test_tc05_reconnect_still_takes_the_hook_out_on_close(win, console):
     connect(win)
     learn_ui(win, add_health_cheat(win, console.game))
@@ -126,7 +125,6 @@ def test_tc05_reconnect_still_takes_the_hook_out_on_close(win, console):
     assert console.game.fake.peek(fg.PID, fg.READER, 10) == HOOKED
 
 
-@pytest.mark.xfail(reason="BUG-01: hook left in after Refresh from the PS home screen", strict=True)
 def test_tc06_refresh_from_home_screen_keeps_the_hook_ours(win, console):
     connect(win)
     learn_ui(win, add_health_cheat(win, console.game))
@@ -139,7 +137,6 @@ def test_tc06_refresh_from_home_screen_keeps_the_hook_ours(win, console):
     assert fake.peek(fg.PID, fg.READER, 10) == HOOKED
 
 
-@pytest.mark.xfail(reason="BUG-01: hook treated as CheatRunner's after a lost link", strict=True)
 def test_tc07_lost_link_then_reconnect_takes_the_hook_out_on_close(win, console):
     connect(win)
     learn_ui(win, add_health_cheat(win, console.game))
