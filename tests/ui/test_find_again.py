@@ -405,3 +405,22 @@ def test_notes_from_an_older_app_drop_the_hook_and_say_so(win, console):  # re-r
     assert win.ctl.live.trackers["obj1"].address == run2.player, "found by memory search"
     saved = json.loads(path.read_text(encoding="utf-8"))
     assert saved["format_version"] == pj.FORMAT_VERSION
+
+
+def test_short_chain_game_restart_uses_the_path_not_the_hook(win, console):  # BUG-07
+    console.restart(1, chain=True)
+    connect(win)
+    dlg = LearnDialog(win.ctl, win.cheats.finder, add_health_cheat(win, console.game), win)
+    dlg.pointers.setChecked(True)
+    dlg.start_btn.click()
+    assert "chain" in dlg.learned.methods and dlg.learned.obj.hook is not None
+    assert console.game.fake.peek(fg.PID, fg.READER, 10) == fg.VMOVSS_R
+    win.ctl.shutdown()
+    run2 = console.restart(2, chain=True)
+    connect(win)  # the path is not proven yet: tried before putting the hook in
+    assert run2.fake.peek(fg.PID, fg.READER, 10) == fg.VMOVSS_R, "no game-code change"
+    assert win.ctl.live.trackers["obj1"].address == run2.player
+    assert "obj1" in win.cheats.finder.by_chain
+    tick(win)
+    assert run2.health() == 999.0
+    assert run2.fake.peek(fg.PID, fg.READER, 10) == fg.VMOVSS_R, "turning on adds none"

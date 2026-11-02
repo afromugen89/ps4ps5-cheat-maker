@@ -81,6 +81,7 @@ class FindAgain(QObject):
         self._lock = threading.Lock()  # installed/_ours are written by worker threads too
         self._asking = False
         self._unreadable: Path | None = None  # a .cmproj that failed to load: kept on save
+        self.by_chain: set[str] = set()  # found by a memory path: no hook needed
         ctl.game_changed.connect(self.on_game)
         ctl.before_disconnect.append(self.remove_hooks)
         self.pending_timer = QTimer(self)
@@ -140,6 +141,7 @@ class FindAgain(QObject):
         with self._lock:
             self.installed.clear()
             self._ours.clear()
+        self.by_chain.clear()
         if game is None:
             self.ctl.project = None
             return
@@ -196,6 +198,13 @@ class FindAgain(QObject):
             results = []
             for obj in objects:
                 state = ""
+                if obj.anchors_of(pj.ChainAnchor):  # memory paths first: no code change
+                    out = rf.find_again(session, obj, use_hook=False, use_scan=False)
+                    if out.found:
+                        self.by_chain.add(obj.id)
+                        results.append((obj, state, out))
+                        continue
+                self.by_chain.discard(obj.id)
                 if use_hook and obj.hook is not None and not obj.has_proven_chain:
                     try:  # D14: the app puts the hook in on connect
                         state = ah.install(session, obj)
@@ -271,6 +280,8 @@ class FindAgain(QObject):
         tracker = self.ctl.live.trackers.get(cheat.anchor[0])
         obj = tracker.obj if tracker is not None else None
         if obj is None or obj.hook is None or obj.has_proven_chain or obj.id in self.installed:
+            return
+        if obj.id in self.by_chain:
             return
         try:
             state = ah.install(self.ctl.session, obj)
@@ -511,7 +522,9 @@ class LearnDialog(QDialog):
             )
             state = ""
             obj = learned.obj
-            if obj.hook is not None:
+            if obj.anchors_of(pj.ChainAnchor):  # a memory path: simple games stay simple
+                finder.by_chain.add(obj.id)
+            elif obj.hook is not None:
                 try:
                     state = ah.install(session, obj)
                 except CheatMakerError as exc:
@@ -529,7 +542,7 @@ class LearnDialog(QDialog):
         self.progress.setValue(100)
         self.finder.adopt(self.cheat, learned, self.address, state)
         first = next(
-            (m for m in ("static", "hook_slot", "chain", "vtable_scan") if m in learned.methods), ""
+            (m for m in ("static", "chain", "hook_slot", "vtable_scan") if m in learned.methods), ""
         )
         text = hints.READY[first].format(name=self.cheat.name) if first else ""
         if state:

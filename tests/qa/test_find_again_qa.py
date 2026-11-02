@@ -382,7 +382,6 @@ def test_tc28_unreadable_project_is_kept_before_a_new_one_is_saved(win, console)
 
 
 # == TC-30, BUG-07: simple games stay simple ============================================
-@pytest.mark.xfail(reason="BUG-07: short-chain game still gets a code hook", strict=True)
 def test_tc30_short_chain_game_never_gets_a_code_hook(win, console):
     console.restart(1, chain=True)
     connect(win)
