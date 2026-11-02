@@ -185,7 +185,6 @@ def test_tc13_freeze_follows_the_move_when_the_old_object_is_wiped():
 
 
 # == TC-19, BUG-03: the PC-off routine must stay in place when turned off ===============
-@pytest.mark.xfail(reason="BUG-03: PC-off routine zeroed right after unhooking", strict=True)
 def test_tc19_pc_off_cheat_off_leaves_its_routine_for_threads_inside(win, console):
     connect(win)
     dlg = learn_ui(win, add_health_cheat(win, console.game))

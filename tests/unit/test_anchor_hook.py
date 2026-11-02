@@ -128,7 +128,7 @@ def test_hook_cheat_lines_and_keep_value_variant():
     obj = _player_object(game)
     plain = ah.hook_cheat(game.session, obj, "hook")
     cave, jmp = plain.locations
-    assert plain.saveable and cave.off == bytes(len(cave.on)) and jmp.off == fg.VMOVSS_R
+    assert plain.saveable and cave.off == cave.on and jmp.off == fg.VMOVSS_R
     keep = ah.hook_cheat(game.session, obj, "Infinite Health", struct.pack("<f", 999.0))
     for loc in keep.locations:
         game.fake.poke(fg.PID, fg.BASE + loc.offset, loc.on)

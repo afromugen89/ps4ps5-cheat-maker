@@ -271,7 +271,9 @@ def hook_cheat(session: Session, obj: ObjectSpec, name: str, value: bytes | None
     return Cheat(
         name=name,
         locations=[
-            Location(LocationKind.CODE_PATCH, cave - base, code, bytes(len(code))),
+            # Off leaves the routine in place: a game thread may be inside it when
+            # the jump goes back, so only the jump line really toggles.
+            Location(LocationKind.CODE_PATCH, cave - base, code, code),
             Location(LocationKind.CODE_PATCH, site - base, jmp, anchor.orig),
         ],
         template="lock" if value is not None else None,
