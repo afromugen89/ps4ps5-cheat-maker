@@ -437,7 +437,6 @@ def test_tc23_cheatrunner_pc_off_routine_is_used_and_not_patched_again():
 
 
 # == TC-34, BUG-09: Find it again's memory search vs the player's open search ===========
-@pytest.mark.xfail(reason="BUG-09: memory search silently drops the player's search", strict=True)
 def test_tc34_find_again_search_does_not_drop_an_open_search_silently():
     game = fg.build(2)
     scanner = Scanner(game.session)

@@ -424,3 +424,19 @@ def test_short_chain_game_restart_uses_the_path_not_the_hook(win, console):  # B
     tick(win)
     assert run2.health() == 999.0
     assert run2.fake.peek(fg.PID, fg.READER, 10) == fg.VMOVSS_R, "turning on adds none"
+
+
+def test_find_again_memory_search_tells_the_find_view(win, console):  # BUG-09
+    from cheatmaker.core import vtable_find as vf
+
+    connect(win)
+    learn(win, add_health_cheat(win, console.game))
+    sc = win.ctl.scanner
+    assert sc.first_scan(100.0, ValueType.FLOAT) > 0
+    win.find.number.setText("100")
+    obj = win.ctl.project.objects[0]
+    assert vf.find_by_vtable(win.ctl.session, obj.vtable) == [console.game.player]
+    assert not sc.active, "the console's search was replaced: no stale matches"
+    assert win.find.hint.text() == hints.SEARCH_LOST
+    assert win.find.number.text() == "100" and win.find.search_btn.text() == "Search"
+    assert not win.find.same_btn.isEnabled()

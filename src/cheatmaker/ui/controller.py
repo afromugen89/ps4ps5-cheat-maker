@@ -22,6 +22,7 @@ class Controller(QObject):
     connection_changed = Signal(bool)
     game_changed = Signal(object)  # GameInfo | None
     cheats_changed = Signal()
+    search_lost = Signal()  # the player's search was ended by another (any thread)
     _lost = Signal()  # freezer thread -> UI thread
 
     def __init__(
@@ -36,6 +37,7 @@ class Controller(QObject):
         self.tasks = tasks or TaskRunner(parent=self)
         self.session = Session(factory)
         self.scanner = Scanner(self.session)
+        self.scanner.on_lost.append(self.search_lost.emit)
         self.freezer = Freezer(
             self.session,
             on_lost=self._lost.emit,

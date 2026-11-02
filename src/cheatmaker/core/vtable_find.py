@@ -33,10 +33,11 @@ def find_by_vtable(
 ) -> list[int]:
     """Addresses (8-byte aligned, lowest first) whose first 8 bytes are the vtable at
     module offset ``vtable``. Uses the console's search session, so it ends any search
-    the player had open."""
+    the player had open (``Session.take_search`` tells the Scanner first)."""
     game = session.require_game()
     client = session.require_client()
     value = game.module_base + vtable
+    session.take_search()
     try:
         n = client.scan_start(
             game.pid,

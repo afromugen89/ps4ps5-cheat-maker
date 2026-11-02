@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from cheatmaker.console.client import ProgressFn
@@ -33,6 +34,18 @@ class Scanner:
         self.history: list[str] = []
         self.show_limit = FEW_MATCHES  # list the matches once this few are left
         session.on_game_changed.append(lambda _g: self.reset())  # AC-2.3
+        session.on_search_taken.append(self._taken)
+        self.on_lost: list[Callable[[], None]] = []  # the search was ended by another
+
+    def _taken(self) -> None:
+        """Another search replaces ours on the console: forget it (no scan_cancel, the
+        other one owns the console's search now) and tell the Find view."""
+        if not self.active:
+            return
+        log.info("action=scan_lost count=%s: the console's search was used for another", self.count)
+        self.vtype, self.count, self.history = None, None, []
+        for cb in list(self.on_lost):
+            cb()
 
     @property
     def active(self) -> bool:

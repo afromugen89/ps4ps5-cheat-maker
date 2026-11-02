@@ -198,6 +198,7 @@ class FindWizard(QWidget):
         self.timer.setInterval(LIVE_MS)
         self.timer.timeout.connect(self.refresh_live)
         ctl.game_changed.connect(self._new_game)
+        ctl.search_lost.connect(self._search_lost)
         self._game_key: tuple[str, str] | None = None
         ctl.connection_changed.connect(lambda _up: self._update_buttons())
         self._update_buttons()
@@ -442,6 +443,17 @@ class FindWizard(QWidget):
         g = self.ctl.session.require_game()
         raw = self.ctl.session.require_client().read(g.pid, addr, vt.size)
         return Match(addr, vt.decode(raw), raw)
+
+    def _search_lost(self) -> None:
+        """Find it again searched memory: the matches here are gone (the number the
+        player typed stays, so Search starts again in one click)."""
+        self.unknown_mode = False
+        self.rows = []
+        self.count.setText("")
+        self.table.setRowCount(0)
+        self.timer.stop()
+        self.hint.setText(hints.SEARCH_LOST)
+        self._update_buttons()
 
     def _new_game(self, game=None) -> None:
         self.manual.clear()  # addresses belong to the old game's memory

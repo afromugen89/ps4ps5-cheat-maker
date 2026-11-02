@@ -81,6 +81,9 @@ class Session:
         self.game: GameInfo | None = None
         self.ip = ""
         self.on_game_changed: list[Callable[[GameInfo | None], None]] = []
+        # The console has one memory search at a time: whoever starts one that is not
+        # the player's (e.g. Find it again's class search) calls take_search() first.
+        self.on_search_taken: list[Callable[[], None]] = []
 
     # -- connection ----------------------------------------------------------
     @property
@@ -112,6 +115,11 @@ class Session:
             finally:
                 self.client = None
         self._set_game(None)
+
+    def take_search(self) -> None:
+        """Another search is about to replace the console's search session."""
+        for cb in list(self.on_search_taken):
+            cb()
 
     def require_client(self) -> ConsoleClient:
         if self.client is None:
