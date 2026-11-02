@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import struct
 
 import pytest
@@ -17,6 +18,7 @@ from cheatmaker.ui.cheats_view import COL_KEEPS, COL_ON, FOUND_AGAIN
 from cheatmaker.ui.controller import Controller
 from cheatmaker.ui.find_again import LearnDialog, PickDialog
 from cheatmaker.ui.main_window import MainWindow
+from cheatmaker.ui.save_dialog import SaveDialog
 from cheatmaker.ui.tasks import TaskRunner
 from tests import fakegame as fg
 
@@ -199,6 +201,23 @@ def test_pick_dialog_lists_live_values(qtbot, console):
     dlg.use_btn.click()
     assert dlg.picked == twin
     ctl.shutdown()
+
+
+def test_save_explains_app_only_and_can_add_the_hook(win, console, tmp_path):  # AC-13
+    connect(win)
+    learn(win, add_health_cheat(win, console.game))
+    dlg = SaveDialog(win.ctl, win)
+    dlg.folder.setText(str(tmp_path))
+    assert "work only while Cheat Maker is connected" in dlg.skipped.text()
+    assert not dlg.with_hook.isChecked() and not dlg.with_hook.isHidden()  # D14: off
+    dlg.with_hook.setChecked(True)
+    path = dlg.do_save()
+    doc = json.loads(path.read_text())
+    [hook] = doc["mods"]
+    assert hook["name"] == "Cheat Maker: find Infinite Health again"
+    assert len(hook["memory"]) == 2  # the routine, then the jump into it
+    offsets = {int(m["offset"], 16) for m in hook["memory"]}
+    assert fg.READER - fg.BASE in offsets
 
 
 def test_simple_static_value_is_ready_without_a_hook(qtbot, monkeypatch):
