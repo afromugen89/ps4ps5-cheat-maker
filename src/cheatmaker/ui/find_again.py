@@ -252,6 +252,7 @@ class FindAgain(QObject):
             if out.found and out.address is not None:
                 tracker = rf.Tracker(self.ctl.session, obj, out.address)
                 tracker.confirmed = out.method == "picked"
+                tracker.on_lost = lambda o=obj: self.path_lost(o)
                 self.ctl.live.trackers[obj.id] = tracker
                 f = obj.fields[0]
                 f.last = read_field(self.ctl, obj, out.address, f.name)
@@ -287,6 +288,25 @@ class FindAgain(QObject):
             with self._lock:
                 self._mine.pop(obj.id, None)
         self._unrecord(obj.id)
+
+    def path_lost(self, obj: pj.ObjectSpec) -> None:
+        """A value found by a memory path stopped checking out (it moved). Simple games
+        stay simple only while the path works: now put the hook in (it finds the new
+        place on the next freeze tick), or tell the player to press Find it again."""
+        if obj.id not in self.by_chain:
+            return
+        self.by_chain.discard(obj.id)
+        session = self.ctl.session
+        if obj.hook is not None and session.connected:
+            try:
+                state = ah.install(session, obj)
+                self.note_install(obj, state, session.require_game().pid)
+            except CheatMakerError as exc:
+                log.warning("action=hook_install object=%s reason=%s", obj.id, exc)
+            else:
+                self.ctl.message.emit(hints.PATH_LOST_HOOK.format(name=obj.label))
+                return
+        self.ctl.message.emit(hints.PATH_LOST.format(name=obj.label))
 
     def before_on(self, cheat: Cheat) -> None:
         """Turning on a cheat that is found again: put its hook back if it was taken

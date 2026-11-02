@@ -468,6 +468,9 @@ class Tracker:
         self.pending: int | None = None  # a new place, not confirmed by the player yet
         self.pending_both = False  # the old place still verified when pending was set
         self.ignored: set[int] = set()  # other objects the player said are not it
+        # Called (from the freezer thread) when the object stopped verifying and the
+        # fast re-find failed too, e.g. so the app can put the hook in now.
+        self.on_lost: Callable[[], None] | None = None
         self._lock = threading.Lock()
 
     def _map_index(self, fresh: bool = False) -> MapIndex:
@@ -525,6 +528,8 @@ class Tracker:
                 maps=self._map_index(fresh=True),
             )
             if not out.found or out.address is None:
+                if self.on_lost is not None:
+                    self.on_lost()
                 return None
             if out.address == old:
                 return self.address

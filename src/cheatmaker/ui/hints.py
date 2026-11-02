@@ -130,6 +130,11 @@ PC_OFF_TIP = (
     "yours) and can be saved for CheatRunner, so it works after a restart without the PC."
 )
 PC_OFF_MADE = 'Made "{name}". Tick it to test it, then Save: it works with the PC off.'
+PATH_LOST_HOOK = (
+    "{name} moved, so Cheat Maker now uses the game's code to follow it. Your cheat "
+    "goes on as soon as it's found again."
+)
+PATH_LOST = "{name} moved and Cheat Maker stopped changing it. Press Find it again."
 KEPT_FIRST = "OK, Cheat Maker keeps changing the {name} it had before."
 CONFIRM_MOVED = (
     "{name} moved (a new area?). Cheat Maker can't be sure it found the right one, so "

@@ -466,3 +466,39 @@ def test_no_to_a_twin_keeps_the_cheat_on_the_first_one(win, console):  # BUG-10
     win.cheats.finder.check_pending()
     assert cheat.enabled and tracker.address == old and tracker.pending is None
     assert win.status.text() == hints.KEPT_FIRST.format(name="Infinite Health")
+
+
+def test_path_found_value_that_moves_gets_the_hook_and_is_followed(win, console):  # BUG-11
+    console.restart(1, chain=True)
+    connect(win)
+    dlg = LearnDialog(win.ctl, win.cheats.finder, add_health_cheat(win, console.game), win)
+    dlg.pointers.setChecked(True)
+    dlg.start_btn.click()
+    win.ctl.shutdown()
+    run2 = console.restart(2, chain=True)
+    connect(win)
+    tick(win)
+    assert run2.fake.peek(fg.PID, fg.READER, 1) != b"\xe9", "path works: no hook"
+    run2.move_player(fg.HEAP + 0x6000)
+    tracker = win.ctl.live.trackers["obj1"]
+    for _ in range(2):
+        run2.fake.read(fg.PID, fg.BASE, 1)
+        tracker._last_try = -10.0
+        win.ctl.freezer.tick()
+    assert run2.fake.peek(fg.PID, fg.READER, 1) == b"\xe9", "hook in once the path broke"
+    assert tracker.address == run2.player and run2.health() == 999.0
+    assert "obj1" not in win.cheats.finder.by_chain and "obj1" in win.cheats.finder.installed
+    win.ctl.shutdown()
+    assert run2.fake.peek(fg.PID, fg.READER, 10) == fg.VMOVSS_R
+
+
+def test_path_lost_without_a_hook_tells_the_player(win, console):  # BUG-11
+    connect(win)
+    finder = win.cheats.finder
+    obj = pj.ObjectSpec("o", "Gold", None)
+    finder.by_chain.add("o")
+    finder.path_lost(obj)
+    assert win.status.text() == hints.PATH_LOST.format(name="Gold")
+    win.status.setText("")
+    finder.path_lost(obj)  # said once
+    assert win.status.text() == ""

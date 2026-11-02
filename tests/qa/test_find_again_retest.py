@@ -57,7 +57,6 @@ def test_r02_refresh_from_home_screen_then_close_takes_the_hook_out(win, console
 
 
 # == BUG-11: found by a memory path only: a move pauses the freeze for good ==============
-@pytest.mark.xfail(reason="BUG-11: chain-only object never re-found after a move", strict=True)
 def test_r03_chain_found_value_is_followed_after_a_move(win, console):
     console.restart(1, chain=True)
     connect(win)
