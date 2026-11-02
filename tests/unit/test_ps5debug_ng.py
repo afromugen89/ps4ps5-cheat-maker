@@ -42,6 +42,40 @@ def _pad(s: str, n: int) -> bytes:
     return s.encode().ljust(n, b"\0")
 
 
+REG_ORDER = (
+    [
+        "r15",
+        "r14",
+        "r13",
+        "r12",
+        "r11",
+        "r10",
+        "r9",
+        "r8",
+        "rdi",
+        "rsi",
+        "rbp",
+        "rbx",
+        "rdx",
+        "rcx",
+        "rax",
+    ],
+    ["rip", "cs", "rflags", "rsp", "ss"],
+)
+
+
+def interrupt_packet(regs: dict[str, int]) -> bytes:
+    """A 0x4A0 packet with FreeBSD struct reg at 0x30, built independently of the client."""
+    pkt = bytearray(INTERRUPT_SIZE)
+    gp, tail = REG_ORDER
+    for i, name in enumerate(gp):
+        struct.pack_into("<Q", pkt, 0x30 + 8 * i, regs.get(name, 0))
+    struct.pack_into("<IHHIHH", pkt, 0x30 + 120, 12, 0, 0, 0, 0, 0)  # trapno=T_TRCTRAP
+    for i, name in enumerate(tail):
+        struct.pack_into("<Q", pkt, 0x30 + 136 + 8 * i, regs.get(name, 0))
+    return bytes(pkt)
+
+
 class FakeNgServer:
     """Minimal PS5Debug-NG over a FakeConsole."""
 
@@ -62,6 +96,7 @@ class FakeNgServer:
         self.turbo, self.foreground = turbo, foreground
         self.authed = False
         self.watch_rips: list[int] = []
+        self.watch_regs: list[dict[str, int]] = []  # sent after watch_rips, full reg64
         self.watchpoints: list[tuple[int, ...]] = []
         self.commands: list[int] = []
         self.connections = 0
@@ -318,6 +353,8 @@ class FakeNgServer:
                 pkt = bytearray(INTERRUPT_SIZE)
                 struct.pack_into("<Q", pkt, RIP_OFFSET, rip)
                 s.sendall(pkt)
+            for regs in self.watch_regs:
+                s.sendall(interrupt_packet(regs))
             time.sleep(0.5)
 
 
@@ -613,3 +650,35 @@ def test_find_pointers_uses_value_between_and_filters(client, server):
     got = client.find_pointers(PID, regions, lo, hi, lambda v: v != HEALTH_ADDR - 0x20)
     assert got == [(HEAP_BASE + 0x400, HEALTH_ADDR - 0x40)]
     assert server.scan_compares[-1] == 4
+
+
+def test_watch_access_uses_read_write_breaktype_and_returns_registers(client, server):
+    server.watch_regs = [{"rip": 0x40010A, "r12": HEAP_BASE, "rax": 7, "rsp": 0x7FFF0000}]
+    hits = client.watch(PID, HEALTH_ADDR, 4, "access", timeout_s=1.0)
+    assert server.watchpoints[0] == (0, 1, 3, 3, HEALTH_ADDR)  # breaktype 3 = read-write
+    assert [h.rip for h in hits] == [0x40010A]
+    assert hits[0].reg("r12") == HEAP_BASE and hits[0].reg("RAX") == 7
+    assert hits[0].reg("rsp") == 0x7FFF0000 and hits[0].reg("r13") == 0
+    assert server.watchpoints[-1] == (0, 0, 0, 0, 0)
+
+
+def test_watch_write_kind_and_bad_kind(client, server):
+    server.watch_rips = [0x400102]
+    assert [h.rip for h in client.watch(PID, HEALTH_ADDR, 8, "write", 1.0)] == [0x400102]
+    assert server.watchpoints[0] == (0, 1, 2, 1, HEALTH_ADDR)  # DR7 length 8 bytes = 2
+    with pytest.raises(ValueError):
+        client.watch(PID, HEALTH_ADDR, 4, "exec", 1.0)
+
+
+def test_parse_struct_reg_layout():
+    from cheatmaker.console.ps5debug_ng import parse_interrupt, parse_struct_reg
+    from cheatmaker.errors import ProtocolError
+
+    pkt = interrupt_packet({"r15": 1, "r12": 0x1234, "rax": 2, "rip": 3, "rflags": 4, "ss": 5})
+    regs = parse_struct_reg(pkt[0x30 : 0x30 + 176])
+    assert regs["r15"] == 1 and regs["r12"] == 0x1234 and regs["rax"] == 2
+    assert regs["rip"] == 3 and regs["rflags"] == 4 and regs["ss"] == 5
+    assert struct.unpack_from("<Q", pkt, 0x30 + 24)[0] == 0x1234, "r12 at +24"
+    assert parse_interrupt(pkt).rip == 3
+    with pytest.raises(ProtocolError):
+        parse_struct_reg(b"\0" * 100)

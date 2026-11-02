@@ -8,6 +8,7 @@ the result is a CODE_PATCH location, which CheatRunner can load after a restart.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import iced_x86 as ix
@@ -49,8 +50,21 @@ def _writes_memory(insn: ix.Instruction) -> bool:
     )
 
 
-def instruction_before(code_before: bytes, rip: int) -> tuple[int, bytes, str] | None:
-    """Find the memory-writing instruction that ends exactly at ``rip``.
+def touches_memory(insn: ix.Instruction) -> bool:
+    """Has an explicit memory operand that it reads or writes (``lea`` and ``nop [..]``
+    only name an address; push/pop/call touch the stack implicitly and don't count)."""
+    if insn.mnemonic in (ix.Mnemonic.LEA, ix.Mnemonic.NOP):
+        return False
+    return any(insn.op_kind(i) == ix.OpKind.MEMORY for i in range(insn.op_count))
+
+
+def instruction_before(
+    code_before: bytes,
+    rip: int,
+    want: Callable[[ix.Instruction], bool] = _writes_memory,
+) -> tuple[int, bytes, str] | None:
+    """Find the instruction that ends exactly at ``rip`` and ``want`` accepts
+    (default: one that writes memory).
 
     ``code_before`` holds the bytes just before ``rip``. Tries every start offset
     and prefers the longest valid decode, since shorter tails of a long
@@ -60,7 +74,7 @@ def instruction_before(code_before: bytes, rip: int) -> tuple[int, bytes, str] |
     for back in range(1, min(MAX_INSN, len(code_before)) + 1):
         chunk = code_before[-back:]
         insn = ix.Decoder(64, chunk, ip=rip - back).decode()
-        if insn.code == ix.Code.INVALID or insn.len != back or not _writes_memory(insn):
+        if insn.code == ix.Code.INVALID or insn.len != back or not want(insn):
             continue
         best = (rip - back, bytes(chunk), _formatter.format(insn))
     return best
@@ -142,5 +156,6 @@ __all__ = [
     "instruction_before",
     "make_lock_cheat",
     "patch_landed",
+    "touches_memory",
     "verify_original",
 ]

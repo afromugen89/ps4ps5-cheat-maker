@@ -20,7 +20,15 @@ import threading
 import time
 from enum import IntEnum
 
-from cheatmaker.console.client import ForegroundApp, MemMap, ProcInfo, ProgressFn, ScanHit
+from cheatmaker.console.client import (
+    ForegroundApp,
+    MemMap,
+    ProcInfo,
+    ProgressFn,
+    ScanHit,
+    WatchHit,
+    WatchKind,
+)
 from cheatmaker.console.local_scan import LocalScanSession, alignment_for
 from cheatmaker.core.values import Compare, ValueType, matches
 from cheatmaker.errors import (
@@ -57,9 +65,19 @@ SNAP_SEGMENT_MAX = 0x8000_0000  # a segment length is a u32
 AUTH_MAGIC = 0xBB40E64D
 INTERRUPT_PORT = 755
 INTERRUPT_SIZE = 0x4A0
-RIP_OFFSET = 0x30 + 136
+REG64_OFFSET = 0x30
+"""PROTOCOL.md §1.9: lwpid u32, status u32, tdname[40], then reg64 (struct reg, 176
+bytes) at 0x30, savefpu at 0xE0, dbreg64 at 0x420."""
+REG64_SIZE = 176
+RIP_OFFSET = REG64_OFFSET + 136
 """FreeBSD amd64 struct reg: r15..rax (15 x 8 = 120 bytes), then trapno/fs/gs/err/es/ds
 (16 bytes), then rip. reg64 starts at 0x30 in the interrupt packet."""
+_GP_ORDER = (
+    "r15", "r14", "r13", "r12", "r11", "r10", "r9", "r8",
+    "rdi", "rsi", "rbp", "rbx", "rdx", "rcx", "rax",
+)  # fmt: skip
+_TAIL_ORDER = ("rip", "cs", "rflags", "rsp", "ss")  # u64 each, after the 16-byte middle
+
 ATTACH_TIMEOUT = 30.0
 """Attaching pauses the game and dials back on port 755; it took over 4 s in C4."""
 
@@ -119,6 +137,28 @@ _NG_FUZZY = 1
 is a near-bit-exact match, so typing 80 misses health that is really 79.6 (C3)."""
 _DR7_LEN = {1: 0, 2: 1, 4: 3, 8: 2}
 _DR7_WRITE = 1
+_DR7_RDWR = 3
+"""PROTOCOL.md §7.3 breaktype: 0 exec, 1 write only, 3 read-write."""
+_DR7_KIND = {"write": _DR7_WRITE, "access": _DR7_RDWR}
+MAX_WATCH_HITS = 16
+
+
+def parse_struct_reg(blob: bytes) -> dict[str, int]:
+    """FreeBSD amd64 ``struct reg`` (176 bytes) to {"rax": ..., "rip": ...}.
+
+    Layout from the FreeBSD headers; r12 is at +24 and rip at +136 by it. The rip
+    offset is confirmed on the PS5 (C4); the other registers are UNVERIFIED on the
+    console until test C10a."""
+    if len(blob) < REG64_SIZE:
+        raise ProtocolError(f"register block is {len(blob)} bytes, expected {REG64_SIZE}")
+    gp = struct.unpack_from("<15Q", blob, 0)
+    tail = struct.unpack_from("<5Q", blob, 136)
+    return dict(zip(_GP_ORDER, gp, strict=True)) | dict(zip(_TAIL_ORDER, tail, strict=True))
+
+
+def parse_interrupt(packet: bytes) -> WatchHit:
+    regs = parse_struct_reg(packet[REG64_OFFSET : REG64_OFFSET + REG64_SIZE])
+    return WatchHit(regs["rip"], regs)
 
 
 def merge_ranges(regions: list[MemMap]) -> list[tuple[int, int]]:
@@ -771,21 +811,30 @@ class Ps5DebugNgClient:
         self._scan = None
         self._scan_pid = None
 
-    # -- watchpoint ("Lock it") ---------------------------------------------
+    # -- watchpoints ("Lock it", "Find it next time") -------------------------
     def watch_writes(self, pid: int, addr: int, size: int, timeout_s: float) -> list[int]:
-        """Hardware write watchpoint (DR0). The PS5 dials back to us on port 755."""
+        return [h.rip for h in self.watch(pid, addr, size, "write", timeout_s)]
+
+    def watch(
+        self, pid: int, addr: int, size: int, kind: WatchKind, timeout_s: float
+    ) -> list[WatchHit]:
+        """Hardware watchpoint (DR0). The PS5 dials back to us on port 755 with one
+        0x4A0-byte packet per trap. ``access`` (breaktype 3, read-write) is from
+        PROTOCOL.md §7.3 and is UNVERIFIED on the console until test C10a."""
         if size not in _DR7_LEN:
             raise ValueError(f"can't watch {size} bytes")
-        rips: queue.Queue[int] = queue.Queue()
+        if kind not in _DR7_KIND:
+            raise ValueError(f"unknown watch kind {kind!r}")
+        hits: queue.Queue[WatchHit] = queue.Queue()
         listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         listener.bind(("0.0.0.0", INTERRUPT_PORT))
         listener.listen(1)
         listener.settimeout(timeout_s)
         stop = threading.Event()
-        t = threading.Thread(target=self._interrupt_loop, args=(listener, rips, stop), daemon=True)
+        t = threading.Thread(target=self._interrupt_loop, args=(listener, hits, stop), daemon=True)
         t.start()
-        found: list[int] = []
+        found: list[WatchHit] = []
         try:
             with self._lock:
                 with self._timeout(ATTACH_TIMEOUT):
@@ -800,13 +849,13 @@ class Ps5DebugNgClient:
                 # A 22-byte packet made NG 1.3 close the connection (C4).
                 self._w.request(
                     Cmd.DEBUG_SET_WATCHPOINT,
-                    struct.pack("<IIIIQ", 0, 1, _DR7_LEN[size], _DR7_WRITE, addr),
+                    struct.pack("<IIIIQ", 0, 1, _DR7_LEN[size], _DR7_KIND[kind], addr),
                 )
                 self._w.ok("set watchpoint")
             deadline = time.monotonic() + timeout_s
-            while len(found) < 16 and (left := deadline - time.monotonic()) > 0:
+            while len(found) < MAX_WATCH_HITS and (left := deadline - time.monotonic()) > 0:
                 try:
-                    found.append(rips.get(timeout=min(left, 0.5)))
+                    found.append(hits.get(timeout=min(left, 0.5)))
                 except queue.Empty:
                     continue
                 with self._lock:  # the game is stopped at the trap; let it run on
@@ -830,7 +879,7 @@ class Ps5DebugNgClient:
 
     @staticmethod
     def _interrupt_loop(
-        listener: socket.socket, rips: queue.Queue[int], stop: threading.Event
+        listener: socket.socket, hits: queue.Queue[WatchHit], stop: threading.Event
     ) -> None:
         try:
             conn, _ = listener.accept()
@@ -850,5 +899,5 @@ class Ps5DebugNgClient:
                     return
                 buf += chunk
                 if len(buf) == INTERRUPT_SIZE:
-                    rips.put(struct.unpack_from("<Q", buf, RIP_OFFSET)[0])
+                    hits.put(parse_interrupt(buf))
                     buf = b""

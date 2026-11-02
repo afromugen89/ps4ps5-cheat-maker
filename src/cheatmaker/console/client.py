@@ -11,8 +11,8 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Callable
-from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
+from dataclasses import dataclass, field
+from typing import Literal, Protocol, runtime_checkable
 
 from cheatmaker.core.values import Compare, ValueType
 
@@ -67,6 +67,27 @@ class ForegroundApp:
 class ScanHit:
     address: int
     value: bytes
+
+
+WatchKind = Literal["write", "access"]
+"""``write``: trap on writes only. ``access``: trap on reads and writes (x86 DR7 has no
+read-only data watchpoint, so a reader is found with ``access``)."""
+
+
+@dataclass(frozen=True)
+class WatchHit:
+    """One watchpoint trap: where the game was and its general registers.
+
+    Data watchpoints trap *after* the instruction, so ``rip`` points just past it and
+    ``regs`` hold the values after it ran. ``regs`` uses lower-case names
+    (``rax`` .. ``r15``, ``rip``, ``rsp``, ``rflags``); empty when the console didn't
+    send them."""
+
+    rip: int
+    regs: dict[str, int] = field(default_factory=dict, hash=False)
+
+    def reg(self, name: str) -> int | None:
+        return self.regs.get(name.lower())
 
 
 @runtime_checkable
@@ -130,11 +151,19 @@ class ConsoleClient(Protocol):
         ``keep`` accepts, as (address, value). Used by the pointer scan."""
         ...
 
+    def watch(
+        self, pid: int, addr: int, size: int, kind: WatchKind, timeout_s: float
+    ) -> list[WatchHit]:
+        """Hardware watchpoint on ``addr`` for ``timeout_s`` seconds (at most 16 hits).
+        Each hit carries the RIP just past the instruction and the registers."""
+        ...
+
     def watch_writes(self, pid: int, addr: int, size: int, timeout_s: float) -> list[int]:
         """Watch ``addr`` for writes. Returns the RIP reported after each write.
 
         x86 data watchpoints trap *after* the writing instruction, so each RIP
         points just past the writer; core.locker finds the instruction itself.
+        Same as ``[h.rip for h in watch(pid, addr, size, "write", timeout_s)]``.
         """
         ...
 
