@@ -298,6 +298,24 @@ def test_learn_skips_short_instructions_but_keeps_the_class_search():  # review 
     assert game.fake.peek(fg.PID, short, 4) == bytes.fromhex("894808c3"), "nothing patched"
 
 
+def test_enemies_through_an_unfiltered_hook_never_ask_while_the_player_verifies():
+    """Filter "none": the slot names whoever passed last (enemies in a fight). While the
+    player's object still verifies the slot is not asked, so no "Is this it?" each hit."""
+    game = fg.build(2)
+    for o in (game.player, *game.enemies):
+        game.fake.poke(fg.PID, o, bytes(8))
+    game.touched = [game.player]
+    obj = _learn(game, collect_seconds=0.25).obj
+    assert obj.hook.filter.kind == "none"
+    ah.install(game.session, obj)
+    tracker = rf.Tracker(game.session, obj, game.player, clock=Clock())
+    for enemy in game.enemies:  # a fight: each enemy goes through the hooked code
+        game.touched = [enemy]
+        game.fake.read(fg.PID, fg.BASE, 1)
+        assert ah.read_slot(game.session, obj.hook)[0] == enemy
+        assert tracker.current() == game.player and tracker.pending is None
+
+
 def test_weak_object_that_moves_waits_for_the_player():  # review M4
     game = fg.build(2)
     for o in (game.player, *game.enemies):  # no class pointer: verify is weak
@@ -313,11 +331,13 @@ def test_weak_object_that_moves_waits_for_the_player():  # review M4
     live.trackers["obj1"] = tracker
     live.turn_on(_anchored_cheat())
     assert game.health() == 999.0
-    # new area: the player's old memory still looks plausible, but the game's code now
-    # handles another object (here an enemy): never followed without the player
+    # new area: the player's old memory is freed (no longer plausible) and the game's
+    # code now handles another object (here an enemy): never followed by itself
     old, enemy = game.player, game.enemies[0]
     game.touched = [enemy]
     game.set_health(10.0, enemy)
+    game.fake.poke(fg.PID, old + fg.HP, b"\xff" * 4)  # NaN: freed memory
+    fz.tick()  # the freezer's own write would make it look fine again
     writes = len(game.fake.writes)
     for _ in range(3):
         fz.tick()

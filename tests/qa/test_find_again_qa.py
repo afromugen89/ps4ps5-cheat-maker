@@ -157,7 +157,6 @@ def _move_keeping_old(game: fg.Game, new: int) -> int:
     return old
 
 
-@pytest.mark.xfail(reason="BUG-02: tracker keeps writing the old (dead) object", strict=True)
 def test_tc14_freeze_follows_the_new_object_when_the_old_is_still_alive():
     game = fg.build(1)
     obj = learn_core(game).obj

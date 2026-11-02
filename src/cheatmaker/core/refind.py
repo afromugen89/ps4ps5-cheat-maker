@@ -476,16 +476,15 @@ class Tracker:
                 self.address is not None
                 and verify(self.session, self.obj, self.address, self._map_index()) is None
             ):
-                moved = None if self.strong else self._slot_elsewhere()
+                # The old object can still look right (UE4 frees it later), so also
+                # ask the hook. A hook that keeps every object (filter "none") names
+                # enemies too: it is only asked once the old address stops verifying.
+                if not self._slot_filtered():
+                    return self.address
+                moved = self._slot_elsewhere()
                 if moved is None:
                     return self.address
-                self.pending, self.confirmed = moved, False
-                log.info(
-                    "action=tracker object=%s game code now sees %#x: waiting for the player",
-                    self.obj.id,
-                    moved,
-                )
-                return None
+                return self._move_to(moved, self.address, "game code now sees")
             now = self._clock()
             if now - self._last_try < TRACK_RETRY_S:
                 return None
@@ -501,27 +500,35 @@ class Tracker:
             )
             if not out.found or out.address is None:
                 return None
-            if not self.strong and out.address != old:
-                self.pending, self.confirmed = out.address, False
-                log.info(
-                    "action=tracker object=%s moved from=%s to=%#x: waiting for the player",
-                    self.obj.id,
-                    f"{old:#x}" if old else "-",
-                    out.address,
-                )
-                return None
-            self.address = out.address
+            if out.address == old:
+                return self.address
+            return self._move_to(out.address, old, "moved")
+
+    def _move_to(self, new: int, old: int | None, why: str) -> int | None:
+        """A strong object follows the move; a weak one waits for the player."""
+        was = f"{old:#x}" if old else "-"
+        if not self.strong:
+            self.pending, self.confirmed = new, False
             log.info(
-                "action=tracker object=%s moved from=%s to=%#x",
+                "action=tracker object=%s %s from=%s to=%#x: waiting for the player",
                 self.obj.id,
-                f"{old:#x}" if old else "-",
-                out.address,
+                why,
+                was,
+                new,
             )
-            return self.address
+            return None
+        self.address = new
+        log.info("action=tracker object=%s %s from=%s to=%#x", self.obj.id, why, was, new)
+        return self.address
+
+    def _slot_filtered(self) -> bool:
+        """The hook keeps only this kind of object (class or field check)."""
+        hook = self.obj.hook
+        return hook is not None and hook.filter.kind != "none"
 
     def _slot_elsewhere(self) -> int | None:
-        """A weak object's freed memory can still look plausible, so also ask the hook:
-        if the game's code now handles a different (plausible) object, that's a move."""
+        """The object the game's code handles now, if it is a different one that
+        verifies: that's a move, even while the old memory still looks right."""
         hook = self.obj.hook
         if hook is None:
             return None
