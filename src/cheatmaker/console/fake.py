@@ -10,10 +10,19 @@ from __future__ import annotations
 import json
 import struct
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from cheatmaker.console.client import ForegroundApp, MemMap, ProcInfo, ProgressFn, ScanHit
+from cheatmaker.console.client import (
+    ForegroundApp,
+    MemMap,
+    ProcInfo,
+    ProgressFn,
+    ScanHit,
+    WatchHit,
+    WatchKind,
+)
 from cheatmaker.console.local_scan import LocalScanSession
 from cheatmaker.core.values import Compare, ValueType
 from cheatmaker.errors import ConnectionLost, ReadFailed, ScanNotSupported, WriteFailed
@@ -41,10 +50,19 @@ class FakeConsole:
         self._procs: dict[int, FakeProcess] = {}
         self.foreground_pid: int | None = None
         self.connected = True
+        self._app_closed = False  # the app closed the link (it can open a new one)
         self.fail_writes = False
         self.supports_unknown_scan = True
         # addr -> RIPs that "write" it while watched (set by tests / dumps)
         self.writers: dict[int, list[int]] = {}
+        # addr -> hits with registers. write_hits override ``writers`` for that addr;
+        # an "access" watch sees read_hits plus the write hits (like DR7 RW=11).
+        self.write_hits: dict[int, list[WatchHit]] = {}
+        self.read_hits: dict[int, list[WatchHit]] = {}
+        self.watched: list[tuple[int, int, str, float]] = []  # (addr, size, kind, timeout)
+        # Called before every read: lets a test "run the game" between requests
+        # (e.g. tests/fakegame.py runs installed capture routines).
+        self.game_ticks: list[Callable[[], None]] = []
         self.pointer_passes: list[tuple[int, int]] = []
         self.writes: list[tuple[int, int, bytes]] = []
         self._lock = threading.RLock()
@@ -90,7 +108,9 @@ class FakeConsole:
         return bytes(r.data[off : off + size])
 
     def disconnect(self) -> None:
+        """The link drops (Wi-Fi, PS5 off): a new connection fails too."""
         self.connected = False
+        self._app_closed = False
 
     @classmethod
     def from_dump(cls, folder: str | Path) -> FakeConsole:
@@ -132,6 +152,11 @@ class FakeConsole:
 
     # -- ConsoleClient -------------------------------------------------------
     def version(self) -> str:
+        # version() is the first request on a new connection: after the app closed
+        # its link (Connect again, a lost-link reset), a factory that hands back this
+        # same console gets a working one, like a new socket would.
+        if not self.connected and self._app_closed:
+            self.connected, self._app_closed = True, False
         self._alive()
         return self.server_version
 
@@ -153,6 +178,8 @@ class FakeConsole:
     def read(self, pid: int, addr: int, size: int) -> bytes:
         self._alive()
         with self._lock:
+            for tick in list(self.game_ticks):
+                tick()
             return self.peek(pid, addr, size)
 
     def write(self, pid: int, addr: int, data: bytes) -> None:
@@ -226,10 +253,24 @@ class FakeConsole:
             progress(1.0)
         return out
 
-    def watch_writes(self, pid: int, addr: int, size: int, timeout_s: float) -> list[int]:
+    def watch(
+        self, pid: int, addr: int, size: int, kind: WatchKind, timeout_s: float
+    ) -> list[WatchHit]:
         self._alive()
         self._proc(pid)
-        return list(self.writers.get(addr, []))
+        if kind not in ("write", "access"):
+            raise ValueError(f"unknown watch kind {kind!r}")
+        self.watched.append((addr, size, kind, timeout_s))
+        writes = self.write_hits.get(addr)
+        if writes is None:
+            writes = [WatchHit(r) for r in self.writers.get(addr, [])]
+        hits = list(writes) if kind == "write" else [*self.read_hits.get(addr, []), *writes]
+        return hits[:16]
+
+    def watch_writes(self, pid: int, addr: int, size: int, timeout_s: float) -> list[int]:
+        return [h.rip for h in self.watch(pid, addr, size, "write", timeout_s)]
 
     def close(self) -> None:
+        if self.connected:
+            self._app_closed = True
         self.connected = False

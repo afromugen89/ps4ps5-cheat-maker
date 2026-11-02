@@ -198,6 +198,7 @@ class FindWizard(QWidget):
         self.timer.setInterval(LIVE_MS)
         self.timer.timeout.connect(self.refresh_live)
         ctl.game_changed.connect(self._new_game)
+        ctl.search_lost.connect(self._search_lost)
         self._game_key: tuple[str, str] | None = None
         ctl.connection_changed.connect(lambda _up: self._update_buttons())
         self._update_buttons()
@@ -443,6 +444,17 @@ class FindWizard(QWidget):
         raw = self.ctl.session.require_client().read(g.pid, addr, vt.size)
         return Match(addr, vt.decode(raw), raw)
 
+    def _search_lost(self) -> None:
+        """Find it again searched memory: the matches here are gone (the number the
+        player typed stays, so Search starts again in one click)."""
+        self.unknown_mode = False
+        self.rows = []
+        self.count.setText("")
+        self.table.setRowCount(0)
+        self.timer.stop()
+        self.hint.setText(hints.SEARCH_LOST)
+        self._update_buttons()
+
     def _new_game(self, game=None) -> None:
         self.manual.clear()  # addresses belong to the old game's memory
         key = (game.title_id, game.version) if game is not None else None
@@ -450,6 +462,16 @@ class FindWizard(QWidget):
             self.pointers.clear()  # pointers last across restarts of the same version
         self._game_key = key
         self.do_reset()
+
+    def prefill(self, vtype: ValueType, value: float | int | None) -> None:
+        """Find it again failed (AC-12.4): start a new search with the type and the last
+        value already filled in."""
+        self.do_reset()
+        self.advanced.setChecked(True)
+        self.vtype.setCurrentIndex(self.vtype.findData(vtype))
+        if value is not None:
+            self.number.setText(f"{value:g}" if vtype.is_float else str(value))
+        self.hint.setText(hints.FIND_START)
 
     def do_add_address(self) -> None:
         text = self.add_addr.text().strip().replace(" ", "")

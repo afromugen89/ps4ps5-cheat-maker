@@ -69,3 +69,67 @@ Options I see: (a) turbo scan server-resident mode, one session per region, afte
   exact search + Lock it.
 Blocking: AC-3.3 on the real PS5 only. Everything else works; the UI shows a plain message.
 ```
+
+## v3: find it again (2026-11-02)
+
+Built from architecture v3 (recommended "anchor hook + class (vtable) fallback",
+approved by Kein), steps 1-8, plus the pointer-scan cap fix from step 10. Step 9
+(moving hooks and slots on a game update) is deferred to v3.1 (D17).
+
+- `console`: `ConsoleClient.watch(pid, addr, size, kind, timeout) -> [WatchHit(rip, regs)]`,
+  `kind` "write" or "access" (breaktype 3, PROTOCOL.md §7.3). The real client parses
+  `reg64` (FreeBSD `struct reg`) from the 0x4A0 trap packet. **UNVERIFIED** on the
+  console: breaktype 3 and every register except RIP (C10a, `tools/watch_regs.py`).
+- `core/project.py`: `.cmproj` in app data `projects/{titleid}_{version}.cmproj`
+  (objects, fields with plausible range and last value, anchors, live cheats, history).
+- `core/cave.capture_code`: the capture routine (vtable filter `cmp qword [obj], imm32`,
+  or `push tmp; mov tmp, imm64; cmp [obj], tmp; pop tmp` for a vtable above 2 GiB;
+  Player-only field filter, or none; optional keep-at-value). Slot = 16 bytes (object
+  address + counter) just below the Player-only table. The keep-value (PC-off) routine
+  has its own room just below the capture routine, so switching only re-aims the jump.
+- Safety rules from review: only an instruction of 5+ bytes is hooked (the jump never
+  covers a `ret`, a branch or code other paths jump into); spans with a `call` are
+  refused; only candidates whose registers prove `[reg+disp]` (64-bit reg, no fs/gs, no
+  index, disp >= 0) are used. Routines are never zeroed after unhooking (a preempted
+  thread may still be inside); install reuses a routine left in place. Hooks the app
+  put in are recorded the moment they go in and come out on close, or when the last
+  cheat on that value is turned off (back in when one is turned on again). A hook
+  CheatRunner loaded is never taken out. An object without a class check (weak) that
+  moves is not followed until the player confirms the new place.
+- `core/anchor_hook.py`: hook candidates from a read-write watch (readers first, must
+  be `[reg+disp]`), plan, prove slot (one write watchpoint on the first 8 bytes for 60 s
+  in the app, plus a value check of all 16; C10b runs 10 min), install (never twice;
+  detects CheatRunner-loaded bytes), remove, read slot, and the routine as code lines.
+- `core/vtable_find.py`: one exact 8-byte search for the class pointer.
+- `core/refind.py`: learn (static -> done; else hook + vtable, optional memory path),
+  find again in the order static -> proven chain -> slot -> unproven chain -> vtable
+  scan, verify before any write, disagreement = write nothing. A chain that re-checks
+  on the first restart is "proven" and then the hook isn't installed (simple games stay
+  simple). `Tracker` re-verifies every freeze tick and re-finds at most once a second.
+- Freezer: tracked entries pause (write nothing) until the target verifies again.
+- UI: My cheats -> Find it next time / Find it again; auto find on connect; confirm
+  once per run; pick dialog when methods disagree; failed -> search pre-filled; Save
+  explains app-only cheats and offers the hook in the file (off by default, D14);
+  "Also make a PC-off cheat" (capture + keep value, AC-13.1).
+- Decisions inside the design: the slot proof watches 8 of the 16 bytes (NG watchpoint index 0 only) and checks the
+  other 8 by value. Fake-PS5 "two dumps" are generated in code (`tests/fakegame.py`,
+  with a tiny interpreter for our routine), not recorded: no Returnal dumps exist yet.
+- Fixed: the pointer scan's 20,000-node cap kept the first nodes in memory order; it
+  now keeps the nearest (smallest offset).
+- QA round (2026-11-02, BUG-01..09): Connect again takes hooks out first, and a hook
+  this app put in is still ours after a lost link or a refresh (install's "already"
+  for it is recorded, CheatRunner's are not); the tracker follows the hook's new object
+  while the old one still verifies (filtered hooks only: an unfiltered one names
+  enemies too and is asked only after verify fails); the PC-off cheat leaves its
+  routine in place when off; the keep routine still runs the game's writer, then
+  stores (flags for `sub [rax+2ACh],ecx ; jle`); `.cmproj` format 2 with type checks,
+  unreadable files kept as `.cmproj.bak`, and format-1 hooks dropped (no PC-off room:
+  press Find it next time again); memory paths are tried before any hook; a class
+  check widens the plausible range; Find it again's memory search ends the player's
+  search visibly. New caves and slots skip the rooms the loaded `.cmproj` keeps.
+- **Known limit (C10)**: if the link drops while a hook is in, the app can't take it
+  out; it stays in the game until the game restarts. When the same app reconnects to
+  the same game process it recognises the hook as its own and takes it out on close.
+  After the app itself restarts it can't tell its hook from one CheatRunner loaded
+  (same bytes), so it leaves it in (harmless: the routine only records where the
+  object is). Restart the game to clear it.

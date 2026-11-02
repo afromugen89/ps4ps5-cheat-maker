@@ -55,7 +55,9 @@ can't be saved into GoldHEN / CheatRunner files (those hold fixed byte patches).
 
 Log lines: `action=player_only_collect` (hook, cave, table addresses, objects count).
 While collecting, the app briefly hooks the instruction and uses the last 512 bytes of
-the game's data area as a table (only if they are zero; cleared afterwards).
+the game's data area as a table (only if they are zero; cleared afterwards). The small
+collecting routine stays in the spare code bytes after unhooking (nothing jumps there
+any more; a thread still inside it must not find garbage).
 
 ## C9 Cheats that survive a game update (v2, added 2026-11-01)
 
@@ -79,3 +81,35 @@ Part B, after the next Returnal update (or with any game where you have an older
 Log lines: `action=read_code`, `action=update_version from=... to=... moved=... failed=...`.
 Without Part A's signatures, the app tries each line's original bytes alone (6+ bytes)
 and lists those cheats as "found from their original bytes only (test them)".
+
+## C10 Find it again (v3, added 2026-11-02)
+
+Run C4, C7 and C8 first if you can; C10 does not depend on them, but their results
+tell us which method to trust first. Use Returnal 03.000.005 (or any game whose value
+moves after a restart). Allow the Windows Firewall prompt for port 755.
+
+| # | Test | Steps | Pass when | Send back |
+|---|---|---|---|---|
+| C10a | Watch with registers (spike, no UI) | Find health (Decimal), note its address (Advanced shows it). Run `python tools/watch_regs.py <PS5 IP> <address> --seconds 10 --out c10a.json` and play (take a hit). | At least one **reader** is listed, and a line says `r12+offset == address: yes` (or another register). | `c10a.json` and the printed list. |
+| C10b | Spare memory stays free | My cheats -> select health -> **Find it next time** -> Start, then keep playing for the whole check, including loading a new biome. For the long version: run it once more with `PROVE_SECONDS` set to 600 (ask in the thread). | "Ready: ... found by the game's code". Log: `action=slot_prove ... writes=0 zero=True`. | The `action=slot_prove` and `action=hook_plan` log lines. |
+| C10c | Found again after a restart | After C10b, close the game, start it again, connect. | Within 10 s the status line says "... found again by the game's code"; tick the cheat, press Yes, health changes. No number typed. | The status line and `action=refind` log lines. |
+| C10d | Hook loaded by CheatRunner | Save with **Also put the find-it-again hook in the file** ticked, Send to PS5, restart the game, turn the hook on in CheatRunner, then connect. | Found again as in C10c; log says `action=hook_install ... already in the game` (nothing patched twice). | Those log lines. |
+| C10e | Fallback: memory search | After a restart and connect, in My cheats tick **Advanced: show details**, then **Find again without the game's code**, and press **Find it again**. | "found again by a memory search" in 3 min or less; time in `action=refind ... seconds=`. | The `action=vtable_scan` and `action=refind` lines. |
+| C10f | Freeze across a biome and a death | Tick health (frozen), change biome, die once. | The freeze pauses (log `paused: target not verified`), then resumes within 5 s on the new character (`resumed`); no crash, no wrong value anywhere. | The `action=freeze` and `action=tracker` lines. |
+| C10g | A PS4 game (CUSA) | Find a value that moves in a PS4 game, Find it next time, restart, connect. Also note the module base on the top line / log (`base=`). | Found again as in C10c. If the base isn't 0x400000, say so: the class check then uses the longer form (scratch register). | The `action=detect_game` and `action=hook_plan` lines. |
+| C10 (AC-14.1) | Full proof | Health (Decimal) and Obolites (8-byte whole number): Find it next time for both, then 3 restarts, 2 biome changes, 1 death. | Both re-found every time; no wrong write. | Copy log. |
+
+What is still unverified on the console (all behind fake-PS5 tests):
+- Read-write watchpoints (breaktype 3) and the register block in the 0x4A0 trap
+  packet (only RIP was confirmed in C4). C10a checks both.
+- Writing the capture routine into the game's code and the 16 bytes into its spare
+  data (same path as Lock it / Player only, C4/C8 not passed yet).
+- That the end of the game's last data area is really unused (C10b).
+- How long the memory search for the object's class takes on Returnal (expect about
+  150 s, like the 8-byte search in C3).
+- The 5-byte jump over the hooked instruction is written in one PS5Debug-NG write but
+  not atomically: a game thread reaching that instruction in the same instant could
+  run half-old, half-new bytes. Same risk as Lock it / Player only; watch for crashes
+  right when the hook goes in (connect, Find it next time, ticking a cheat).
+- That the game's module sits at a fixed base for PS4 (CUSA) games too, and that object
+  classes (vtables) are in the module there (C10g).

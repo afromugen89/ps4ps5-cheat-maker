@@ -120,3 +120,19 @@ def test_from_dump_roundtrip(tmp_path):
     assert fake.foreground_app().title_id == "CUSA00001"
     assert fake.read(5, 0x1000, 4) == struct.pack("<i", 42)
     assert fake.watch_writes(5, 0x1000, 4, 1) == [0x400010]
+
+
+def test_watch_returns_hits_with_registers(client):
+    if not hasattr(client, "peek"):
+        pytest.skip("fake only: needs the player to make the value change")
+    from cheatmaker.console.client import WatchHit
+
+    reader = WatchHit(0x400200, {"rax": HEALTH_ADDR - 0x40, "rip": 0x400200})
+    client.read_hits[HEALTH_ADDR] = [reader]
+    writes = client.watch(PID, HEALTH_ADDR, 4, "write", 1.0)
+    assert writes and all(h.regs == {} for h in writes), "writers recorded without registers"
+    access = client.watch(PID, HEALTH_ADDR, 4, "access", 1.0)
+    assert access[0] == reader and len(access) == len(writes) + 1
+    assert client.watch_writes(PID, HEALTH_ADDR, 4, 1.0) == [h.rip for h in writes]
+    with pytest.raises(ValueError):
+        client.watch(PID, HEALTH_ADDR, 4, "exec", 1.0)

@@ -59,6 +59,7 @@ class MainWindow(QMainWindow):
         self.copy_log_btn.clicked.connect(self.copy_log)
         self.cheats.open_lock = self.open_lock
         self.cheats.open_save = self.open_save
+        self.cheats.finder.open_search = self.open_search
         ctl.cheats_changed.connect(self._cheat_added)
         self._last_count = 0
 
@@ -67,6 +68,10 @@ class MainWindow(QMainWindow):
         if n > self._last_count and self.tabs.currentWidget() is self.find:
             self.tabs.setCurrentWidget(self.cheats)
         self._last_count = n
+
+    def open_search(self, vtype, value) -> None:
+        self.find.prefill(vtype, value)
+        self.tabs.setCurrentWidget(self.find)
 
     def copy_log(self) -> None:
         """AC-9.4."""

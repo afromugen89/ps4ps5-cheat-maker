@@ -1,0 +1,85 @@
+{
+ "format": "cheatmaker-project",
+ "format_version": 2,
+ "title_id": "PPSA01285",
+ "version": "03.000.005",
+ "process": "eboot.bin",
+ "objects": [
+  {
+   "id": "player",
+   "label": "You",
+   "vtable": "0x5a1b2c0",
+   "fields": [
+    {
+     "name": "Health",
+     "off": "0x2ac",
+     "type": "float",
+     "range": [
+      0,
+      10000
+     ]
+    },
+    {
+     "name": "Max health",
+     "off": "0x2b0",
+     "type": "float",
+     "range": [
+      1,
+      10000
+     ]
+    }
+   ],
+   "anchors": [
+    {
+     "kind": "hook_slot",
+     "hook": "0x277b43f",
+     "insn": "vmovss [r12+2ACh],xmm1",
+     "orig": "C4 C1 7A 11 8C 24 AC 02 00 00",
+     "reg": "r12",
+     "disp": "0x2ac",
+     "role": "writer",
+     "filter": {
+      "kind": "vtable"
+     },
+     "cave": "0x5e1f000",
+     "slot": "0x7f3fff0",
+     "signature": "C4 C1 7A 11 8C 24 AC 02 00 00 48 8B 5C 24 30"
+    },
+    {
+     "kind": "vtable_scan"
+    },
+    {
+     "kind": "chain",
+     "base": "0x6c1d2e8",
+     "offsets": [
+      "0x180",
+      "0x38",
+      "0x0",
+      "0x30",
+      "0x2a0",
+      "0x2ac"
+     ],
+     "field": "Health",
+     "runs_seen": 3
+    }
+   ]
+  }
+ ],
+ "cheats": [
+  {
+   "name": "Infinite health",
+   "object": "player",
+   "field": "Health",
+   "action": "freeze",
+   "value": 999
+  }
+ ],
+ "history": [
+  {
+   "at": "2026-11-02T20:10:00",
+   "method": "hook_slot",
+   "seconds": 0.4,
+   "verified": true
+  }
+ ]
+}

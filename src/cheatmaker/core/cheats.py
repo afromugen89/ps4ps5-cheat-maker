@@ -49,6 +49,9 @@ class Cheat:
     value_type: ValueType | None = None  # set when the cheat holds a value the player can edit
     hint: str | None = None
     enabled: bool = field(default=False, compare=False)
+    anchor: tuple[str, str] | None = None
+    """(object id, field name) in the game's .cmproj: the address is found again each
+    run (v3) instead of being the one in ``locations``."""
 
     @property
     def session_only(self) -> bool:

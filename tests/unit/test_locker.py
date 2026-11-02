@@ -82,3 +82,16 @@ def test_patch_landed_reads_code_back(session, fake, monkeypatch):
     # A console that acks code writes without applying them (C4 suspicion).
     fake.poke(PID, WRITER_ADDR, b"\x89\x08")
     assert not patch_landed(session, c)
+
+
+def test_instruction_before_finds_readers_with_touches_memory():
+    from cheatmaker.core.locker import touches_memory
+
+    read = bytes.fromhex("418b8424ac020000")  # mov eax,[r12+2ACh]
+    rip = 0x400108
+    writer = instruction_before(read, rip)  # default: writers only, so not the mov
+    assert writer is None or writer[0] != 0x400100
+    start, code, text = instruction_before(read, rip, want=touches_memory)
+    assert start == 0x400100 and code == read and text == "mov eax,[r12+2ACh]"
+    lea = bytes.fromhex("498d442410")  # lea rax,[r12+10h]: names an address, no access
+    assert instruction_before(lea, 0x400105, want=touches_memory) is None

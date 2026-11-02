@@ -61,3 +61,15 @@ class UploadFailed(CheatMakerError):
 
 class LockFailed(CheatMakerError):
     action = "lock"
+
+
+class ProjectFileError(CheatFileError):
+    """A ``.cmproj`` (find-it-again data) can't be read."""
+
+    action = "project_load"
+
+
+class FindFailed(CheatMakerError):
+    """Find it next time / Find it again couldn't do it. The message is plain text."""
+
+    action = "find_again"

@@ -44,6 +44,7 @@ class ConnectView(QWidget):
         ip, port = self.ip.text().strip(), self.ctl.settings.ng_port
         self.status.setText("Connecting...")
         self.connect_btn.setEnabled(False)
+        self.ctl.run_before_disconnect()  # Connect again: take our hooks out first
 
         def work():
             self.ctl.session.connect(ip, port)

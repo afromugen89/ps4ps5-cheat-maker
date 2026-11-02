@@ -76,3 +76,27 @@ def test_find_chains_depth_limit():
 
     assert find_chains(T, 0x40_0000, 0x50_0000, refs, depth=2) == []
     assert find_chains(T, 0x40_0000, 0x50_0000, refs, depth=3) == [Chain(0x1000, (0, 0, 0))]
+
+
+def test_node_cap_keeps_the_nearest_not_the_first(monkeypatch):
+    """Bug fix: the 20k cap kept the first holders in memory order, so a far-away
+    holder low in memory could push out the real (short) link."""
+    from cheatmaker.core import pointers
+
+    monkeypatch.setattr(pointers, "MAX_NODES_PER_LEVEL", 1)
+    target, root, base = 0x9000_0000, 0x40_1000, 0x40_0000
+    far, near = 0x5000_0000, 0x6000_0000  # far is first in memory order
+    mem = {far: target - 0xF00, near: target - 0x8, root: near - 0x10}
+
+    def refs(low, high, keep, _progress):
+        return [(a, v) for a, v in sorted(mem.items()) if low <= v <= high and keep(v)]
+
+    chains = find_chains(target, base, base + 0x10000, refs, depth=2)
+    assert Chain(root - base, (0x10, 0x8)) in chains
+
+
+def test_keep_nearest_orders_by_offset_then_address():
+    from cheatmaker.core.pointers import keep_nearest
+
+    link = {0x30: (0, 0x100), 0x10: (0, 0x8), 0x20: (0, 0x8), 0x40: (0, 0x0)}
+    assert keep_nearest([0x30, 0x10, 0x20, 0x40], link, 3) == [0x40, 0x10, 0x20]

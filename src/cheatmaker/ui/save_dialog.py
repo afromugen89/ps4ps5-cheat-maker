@@ -6,6 +6,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDialog,
     QFileDialog,
@@ -19,6 +20,8 @@ from PySide6.QtWidgets import (
 
 from cheatmaker import formats
 from cheatmaker.console.uploader import Uploader, remote_path, save_to_pc
+from cheatmaker.core import anchor_hook as ah
+from cheatmaker.core.cheats import CheatFile
 from cheatmaker.paths import default_save_dir
 from cheatmaker.ui import hints
 from cheatmaker.ui.controller import Controller
@@ -50,6 +53,11 @@ class SaveDialog(QDialog):
         self.file_label = QLabel("")
         self.skipped = QLabel("")
         self.skipped.setWordWrap(True)
+        self.with_hook = QCheckBox(hints.SAVE_HOOK)  # D14: off by default
+        self.with_hook.setToolTip(
+            "Then CheatRunner turns it on with the game, and Cheat Maker finds your values "
+            "the moment it connects. On its own it changes nothing in the game."
+        )
         self.result = QLabel("")
         self.result.setWordWrap(True)
         self.result.setTextInteractionFlags(self.result.textInteractionFlags())
@@ -68,7 +76,7 @@ class SaveDialog(QDialog):
         for w in (self.save_btn, self.send_btn, self.close_btn):
             brow.addWidget(w)
         lay = QVBoxLayout(self)
-        for w in (self.hint, self.file_label, self.skipped):
+        for w in (self.hint, self.file_label, self.skipped, self.with_hook):
             lay.addWidget(w)
         lay.addLayout(frow)
         lay.addLayout(drow)
@@ -89,12 +97,17 @@ class SaveDialog(QDialog):
     def _refresh(self) -> None:
         cf = self.ctl.ensure_file()
         self.file_label.setText(f"File: {cf.file_name(self.format)}")
-        n = sum(1 for c in cf.cheats if not c.saveable)
-        self.skipped.setText(
-            f'{n} cheat(s) marked "This session only" won\'t be saved. Use Lock it first.'
-            if n
-            else ""
-        )
+        n = sum(1 for c in cf.cheats if not c.saveable and c.anchor is None)
+        found = sum(1 for c in cf.cheats if c.anchor is not None)
+        lines = []
+        if n:
+            lines.append(
+                f'{n} cheat(s) marked "This session only" won\'t be saved. Use Lock it first.'
+            )
+        if found:  # AC-13.2
+            lines.append(hints.SAVE_APP_ONLY.format(n=found))
+        self.skipped.setText("\n".join(lines))
+        self.with_hook.setHidden(not self.hook_objects())
         self.send_btn.setEnabled(self.ctl.session.connected)
 
     def _browse(self) -> None:
@@ -102,8 +115,27 @@ class SaveDialog(QDialog):
         if d:
             self.folder.setText(d)
 
-    def _payload(self) -> tuple[str, bytes]:
+    def hook_objects(self) -> list:
+        p, s = self.ctl.project, self.ctl.session
+        if p is None or not s.connected or s.game is None:
+            return []
+        return [o for o in p.objects if o.hook is not None and not o.has_proven_chain]
+
+    def _file(self) -> CheatFile:
+        """The open file, plus the find-it-again hooks when asked for (AC-13.1)."""
         cf = self.ctl.ensure_file()
+        objs = self.hook_objects() if self.with_hook.isChecked() else []
+        if not objs:
+            return cf
+        hooks = [
+            ah.hook_cheat(self.ctl.session, o, f"Cheat Maker: find {o.label} again") for o in objs
+        ]
+        return CheatFile(
+            cf.title, cf.title_id, cf.version, [*cf.cheats, *hooks], cf.process, cf.credits
+        )
+
+    def _payload(self) -> tuple[str, bytes]:
+        cf = self._file()
         self.ctl.settings.output_format = self.format
         self.ctl.settings.save()
         return cf.file_name(self.format), formats.dumps(cf, self.format)
