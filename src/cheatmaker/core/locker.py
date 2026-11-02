@@ -37,7 +37,7 @@ class Writer:
         return len(self.code)
 
 
-def _writes_memory(insn: ix.Instruction) -> bool:
+def writes_memory(insn: ix.Instruction) -> bool:
     return any(
         m.access
         in (
@@ -61,7 +61,7 @@ def touches_memory(insn: ix.Instruction) -> bool:
 def instruction_before(
     code_before: bytes,
     rip: int,
-    want: Callable[[ix.Instruction], bool] = _writes_memory,
+    want: Callable[[ix.Instruction], bool] = writes_memory,
 ) -> tuple[int, bytes, str] | None:
     """Find the instruction that ends exactly at ``rip`` and ``want`` accepts
     (default: one that writes memory).
@@ -158,4 +158,5 @@ __all__ = [
     "patch_landed",
     "touches_memory",
     "verify_original",
+    "writes_memory",
 ]

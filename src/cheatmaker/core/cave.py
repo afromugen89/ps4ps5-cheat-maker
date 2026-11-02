@@ -36,7 +36,7 @@ import iced_x86 as ix
 
 from cheatmaker.console.client import MemMap
 from cheatmaker.core.cheats import Cheat, Location, LocationKind
-from cheatmaker.core.locker import Writer
+from cheatmaker.core.locker import Writer, writes_memory
 from cheatmaker.core.session import Session
 from cheatmaker.errors import LockFailed, ScanCancelled
 
@@ -156,6 +156,25 @@ def sampler_code(span: list[ix.Instruction], target: Target, table: int, cave: i
     return _encode(body, cave)
 
 
+def _stores(target: Target, value: bytes) -> list[ix.Instruction]:
+    """``mov [base+disp], value`` as immediate stores (two dwords for 8 bytes)."""
+    C, Ins = ix.Code, ix.Instruction
+    mem = _mem(target.base, target.disp)
+    if len(value) == 8:
+        lo, hi = struct.unpack("<II", value)
+        return [
+            Ins.create_mem_u32(C.MOV_RM32_IMM32, mem, lo),
+            Ins.create_mem_u32(C.MOV_RM32_IMM32, _mem(target.base, target.disp + 4), hi),
+        ]
+    if len(value) == 4:
+        return [Ins.create_mem_u32(C.MOV_RM32_IMM32, mem, struct.unpack("<I", value)[0])]
+    if len(value) == 2:
+        return [Ins.create_mem_u32(C.MOV_RM16_IMM16, mem, struct.unpack("<H", value)[0])]
+    if len(value) == 1:
+        return [Ins.create_mem_u32(C.MOV_RM8_IMM8, mem, value[0])]
+    raise LockFailed("can't write a value of that size")
+
+
 def player_only_code(
     span: list[ix.Instruction],
     target: Target,
@@ -165,32 +184,10 @@ def player_only_code(
     cave: int,
 ) -> bytes:
     """The cave: the player gets ``value`` instead of the game's write."""
-    if len(value) not in (1, 2, 4, 8):
-        raise LockFailed("can't write a value of that size")
     back = span[-1].next_ip
     C, Ins = ix.Code, ix.Instruction
     normal_ip = 0xFFFF_0000  # placeholder label, resolved by the encoder
-    stores: list[ix.Instruction] = []
-    if len(value) == 8:
-        lo, hi = struct.unpack("<II", value)
-        stores = [
-            Ins.create_mem_u32(C.MOV_RM32_IMM32, _mem(target.base, target.disp), lo),
-            Ins.create_mem_u32(C.MOV_RM32_IMM32, _mem(target.base, target.disp + 4), hi),
-        ]
-    elif len(value) == 4:
-        stores = [
-            Ins.create_mem_u32(
-                C.MOV_RM32_IMM32, _mem(target.base, target.disp), struct.unpack("<I", value)[0]
-            )
-        ]
-    elif len(value) == 2:
-        stores = [
-            Ins.create_mem_u32(
-                C.MOV_RM16_IMM16, _mem(target.base, target.disp), struct.unpack("<H", value)[0]
-            )
-        ]
-    else:
-        stores = [Ins.create_mem_u32(C.MOV_RM8_IMM8, _mem(target.base, target.disp), value[0])]
+    stores = _stores(target, value)
     normal = [i.copy() for i in span]
     normal[0] = _label(normal[0], normal_ip)
     body = [
@@ -205,6 +202,110 @@ def player_only_code(
         Ins.create_branch(C.JMP_REL32_64, back),
     ]
     return _encode(body, cave)
+
+
+SLOT_SIZE = 16
+"""Capture slot: the object address (8 bytes), then a counter of captures (8 bytes)."""
+IMM32_MAX = (1 << 31) - 1
+
+
+def capture_code(
+    span: list[ix.Instruction],
+    target: Target,
+    slot: int,
+    cave: int,
+    filter_kind: str = "vtable",
+    vtable: int | None = None,
+    field: int = 0,
+    field_value: int = 0,
+    value: bytes | None = None,
+) -> bytes:
+    """The "find it again" capture routine (architecture v3 §5)::
+
+        lea rsp,[rsp-128] ; pushfq          ; keep the red zone and the flags
+        cmp qword [obj], vtable             ; filter: only the object we want
+        jne other                           ;   (or cmp dword [obj+field], value)
+        mov [slot], obj                     ; remember where it is now
+        inc qword [slot+8]                  ; and that the routine ran
+      [ popfq ; lea rsp,[rsp+128]          ; optional "keep at value" (player only):
+        mov [obj+disp], value               ;   writer: instead of the game's write
+        <rest of the hooked code> ; jmp back ;  reader: before the game reads it ]
+      other:
+        popfq ; lea rsp,[rsp+128]
+        <the original instructions> ; jmp back
+
+    Only the flags change before the original code runs, and the object register is
+    read before the hooked instruction, so it works on readers that overwrite it
+    (``mov rax,[rax+2ACh]``). ``vtable`` must fit a sign-extended imm32 (the game's
+    module sits below 2 GiB on the PS5, base 0x400000 in C1)."""
+    C, Ins = ix.Code, ix.Instruction
+    back = span[-1].next_ip
+    other_ip = 0xFFFF_0000  # placeholder label, resolved by the encoder
+    obj = target.base
+    if filter_kind == "vtable":
+        if vtable is None or not 0 < vtable <= IMM32_MAX:
+            raise LockFailed("the character's type can't be checked from this place in memory")
+        check = [Ins.create_mem_i32(C.CMP_RM64_IMM32, _mem(obj), vtable)]
+    elif filter_kind == "field":
+        check = [Ins.create_mem_u32(C.CMP_RM32_IMM32, _mem(obj, field), field_value & 0xFFFFFFFF)]
+    elif filter_kind == "none":
+        if value is not None:
+            raise LockFailed("keeping a value needs a way to tell you apart from the others")
+        check = []
+    else:
+        raise ValueError(f"unknown filter {filter_kind!r}")
+    pro = [
+        Ins.create_reg_mem(C.LEA_R64_M, ix.Register.RSP, _mem(ix.Register.RSP, -RED_ZONE)),
+        Ins.create(C.PUSHFQ),
+    ]
+
+    def epilogue() -> list[ix.Instruction]:
+        return [
+            Ins.create(C.POPFQ),
+            Ins.create_reg_mem(C.LEA_R64_M, ix.Register.RSP, _mem(ix.Register.RSP, RED_ZONE)),
+        ]
+
+    capture = [
+        *check,
+        *([Ins.create_branch(C.JNE_REL32_64, other_ip)] if check else []),
+        Ins.create_mem_reg(C.MOV_RM64_R64, _mem(ix.Register.RIP, slot), obj),
+        Ins.create_mem(C.INC_RM64, _mem(ix.Register.RIP, slot + 8)),
+    ]
+    keep: list[ix.Instruction] = []
+    if value is not None:
+        rest = span[1:] if writes_memory(span[0]) else span
+        keep = [
+            *epilogue(),
+            *_stores(target, value),
+            *[_label(i.copy(), 0xFFFE_0000 + k) for k, i in enumerate(rest)],
+            Ins.create_branch(C.JMP_REL32_64, back),
+        ]
+    other = epilogue()
+    other[0] = _label(other[0], other_ip)
+    body = [
+        *pro,
+        *capture,
+        *keep,
+        *other,
+        *[i.copy() for i in span],
+        Ins.create_branch(C.JMP_REL32_64, back),
+    ]
+    return _encode(body, cave)
+
+
+def find_slot(session: Session) -> int:
+    """16 zero bytes just below the Player-only table at the end of the game's writable
+    data. The caller still has to prove the game never writes there (C10b)."""
+    game = session.require_game()
+    client = session.require_client()
+    data_maps = [m for m in _module_maps(session) if m.writable and not m.executable]
+    if not data_maps:
+        raise LockFailed("couldn't find the game's data area")
+    last = max(data_maps, key=lambda m: m.end)
+    addr = (last.end - TABLE_SIZE - SLOT_SIZE) & ~15
+    if addr < last.start or client.read(game.pid, addr, SLOT_SIZE) != bytes(SLOT_SIZE):
+        raise LockFailed("no spare room in the game's data to remember where things are")
+    return addr
 
 
 # -- where things go ------------------------------------------------------------
@@ -370,9 +471,12 @@ def make_player_only_cheat(
 
 
 __all__ = [
+    "SLOT_SIZE",
     "FieldGuess",
+    "capture_code",
     "collect_objects",
     "compare_objects",
+    "find_slot",
     "guess_fields",
     "make_player_only_cheat",
     "player_only_code",

@@ -110,3 +110,95 @@ def test_guess_fields_prefers_id_like_field():
     e2 = struct.pack("<4I", 1, 0x30010, 7, 9)
     g = cv.guess_fields(player, [e1, e2])
     assert [x.offset for x in g] == [4, 8]
+
+
+# -- v3: capture routine ("find it again") -------------------------------------------
+CAVE_IP, SLOT = 0x65D7DB0, 0x7F3FFF0
+FMT = ix.Formatter(ix.FormatterSyntax.INTEL)
+
+
+def _text(code: bytes, ip: int = CAVE_IP) -> list[str]:
+    return [FMT.format(i) for i in ix.Decoder(64, code, ip=ip)]
+
+
+def test_capture_code_vtable_filter_on_the_returnal_writer():
+    span = cv.decode_at(VMOVSS, 0x2B7B43F)
+    code = cv.capture_code(span, cv.writer_target(WRITER), SLOT, CAVE_IP, vtable=0x5A1B2C0)
+    t = _text(code)
+    assert t[:3] == ["lea rsp,[rsp-80h]", "pushfq", "cmp qword ptr [r12],5A1B2C0h"]
+    assert t[3].startswith("jne")
+    assert t[4:8] == [
+        "mov [7F3FFF0h],r12",  # object address into the slot
+        "inc qword ptr [7F3FFF8h]",  # counter: the routine ran
+        "popfq",
+        "lea rsp,[rsp+80h]",
+    ]
+    assert t[8:] == ["vmovss [r12+2ACh],xmm1", "jmp 0000000002B7B449h"]
+    jne = list(ix.Decoder(64, code, ip=CAVE_IP))[3]
+    assert jne.near_branch_target == CAVE_IP + code.index(b"\x9d"), "skips to popfq"
+
+
+def test_capture_and_keep_value_for_a_writer_replaces_the_write():
+    span = cv.decode_at(VMOVSS, 0x2B7B43F)
+    code = cv.capture_code(
+        span,
+        cv.writer_target(WRITER),
+        SLOT,
+        CAVE_IP,
+        "field",
+        field=8,
+        field_value=0x40048,
+        value=struct.pack("<f", 1000.0),
+    )
+    t = _text(code)
+    assert t[2] == "cmp dword ptr [r12+8],40048h"
+    assert t[6:10] == [
+        "popfq",
+        "lea rsp,[rsp+80h]",
+        "mov dword ptr [r12+2ACh],447A0000h",  # 1000.0 instead of the game's write
+        "jmp 0000000002B7B449h",
+    ]
+    assert t[10:] == [
+        "popfq",
+        "lea rsp,[rsp+80h]",
+        "vmovss [r12+2ACh],xmm1",
+        "jmp 0000000002B7B449h",
+    ]
+
+
+def test_capture_on_a_reader_that_overwrites_its_register():
+    read = bytes.fromhex("488b80ac020000")  # mov rax,[rax+2ACh]
+    span = cv.decode_at(read + b"\x90" * 8, 0x401000)[:1]
+    target = cv.writer_target(Writer(0x401000, read, "", 1))
+    code = cv.capture_code(span, target, SLOT, CAVE_IP, vtable=0x500000, value=struct.pack("<i", 7))
+    t = _text(code)
+    assert t[4] == "mov [7F3FFF0h],rax", "captured before the read overwrites rax"
+    assert t[8:10] == ["mov dword ptr [rax+2ACh],7", "mov rax,[rax+2ACh]"], (
+        "reader: value stored, then the game's own read"
+    )
+
+
+def test_capture_without_filter_and_refusals():
+    span = cv.decode_at(VMOVSS, 0x2B7B43F)
+    target = cv.writer_target(WRITER)
+    t = _text(cv.capture_code(span, target, SLOT, CAVE_IP, "none"))
+    assert t[2:4] == ["mov [7F3FFF0h],r12", "inc qword ptr [7F3FFF8h]"]
+    with pytest.raises(LockFailed):  # no vtable known
+        cv.capture_code(span, target, SLOT, CAVE_IP, vtable=None)
+    with pytest.raises(LockFailed):  # doesn't fit a sign-extended imm32
+        cv.capture_code(span, target, SLOT, CAVE_IP, vtable=0x8000_0000)
+    with pytest.raises(LockFailed, match="tell you apart"):
+        cv.capture_code(span, target, SLOT, CAVE_IP, "none", value=b"\0\0\0\0")
+    with pytest.raises(ValueError):
+        cv.capture_code(span, target, SLOT, CAVE_IP, "magic")
+    with pytest.raises(LockFailed):
+        cv.capture_code(span, target, SLOT, CAVE_IP, "field", value=b"\0\0\0")
+
+
+def test_find_slot_below_the_table():
+    fake, s = game()
+    slot = cv.find_slot(s)
+    assert slot == DATA + 0x1000 - cv.TABLE_SIZE - cv.SLOT_SIZE and slot % 16 == 0
+    fake.poke(PID, slot + 4, b"\x01")
+    with pytest.raises(LockFailed, match="spare room"):
+        cv.find_slot(s)
