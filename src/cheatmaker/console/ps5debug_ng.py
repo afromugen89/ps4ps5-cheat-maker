@@ -131,6 +131,8 @@ _NG_COMPARE = {
     Compare.CHANGED: 9,
     Compare.UNCHANGED: 10,
     Compare.BETWEEN: 4,  # server keeps low <= value <= high (both included)
+    Compare.INCREASED_BY: 6,  # IncreasedBy / DecreasedBy: UNVERIFIED on console (C11a)
+    Compare.DECREASED_BY: 8,
 }
 _NG_FUZZY = 1
 """FuzzyValue: |typed - memory| < 1.0, float/double only. Legacy ExactValue on floats
@@ -494,7 +496,7 @@ class Ps5DebugNgClient:
                     hits.append(ScanHit(start + rel, block[off + 4 : off + stride]))
             self._w.ok("scan end", ReadFailed)
         if vtype.is_float:
-            # Fuzzy is +-1.0; keep the app's own +-0.5 rounding rule so PC and PS5 agree.
+            # Same rule as Fuzzy (< 1.0); re-checked on the PC so both always agree.
             hits = [h for h in hits if matches(vtype, Compare.EXACT, h.value, target=value)]
         return hits
 
@@ -702,6 +704,9 @@ class Ps5DebugNgClient:
         if cmp is Compare.BETWEEN:
             lo, hi = value  # type: ignore[misc]
             val = vtype.encode(lo) + vtype.encode(hi)
+        elif cmp.by_amount:
+            amount, _tol = value  # type: ignore[misc]  # the server applies its own rule
+            val = vtype.encode(amount)
         else:
             val = vtype.encode(value) if cmp.needs_value and value is not None else b""
         total = max(self._resident_count, 1)

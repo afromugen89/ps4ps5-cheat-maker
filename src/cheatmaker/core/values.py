@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import re
 import struct
+from dataclasses import dataclass
 from enum import Enum
 
 
@@ -59,19 +60,33 @@ class Compare(Enum):
     CHANGED = "changed"
     UNCHANGED = "unchanged"
     BETWEEN = "between"  # value is (low, high), both included
+    INCREASED_BY = "increased by"  # value is (amount, tolerance), AC-H1
+    DECREASED_BY = "decreased by"
 
     @property
     def needs_value(self) -> bool:
-        return self in (Compare.EXACT, Compare.BETWEEN)
+        return self in (Compare.EXACT, Compare.BETWEEN, Compare.INCREASED_BY, Compare.DECREASED_BY)
 
     @property
     def needs_previous(self) -> bool:
-        return self in (Compare.INCREASED, Compare.DECREASED, Compare.CHANGED, Compare.UNCHANGED)
+        return self in (
+            Compare.INCREASED,
+            Compare.DECREASED,
+            Compare.CHANGED,
+            Compare.UNCHANGED,
+            Compare.INCREASED_BY,
+            Compare.DECREASED_BY,
+        )
+
+    @property
+    def by_amount(self) -> bool:
+        return self in (Compare.INCREASED_BY, Compare.DECREASED_BY)
 
 
-FLOAT_TOLERANCE = 0.5
-"""Games often show a rounded float (health 87 might be 86.7), so exact float match
-accepts anything that rounds to the typed number."""
+FLOAT_TOLERANCE = 1.0
+"""Games often show a rounded or cut-off float (health 87 might be 86.7 or 87.4), so an
+exact float match accepts anything less than one unit of the typed number away (AC-H2).
+Typed decimals get a smaller unit, see ``unit_of``. Same rule as PS5Debug-NG FuzzyValue."""
 
 
 def matches(
@@ -99,6 +114,14 @@ def matches(
     if previous is None:
         raise ValueError(f"{cmp.value} needs a previous scan")
     prev = vtype.decode(previous)
+    if cmp.by_amount:
+        if target is None:
+            raise ValueError(f"{cmp.value} needs an amount")
+        amount, tol = target  # type: ignore[misc]
+        diff = cur - prev if cmp is Compare.INCREASED_BY else prev - cur
+        if vtype.is_float:
+            return not math.isnan(prev) and abs(diff - amount) < tol
+        return diff == int(amount)
     if cmp is Compare.INCREASED:
         return cur > prev
     if cmp is Compare.DECREASED:
@@ -122,6 +145,54 @@ def parse_number(text: str) -> float | int:
         return int(cleaned)
     except ValueError:
         raise ValueError(f'"{text}" isn\'t a number.') from None
+
+
+@dataclass(frozen=True)
+class Scale:
+    """How the game stores what it shows (AC-H3): stored = shown x factor."""
+
+    label: str
+    factor: float
+    decimal: bool = False  # fractions only fit in Decimal types
+
+    def apply(self, value: float | int) -> float | int:
+        if self.factor == 1:
+            return value
+        scaled = value * self.factor
+        if isinstance(value, int) and not self.decimal and float(scaled).is_integer():
+            return int(scaled)
+        return scaled
+
+
+SHOWN = Scale("the number shown", 1)
+
+
+def make_scale(kind: str, max_value: float | int = 100) -> Scale:
+    """``kind``: "shown", "fraction", "x10", "x100" or "x1000". Raises ValueError."""
+    if kind == "shown":
+        return SHOWN
+    if kind == "fraction":
+        if not max_value or max_value <= 0:
+            raise ValueError("The most it can be must be more than 0.")
+        return Scale(f"a fraction of {max_value:g}", 1 / max_value, decimal=True)
+    if kind in ("x10", "x100", "x1000"):
+        return Scale(kind, int(kind[1:]))
+    raise ValueError(f"unknown scale {kind!r}")
+
+
+def unit_of(text: str) -> float:
+    """One unit of the last digit the player typed: "87" -> 1, "87.5" -> 0.1,
+    "0.87" -> 0.01 (AC-H2). Exponent forms count as whole units of their value."""
+    cleaned = text.strip().replace(",", "").replace(" ", "").replace("_", "")
+    if "e" in cleaned.lower() or "." not in cleaned:
+        return 1.0
+    decimals = len(cleaned.split(".", 1)[1])
+    return 10.0**-decimals if decimals else 1.0
+
+
+def parse_amount(text: str) -> tuple[float | int, float]:
+    """A number the player typed plus its unit (see ``unit_of``)."""
+    return parse_number(text), unit_of(text)
 
 
 def guess_types(value: float | int) -> list[ValueType]:
@@ -148,8 +219,9 @@ def parse_filter(text: str) -> tuple[float, float] | None:
     """What to keep in the match list: "100" or "90-110" / "90 to 110".
 
     Returns (low, high), or None for an empty box. Raises ValueError for text
-    that isn't a number or a range. A single number keeps values within
-    FLOAT_TOLERANCE of it, so a float showing 86.7 still matches a typed 87.
+    that isn't a number or a range. A single number keeps values less than one unit
+    of it away (AC-H2), so a float showing 86.7 still matches a typed 87 and a typed
+    0.87 keeps 0.865 but not 0.37.
     """
     if not text.strip():
         return None
@@ -158,7 +230,9 @@ def parse_filter(text: str) -> tuple[float, float] | None:
         lo, hi = float(parse_number(m.group(1))), float(parse_number(m.group(2)))
         return (min(lo, hi), max(lo, hi))
     n = float(parse_number(text))
-    return (n - FLOAT_TOLERANCE, n + FLOAT_TOLERANCE)
+    u = unit_of(text)
+    # One unit either side, open ends: the next representable float inside the bound.
+    return (math.nextafter(n - u, math.inf), math.nextafter(n + u, -math.inf))
 
 
 def in_filter(value: float | int, keep: tuple[float, float] | None) -> bool:

@@ -330,6 +330,9 @@ class FakeNgServer:
                 ok = now == needle
             elif ct == 1:
                 ok = abs(struct.unpack(fmt, needle)[0] - v) < 1
+            elif ct in (6, 8):
+                by = struct.unpack(fmt, needle)[0]
+                ok = (v - o if ct == 6 else o - v) == by
             else:
                 ok = {5: v > o, 7: v < o, 9: v != o, 10: v == o}[ct]
             if ok:
@@ -519,6 +522,22 @@ def test_unknown_value_then_went_down_on_console():
     cl.close()
 
 
+def test_unknown_then_went_down_by_on_console():
+    """AC-H1: Went down by / up by run on the console (IncreasedBy 6, DecreasedBy 8)."""
+    server = FakeNgServer(snapshot=True)
+    cl = Ps5DebugNgClient.connect("127.0.0.1", server.port, timeout=3)
+    regions = [m for m in cl.maps(PID) if m.writable]
+    cl.scan_start(PID, regions, ValueType.FLOAT, Compare.UNKNOWN, None)
+    before = struct.unpack("<f", server.fake.read(PID, BAR_ADDR, 4))[0]
+    server.fake.poke(PID, BAR_ADDR, struct.pack("<f", before - 15))
+    assert cl.scan_next(Compare.DECREASED_BY, (15, 1.0)) == 1
+    server.fake.poke(PID, BAR_ADDR, struct.pack("<f", before - 5))
+    assert cl.scan_next(Compare.INCREASED_BY, (10, 1.0)) == 1
+    assert cl.scan_results(5)[0].address == BAR_ADDR
+    assert server.scan_compares[-2:] == [8, 6]
+    cl.close()
+
+
 def test_unknown_then_between_on_console():
     server = FakeNgServer(snapshot=True)
     cl = Ps5DebugNgClient.connect("127.0.0.1", server.port, timeout=3)
@@ -617,8 +636,8 @@ def test_float_search_matches_rounded_number_on_console(monkeypatch):
     server.fake.poke(PID, BAR_ADDR, struct.pack("<f", 79.6))
     assert cl.scan_next(Compare.EXACT, 80) == 1
     assert cl.scan_results(5)[0].address == BAR_ADDR
-    server.fake.poke(PID, BAR_ADDR, struct.pack("<f", 80.7))
-    assert cl.scan_next(Compare.EXACT, 80) == 0, "keeps the app's +-0.5 rule"
+    server.fake.poke(PID, BAR_ADDR, struct.pack("<f", 81.2))
+    assert cl.scan_next(Compare.EXACT, 80) == 0, "keeps the app's one-unit rule"
     assert set(server.scan_compares) == {1}
     cl.close()
 

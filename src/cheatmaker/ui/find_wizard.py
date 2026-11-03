@@ -27,7 +27,17 @@ from cheatmaker.core import pointers as ptr
 from cheatmaker.core.pointers import Chain
 from cheatmaker.core.scanner import MAX_SHOW, Match
 from cheatmaker.core.templates import TEMPLATES, make_cheat
-from cheatmaker.core.values import Compare, ValueType, in_filter, parse_filter, parse_number
+from cheatmaker.core.values import (
+    SHOWN,
+    Compare,
+    Scale,
+    ValueType,
+    in_filter,
+    make_scale,
+    parse_amount,
+    parse_filter,
+    parse_number,
+)
 from cheatmaker.errors import ReadFailed
 from cheatmaker.ui import hints
 from cheatmaker.ui.controller import Controller
@@ -37,6 +47,13 @@ from cheatmaker.ui.tasks import _Signals
 log = logging.getLogger(__name__)
 
 LIVE_MS = 500
+SCALES = [  # (label, make_scale kind) for "Game stores it as" (AC-H3)
+    ("the number shown", "shown"),
+    ("a fraction (0 to 1) of max", "fraction"),
+    ("x10", "x10"),
+    ("x100", "x100"),
+    ("x1000", "x1000"),
+]
 
 
 def eta_text(fraction: float, elapsed: float) -> str:
@@ -85,6 +102,15 @@ class FindWizard(QWidget):
         self.down_btn = QPushButton("Went down")
         self.changed_btn = QPushButton("Changed")
         self.same_btn = QPushButton("Same")
+        self.by_amount = QLineEdit()
+        self.by_amount.setPlaceholderText("How much, e.g. 15")
+        self.by_amount.setToolTip("If you know how much the value changed (took 15 damage)")
+        self.up_by_btn = QPushButton("Went up by")
+        self.down_by_btn = QPushButton("Went down by")
+        self.still_btn = QPushButton("Stand still")
+        self.still_btn.setToolTip(
+            "Runs Same 5 times, 2 seconds apart, to drop values that change on their own"
+        )
         self.progress = QProgressBar()
         self.progress.setRange(0, 100)
         self.cancel_btn = QPushButton("Cancel")
@@ -96,7 +122,9 @@ class FindWizard(QWidget):
         self.vtype.addItem("Pick for me", None)
         for vt in ValueType:
             self.vtype.addItem(vt.label, vt)
-        adv = QHBoxLayout(self.advanced)
+        adv_box = QVBoxLayout(self.advanced)
+        adv = QHBoxLayout()
+        adv_box.addLayout(adv)
         adv.addWidget(QLabel("Number type:"))
         adv.addWidget(self.vtype)
         self.range_lo = QLineEdit()
@@ -107,6 +135,22 @@ class FindWizard(QWidget):
         adv.addWidget(self.range_lo)
         adv.addWidget(QLabel("and"))
         adv.addWidget(self.range_hi)
+        self.scale = QComboBox()
+        for label, kind in SCALES:
+            self.scale.addItem(label, kind)
+        self.scale_max = QLineEdit("100")
+        self.scale_max.setToolTip("The most the value can be, e.g. 100 for a health bar")
+        self.scale_max.setEnabled(False)
+        self.scale.currentIndexChanged.connect(
+            lambda _i: self.scale_max.setEnabled(self.scale.currentData() == "fraction")
+        )
+        scale_row = QHBoxLayout()
+        adv_box.addLayout(scale_row)
+        scale_row.addWidget(QLabel("Game stores it as:"))
+        scale_row.addWidget(self.scale)
+        scale_row.addWidget(QLabel("max"))
+        scale_row.addWidget(self.scale_max)
+        scale_row.addStretch(1)
         self.advanced.toggled.connect(lambda _on: self._fill_table())
 
         self.add_addr = QLineEdit()
@@ -149,6 +193,12 @@ class FindWizard(QWidget):
         cmp_row.addWidget(self.show_n)
         for w in (self.up_btn, self.down_btn, self.changed_btn, self.same_btn):
             cmp_row.addWidget(w)
+        by_row = QHBoxLayout()
+        by_row.addWidget(QLabel("Know how much it changed?"))
+        for w in (self.by_amount, self.up_by_btn, self.down_by_btn):
+            by_row.addWidget(w)
+        by_row.addStretch(1)
+        by_row.addWidget(self.still_btn)
         prog = QHBoxLayout()
         prog.addWidget(self.progress, 1)
         prog.addWidget(self.cancel_btn)
@@ -163,6 +213,7 @@ class FindWizard(QWidget):
         lay.addWidget(self.hint)
         lay.addLayout(top)
         lay.addLayout(cmp_row)
+        lay.addLayout(by_row)
         lay.addLayout(prog)
         lay.addLayout(add_row)
         filt = QHBoxLayout()
@@ -182,6 +233,9 @@ class FindWizard(QWidget):
         self.down_btn.clicked.connect(lambda: self.do_compare(Compare.DECREASED))
         self.changed_btn.clicked.connect(lambda: self.do_compare(Compare.CHANGED))
         self.same_btn.clicked.connect(lambda: self.do_compare(Compare.UNCHANGED))
+        self.up_by_btn.clicked.connect(lambda: self.do_compare_by(Compare.INCREASED_BY))
+        self.down_by_btn.clicked.connect(lambda: self.do_compare_by(Compare.DECREASED_BY))
+        self.still_btn.clicked.connect(self.do_stand_still)
         self.cancel_btn.clicked.connect(self.do_cancel)
         self.set_btn.clicked.connect(self.do_set)
         self.freeze_btn.clicked.connect(self.do_freeze)
@@ -215,7 +269,15 @@ class FindWizard(QWidget):
         self.search_btn.setText("Search again" if active else "Search")
         self.unknown_btn.setEnabled(ready and not active)
         self.new_btn.setEnabled(ready and active)
-        for b in (self.up_btn, self.down_btn, self.changed_btn, self.same_btn):
+        for b in (
+            self.up_btn,
+            self.down_btn,
+            self.changed_btn,
+            self.same_btn,
+            self.up_by_btn,
+            self.down_by_btn,
+            self.still_btn,
+        ):
             b.setEnabled(ready and active)
         self.cancel_btn.setEnabled(busy)
         sel = ready and self.selected() is not None and self.selected().address != 0
@@ -280,17 +342,27 @@ class FindWizard(QWidget):
     # -- actions --------------------------------------------------------------
     def do_search(self) -> None:
         try:
-            value = parse_number(self.number.text())
+            value, unit = parse_amount(self.number.text())
+            scale = self._scale()
         except ValueError as exc:
             self.ctl.fail(exc, "scan")
             return
         sc = self.ctl.scanner
         if sc.active:
-            self._run_scan(lambda p, c: sc.next_scan(Compare.EXACT, value, p, c))
+            self._run_scan(lambda p, c: sc.next_scan(Compare.EXACT, value, p, c, unit=unit))
         else:
             self.unknown_mode = False
             vt = self.vtype.currentData() if self.advanced.isChecked() else None
-            self._run_scan(lambda p, c: sc.first_scan(value, vt, p, c))
+            self._run_scan(lambda p, c: sc.first_scan(value, vt, p, c, unit=unit, scale=scale))
+
+    def _scale(self) -> Scale:
+        """Advanced > "Game stores it as" (AC-H3). Raises ValueError."""
+        if not self.advanced.isChecked():
+            return SHOWN
+        kind = self.scale.currentData()
+        if kind != "fraction":
+            return make_scale(kind)
+        return make_scale(kind, parse_number(self.scale_max.text() or "100"))
 
     def _range(self) -> tuple[float, float] | None:
         """The optional "between low and high" from Advanced. Raises ValueError."""
@@ -318,6 +390,23 @@ class FindWizard(QWidget):
 
     def do_compare(self, cmp: Compare) -> None:
         self._run_scan(lambda p, c: self.ctl.scanner.next_scan(cmp, None, p, c))
+
+    def do_compare_by(self, cmp: Compare) -> None:
+        """Went up by / Went down by the amount typed (AC-H1)."""
+        try:
+            amount, unit = parse_amount(self.by_amount.text())
+            if amount <= 0:
+                raise ValueError("Type how much it changed by, as a number more than 0.")
+        except ValueError as exc:
+            self.ctl.fail(exc, "scan")
+            return
+        sc = self.ctl.scanner
+        self._run_scan(lambda p, c: sc.next_scan(cmp, amount, p, c, unit=unit))
+
+    def do_stand_still(self) -> None:
+        """AC-H4: Same, a few times, while the player leaves the controller alone."""
+        self.hint.setText(hints.FIND_STILL)
+        self._run_scan(lambda p, c: self.ctl.scanner.stand_still(progress=p, cancel=c))
 
     def do_cancel(self) -> None:
         if self._cancel is not None:

@@ -129,3 +129,115 @@ def test_show_limit_is_player_set(session, fake):
     assert len(ms) == sc.count and HEALTH_ADDR in [m.address for m in ms]
     reads = len(fake.reads) if hasattr(fake, "reads") else None
     assert reads is None or reads < sc.count, "nearby matches share one read"
+
+
+# -- AC-H1 to AC-H4: hard values ---------------------------------------------------
+def test_went_down_by_amount_whole_numbers(session, fake):  # AC-H1
+    sc = Scanner(session)
+    assert sc.first_scan(100, ValueType.INT32) == 2  # health and a decoy
+    fake.poke(PID, HEALTH_ADDR, struct.pack("<i", 85))
+    assert sc.next_scan(Compare.DECREASED_BY, 15) == 1
+    fake.poke(PID, HEALTH_ADDR, struct.pack("<i", 95))
+    assert sc.next_scan(Compare.INCREASED_BY, 5) == 0, "went up by 10, not 5"
+    assert sc.history[-2:] == ["decreased by 15", "increased by 5"]
+
+
+def test_went_down_by_on_a_float_uses_the_tolerance(session, fake):  # AC-H1 + AC-H2
+    sc = Scanner(session)
+    sc.first_scan(None)
+    fake.poke(PID, BAR_ADDR, struct.pack("<f", 87.4 - 14.6))  # shown as "-15"
+    assert sc.next_scan(Compare.DECREASED_BY, 15) == 1
+    assert sc.matches()[0].address == BAR_ADDR
+    fake.poke(PID, BAR_ADDR, struct.pack("<f", 72.8 - 1.5))
+    assert sc.next_scan(Compare.DECREASED_BY, 1.0, unit=0.1) == 0, "1.5 is not 1.0 +- 0.1"
+
+
+@pytest.mark.parametrize("amount", [0, -3, None])
+def test_changed_by_needs_a_positive_amount(session, amount):
+    sc = Scanner(session)
+    sc.first_scan(100)
+    with pytest.raises(ValueError, match="changed by"):
+        sc.next_scan(Compare.INCREASED_BY, amount)
+
+
+def test_typed_decimals_narrow_the_window(session, fake):  # AC-H2
+    sc = Scanner(session)
+    assert sc.first_scan(87.4, unit=0.1) >= 1 and sc.vtype is ValueType.FLOAT
+    assert BAR_ADDR in [m.address for m in sc.matches(50)]
+    fake.poke(PID, BAR_ADDR, struct.pack("<f", 86.95))
+    assert sc.next_scan(Compare.EXACT, 87.0, unit=0.1) == 1
+    fake.poke(PID, BAR_ADDR, struct.pack("<f", 86.7))
+    assert sc.next_scan(Compare.EXACT, 87.0, unit=0.1) == 0, "86.7 is 0.3 away from 87.0"
+
+
+def test_whole_number_float_search_keeps_one_unit_rule(session, fake):  # AC-H2
+    sc = Scanner(session)
+    sc.first_scan(87, ValueType.FLOAT)
+    fake.poke(PID, BAR_ADDR, struct.pack("<f", 79.1))
+    assert sc.next_scan(Compare.EXACT, 80) == 1, "79.1 shown as 80 (or 79): kept"
+
+
+def test_fraction_scale_finds_a_zero_to_one_bar(session, fake):  # AC-H3
+    from cheatmaker.core.values import make_scale
+
+    fake.poke(PID, BAR_ADDR, struct.pack("<f", 0.874))  # health 87 of 100, stored 0-1
+    sc = Scanner(session)
+    assert sc.first_scan(87, scale=make_scale("fraction", 100)) == 1
+    assert sc.vtype is ValueType.FLOAT and sc.history == ["87 (a fraction of 100)"]
+    fake.poke(PID, BAR_ADDR, struct.pack("<f", 0.62))
+    assert sc.next_scan(Compare.EXACT, 62) == 1
+    fake.poke(PID, BAR_ADDR, struct.pack("<f", 0.5))
+    assert sc.next_scan(Compare.DECREASED_BY, 12) == 1
+    assert sc.matches()[0].address == BAR_ADDR
+    sc.reset()
+    assert sc.scale.factor == 1, "Start over forgets the scale"
+
+
+def test_x10_scale_on_whole_numbers(session, fake):  # AC-H3
+    from cheatmaker.core.values import make_scale
+
+    fake.poke(PID, GOLD_ADDR, struct.pack("<i", 24_503))  # shown 2,450, stored x10
+    sc = Scanner(session)
+    assert sc.first_scan(2450, scale=make_scale("x10")) >= 1 and sc.vtype is ValueType.INT32
+    assert GOLD_ADDR in [m.address for m in sc.matches(50)]
+
+
+def test_make_scale_rejects_bad_input():
+    from cheatmaker.core.values import make_scale
+
+    with pytest.raises(ValueError):
+        make_scale("fraction", 0)
+    with pytest.raises(ValueError):
+        make_scale("x7")
+
+
+def test_stand_still_drops_what_moves_and_stops_early(session, fake):  # AC-H4
+    sc = Scanner(session)
+    start = sc.first_scan(None)
+    ticks = iter(range(1, 100))
+    naps = []
+
+    def sleep(s):
+        naps.append(s)
+        fake.poke(PID, GOLD_ADDR, struct.pack("<f", float(next(ticks))))  # a timer ticking
+
+    seen = []
+    left = sc.stand_still(progress=seen.append, sleep=sleep)
+    assert left < start
+    assert GOLD_ADDR not in [m.address for m in sc.matches(500)]
+    assert len(naps) < 5, "stopped once two scans in a row dropped nothing"
+    assert seen[-1] == 1.0 and set(naps) == {2.0}
+
+
+def test_stand_still_honours_cancel(session):
+    sc = Scanner(session)
+    sc.first_scan(None)
+    cancel = threading.Event()
+    cancel.set()
+    before = sc.count
+    assert sc.stand_still(cancel=cancel, sleep=lambda _s: None) == before
+
+
+def test_stand_still_needs_a_search(session):
+    with pytest.raises(ValueError):
+        Scanner(session).stand_still(sleep=lambda _s: None)

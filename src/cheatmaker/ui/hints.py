@@ -5,6 +5,7 @@ NO_GAME = "Start a game on the PS5, then press Refresh."
 FIND_START = "Type a number you see in the game (like your gold), then press Search."
 FIND_UNKNOWN = "Now make the value change in the game, then press Went up, Went down or Same."
 FIND_NARROW = "Change the number in the game (spend gold, take damage), then type the new number."
+FIND_STILL = "Don't touch the controller while this runs."
 FIND_NONE = "Nothing found. Check the number and search again, or try Advanced > type."
 FIND_FEW = (
     "Found it! Pick a row, then make a cheat, set it, or freeze it. If the game puts "

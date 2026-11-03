@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import logging
+import math
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
 from cheatmaker.console.client import ProgressFn
 from cheatmaker.core.session import Session
-from cheatmaker.core.values import Compare, ValueType, guess_types
+from cheatmaker.core.values import SHOWN, Compare, Scale, ValueType, guess_types
 
 log = logging.getLogger(__name__)
 LOG_MATCHES = 50  # match lists this short are written to the log
@@ -17,6 +19,21 @@ LOG_MATCHES = 50  # match lists this short are written to the log
 FEW_MATCHES = 10  # AC-3.4 default; the player can change it (show_limit)
 MAX_SHOW = 500
 READ_SPAN = 0x1000  # matches this close together are read in one request
+STILL_ROUNDS = 5  # AC-H4 "Stand still"
+STILL_INTERVAL_S = 2.0
+
+
+def default_unit(value: float | int) -> float:
+    """Unit for a number given without its typed text: whole numbers 1, else from repr."""
+    if isinstance(value, int) or float(value).is_integer():
+        return 1.0
+    decimals = len(repr(float(value)).split(".", 1)[1])
+    return 10.0**-decimals
+
+
+def window(value: float | int, unit: float) -> tuple[float, float]:
+    """Values less than ``unit`` away from ``value`` (open ends), as an inclusive range."""
+    return (math.nextafter(value - unit, math.inf), math.nextafter(value + unit, -math.inf))
 
 
 @dataclass(frozen=True)
@@ -33,6 +50,7 @@ class Scanner:
         self.count: int | None = None
         self.history: list[str] = []
         self.show_limit = FEW_MATCHES  # list the matches once this few are left
+        self.scale: Scale = SHOWN  # AC-H3, kept until Start over
         session.on_game_changed.append(lambda _g: self.reset())  # AC-2.3
         session.on_search_taken.append(self._taken)
         self.on_lost: list[Callable[[], None]] = []  # the search was ended by another
@@ -44,6 +62,7 @@ class Scanner:
             return
         log.info("action=scan_lost count=%s: the console's search was used for another", self.count)
         self.vtype, self.count, self.history = None, None, []
+        self.scale = SHOWN
         for cb in list(self.on_lost):
             cb()
 
@@ -62,6 +81,7 @@ class Scanner:
             except Exception:  # dropping a dead session must not raise
                 log.debug("scan_cancel failed during reset", exc_info=True)
         self.vtype, self.count, self.history = None, None, []
+        self.scale = SHOWN
 
     def first_scan(
         self,
@@ -70,15 +90,50 @@ class Scanner:
         progress: ProgressFn | None = None,
         cancel: threading.Event | None = None,
         value_range: tuple[float, float] | None = None,
+        unit: float | None = None,
+        scale: Scale = SHOWN,
     ) -> int:
         """Exact search when ``value`` is given, otherwise "Unknown value" (AC-3.3).
 
         ``value_range`` (unknown only): keep just values from low to high, e.g. health
         between 1 and 1000, which drops most of the hundreds of millions of candidates.
 
+        ``unit`` is one unit of the last digit typed (AC-H2, default: 1 for whole numbers)
+        and ``scale`` how the game stores the number (AC-H3). When either makes the match
+        window anything but "less than 1 away", the search runs as an unknown search kept
+        to that window.
+
         With no ``vtype`` the scanner tries the likely types in order and keeps the
         first that finds something (AC-3.6).
         """
+        label = "unknown" if value is None else f"{value}"
+        if scale is not SHOWN:
+            label += f" ({scale.label})"
+        if value is None and value_range is not None:
+            label = f"unknown, {value_range}"
+        if value is not None:
+            u = (unit if unit is not None else default_unit(value)) * scale.factor
+            if u != 1 or scale.decimal:
+                # A window other than "less than 1 away": unknown search, then keep the window.
+                if vtype is None:
+                    vtype = ValueType.FLOAT if scale.decimal or u < 1 else ValueType.INT32
+                value_range = window(scale.apply(value), u)
+                value = None
+        count = self._first(None if value is None else scale.apply(value), vtype, progress, cancel)
+        self.scale = scale
+        self.history = [label]
+        if value is None and value_range is not None and count:
+            return self._narrow(Compare.BETWEEN, value_range, None, cancel)
+        self._log_addresses()
+        return count
+
+    def _first(
+        self,
+        value: float | int | None,
+        vtype: ValueType | None,
+        progress: ProgressFn | None,
+        cancel: threading.Event | None,
+    ) -> int:
         client = self.session.require_client()
         game = self.session.require_game()
         regions = self.session.scannable_regions()
@@ -111,32 +166,88 @@ class Scanner:
         if progress:
             progress(1.0)
         self.count = count
-        self.history = [f"{'unknown' if value is None else value}"]
-        if value is None and value_range is not None and count:
-            return self.next_scan(Compare.BETWEEN, value_range, None, cancel)  # type: ignore[arg-type]
-        self._log_addresses()
         return count
 
     def next_scan(
         self,
         cmp: Compare,
-        value: float | int | None = None,
+        value: float | int | tuple[float, float] | None = None,
         progress: ProgressFn | None = None,
         cancel: threading.Event | None = None,
+        unit: float | None = None,
     ) -> int:
+        """Narrow down. EXACT and the "by" compares take the number the player typed
+        (``unit`` as in ``first_scan``); the search's scale is applied here."""
         if not self.active:
             raise ValueError("Start a new search first.")
         if cmp.needs_value and value is None:
-            raise ValueError("Type the number you see now.")
-        if cmp is Compare.BETWEEN:
+            raise ValueError(
+                "Type how much it changed by." if cmp.by_amount else "Type the number you see now."
+            )
+        label = cmp.value if value is None else str(value)
+        if cmp.by_amount:
+            label = f"{cmp.value} {value}"
+            if value <= 0:  # type: ignore[operator]
+                raise ValueError("Type how much it changed by, as a number more than 0.")
+            u = (unit if unit is not None else default_unit(value)) * self.scale.factor
+            value = (self.scale.apply(value), u)  # type: ignore[arg-type]
+        elif cmp is Compare.EXACT:
+            u = (unit if unit is not None else default_unit(value)) * self.scale.factor
+            if u != 1 or self.scale.decimal:
+                cmp, value = Compare.BETWEEN, window(self.scale.apply(value), u)  # type: ignore[arg-type]
+            else:
+                value = self.scale.apply(value)  # type: ignore[arg-type]
+        elif cmp is Compare.BETWEEN:
             lo, hi = value  # type: ignore[misc]
             if lo > hi:
                 raise ValueError("The first number of the range must be the smaller one.")
+        count = self._narrow(cmp, value, progress, cancel)
+        self.history.append(label)
+        return count
+
+    def _narrow(
+        self,
+        cmp: Compare,
+        value,
+        progress: ProgressFn | None,
+        cancel: threading.Event | None,
+    ) -> int:
         count = self.session.require_client().scan_next(cmp, value, progress, cancel)
         log.info("action=scan_next cmp=%s value=%s count=%d", cmp.value, value, count)
         self.count = count
         self._log_addresses()
-        self.history.append(cmp.value if value is None else str(value))
+        return count
+
+    def stand_still(
+        self,
+        rounds: int | None = None,
+        interval_s: float | None = None,
+        progress: ProgressFn | None = None,
+        cancel: threading.Event | None = None,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> int:
+        """AC-H4: "Same" scans every ``interval_s`` while the player doesn't touch the
+        controller. Stops early once two scans in a row drop nothing, or 0-1 are left."""
+        if not self.active:
+            raise ValueError("Start a new search first.")
+        rounds = STILL_ROUNDS if rounds is None else rounds
+        interval_s = STILL_INTERVAL_S if interval_s is None else interval_s
+        count = self.count or 0
+        quiet = 0
+        for i in range(rounds):
+            if cancel is not None and cancel.is_set():
+                break
+            if i:
+                sleep(interval_s)
+            before = count
+            count = self.next_scan(Compare.UNCHANGED, None, None, cancel)
+            if progress:
+                progress((i + 1) / rounds)
+            quiet = quiet + 1 if count == before else 0
+            if quiet >= 2 or count <= 1:
+                break
+        if progress:
+            progress(1.0)
         return count
 
     def _log_addresses(self) -> None:

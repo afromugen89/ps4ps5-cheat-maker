@@ -1,3 +1,4 @@
+import math
 import struct
 
 import pytest
@@ -76,12 +77,13 @@ def test_guess_types():
     ("text", "expected"),
     [
         ("", None),
-        ("100", (99.5, 100.5)),
+        ("100", (math.nextafter(99.0, math.inf), math.nextafter(101.0, -math.inf))),
+        ("0.87", (math.nextafter(0.87 - 0.01, math.inf), math.nextafter(0.87 + 0.01, -math.inf))),
         ("90-110", (90.0, 110.0)),
         ("90 to 110", (90.0, 110.0)),
         ("110-90", (90.0, 110.0)),
         ("-5 - 5", (-5.0, 5.0)),
-        ("-10", (-10.5, -9.5)),
+        ("-10", (math.nextafter(-11.0, math.inf), math.nextafter(-9.0, -math.inf))),
         ("1,000 .. 2,000", (1000.0, 2000.0)),
     ],
 )
@@ -101,3 +103,42 @@ def test_in_filter():
     assert in_filter(86.7, parse_filter("87"))  # rounded float on screen
     assert in_filter(5, None)
     assert not in_filter(float("nan"), (0.0, 1.0))
+
+
+@pytest.mark.parametrize(
+    ("text", "unit"),
+    [("87", 1.0), ("87.5", 0.1), ("0.87", 0.01), ("2,450", 1.0), ("1e3", 1.0), ("5.", 1.0)],
+)
+def test_unit_of_last_typed_digit(text, unit):  # AC-H2
+    from cheatmaker.core.values import parse_amount, unit_of
+
+    assert unit_of(text) == pytest.approx(unit)
+    assert parse_amount(text)[1] == pytest.approx(unit)
+
+
+def test_filter_uses_the_typed_unit():  # AC-H2
+    assert in_filter(0.865, parse_filter("0.87"))
+    assert not in_filter(0.37, parse_filter("0.87"))
+    assert not in_filter(88.0, parse_filter("87")), "one unit away is outside"
+
+
+def test_changed_by_compare():  # AC-H1
+    f = lambda v: struct.pack("<f", v)  # noqa: E731
+    i = lambda v: struct.pack("<i", v)  # noqa: E731
+    assert matches(ValueType.INT32, Compare.DECREASED_BY, i(85), i(100), (15, 1.0))
+    assert not matches(ValueType.INT32, Compare.DECREASED_BY, i(86), i(100), (15, 1.0))
+    assert matches(ValueType.FLOAT, Compare.INCREASED_BY, f(10.4), f(0.0), (10, 1.0))
+    assert not matches(ValueType.FLOAT, Compare.INCREASED_BY, f(-10.0), f(0.0), (10, 1.0))
+    assert not matches(ValueType.FLOAT, Compare.DECREASED_BY, f(1.0), f(float("nan")), (1, 1.0))
+    with pytest.raises(ValueError):
+        matches(ValueType.INT32, Compare.DECREASED_BY, i(1), i(2))
+    assert Compare.DECREASED_BY.needs_value and Compare.DECREASED_BY.needs_previous
+
+
+def test_scale_apply():  # AC-H3
+    from cheatmaker.core.values import SHOWN, make_scale
+
+    assert SHOWN.apply(87) == 87
+    assert make_scale("x100").apply(87) == 8700 and isinstance(make_scale("x100").apply(87), int)
+    assert make_scale("fraction", 200).apply(50) == pytest.approx(0.25)
+    assert make_scale("shown") is SHOWN

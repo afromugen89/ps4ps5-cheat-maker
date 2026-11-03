@@ -519,3 +519,44 @@ def test_update_cheats_for_new_game_version(win, fake, tmp_path):
     win.cheats.table.item(0, COL_ON).setCheckState(Qt.CheckState.Checked)
     assert fake.peek(PID, MODULE_BASE + 0x347, 10) == b"\x90" * 10
     assert 0x347 in up.load_signatures(up.signatures_path("PPSA01234", "01.010"))
+
+
+def test_went_down_by_and_stand_still(win, fake, monkeypatch):  # AC-H1, AC-H4
+    from cheatmaker.core import scanner
+
+    monkeypatch.setattr(scanner, "STILL_INTERVAL_S", 0)
+    connect(win)
+    search(win, "100")
+    assert win.find.count.text() == "2 matches"
+    assert win.find.down_by_btn.isEnabled() and win.find.still_btn.isEnabled()
+    win.find.still_btn.click()
+    assert win.find.count.text() == "2 matches"
+    fake.poke(PID, HEALTH_ADDR, struct.pack("<i", 85))
+    win.find.by_amount.setText("15")
+    win.find.down_by_btn.click()
+    assert win.find.count.text() == "1 matches"
+    assert win.find.rows[0].address == HEALTH_ADDR
+
+
+def test_went_down_by_needs_an_amount(win, monkeypatch):
+    shown = []
+    win.ctl.message.connect(shown.append)
+    connect(win)
+    search(win, "100")
+    win.find.by_amount.setText("-4")
+    win.find.down_by_btn.click()
+    assert shown and "more than 0" in shown[-1]
+    assert win.find.count.text() == "2 matches"
+
+
+def test_fraction_scale_from_advanced(win, fake):  # AC-H3
+    from tests.conftest import BAR_ADDR
+
+    fake.poke(PID, BAR_ADDR, struct.pack("<f", 0.874))
+    connect(win)
+    win.find.advanced.setChecked(True)
+    win.find.scale.setCurrentIndex(1)
+    assert win.find.scale_max.isEnabled()
+    search(win, "87")
+    assert win.find.count.text() == "1 matches"
+    assert win.find.rows[0].address == BAR_ADDR
