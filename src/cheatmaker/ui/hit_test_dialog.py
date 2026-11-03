@@ -105,7 +105,14 @@ class HitTestDialog(QDialog):
     def _stored(self, shown: float | int) -> float | int:
         stored = self.scale.apply(shown)
         if not self.vtype.is_float:
-            stored = round(stored)
+            if not float(stored).is_integer():
+                raise ValueError(
+                    "This value is a whole number in the game's memory. Pick a test value "
+                    "that is too."
+                    if self.scale.factor == 1
+                    else f"{shown:g} isn't a value this game can store. Try a rounder number."
+                )
+            stored = int(stored)
         self.vtype.encode(stored)  # raises ValueError if it doesn't fit
         return stored
 

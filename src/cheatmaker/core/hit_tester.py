@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 
 from cheatmaker.console.client import ConsoleClient
 from cheatmaker.core.values import ValueType
+from cheatmaker.errors import WriteFailed
 
 log = logging.getLogger(__name__)
 
@@ -91,7 +92,13 @@ class HitTester:
                     break
                 # Noted before the write: a write that lands but times out is put back too.
                 self._written[addr] = originals[addr]
-                self.client.write(self.pid, addr, data)
+                try:
+                    self.client.write(self.pid, addr, data)
+                except WriteFailed:
+                    # Refused: nothing landed there. (A lost link or a timeout may have
+                    # landed, so those stay noted and are put back.)
+                    del self._written[addr]
+                    raise
         except Exception:
             self.restore()
             raise

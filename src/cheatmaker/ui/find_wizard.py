@@ -422,6 +422,7 @@ class FindWizard(QWidget):
         self.scale.setCurrentIndex(next(i for i, (_l, k) in enumerate(SCALES) if k == key))
         if not self.number.text().strip():
             self.hint.setText("Type the number you see, then press Try it.")
+            self._update_buttons()
             return
         self.do_search()
 
@@ -489,6 +490,7 @@ class FindWizard(QWidget):
     def do_unknown(self) -> None:
         try:
             rng = self._range()
+            scale = self._scale()
         except ValueError as exc:
             self.ctl.fail(exc, "scan")
             return
@@ -496,7 +498,11 @@ class FindWizard(QWidget):
         self._scan_kind = Scan.FIRST_UNKNOWN
         self.guide.note_tried("unknown")
         vt = self.vtype.currentData() if self.advanced.isChecked() else None
-        self._run_scan(lambda p, c: self.ctl.scanner.first_scan(None, vt, p, c, value_range=rng))
+        if vt is None and scale.decimal:
+            vt = ValueType.FLOAT
+        self._run_scan(
+            lambda p, c: self.ctl.scanner.first_scan(None, vt, p, c, value_range=rng, scale=scale)
+        )
 
     def do_compare(self, cmp: Compare) -> None:
         self._scan_kind = Scan.COMPARE

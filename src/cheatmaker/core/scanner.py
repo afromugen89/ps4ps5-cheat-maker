@@ -8,6 +8,7 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from decimal import Decimal
 
 from cheatmaker.console.client import ProgressFn
 from cheatmaker.core.session import Session
@@ -27,8 +28,8 @@ def default_unit(value: float | int) -> float:
     """Unit for a number given without its typed text: whole numbers 1, else from repr."""
     if isinstance(value, int) or float(value).is_integer():
         return 1.0
-    decimals = len(repr(float(value)).split(".", 1)[1])
-    return 10.0**-decimals
+    exponent = Decimal(repr(float(value))).as_tuple().exponent
+    return 10.0**exponent if isinstance(exponent, int) and exponent < 0 else 1.0
 
 
 def window(value: float | int, unit: float) -> tuple[float, float]:
@@ -114,11 +115,13 @@ class Scanner:
         if value is not None:
             u = (unit if unit is not None else default_unit(value)) * scale.factor
             if u != 1 or scale.decimal:
-                # A window other than "less than 1 away": one ValueBetween search.
-                if vtype is None:
-                    vtype = ValueType.FLOAT if scale.decimal or u < 1 else ValueType.INT32
-                rng = window(scale.apply(value), u)
-                count = self._first(rng, vtype, progress, cancel, Compare.BETWEEN)
+                # A window other than "less than 1 away": one ValueBetween search per type.
+                stored = scale.apply(value)
+                types = [vtype] if vtype is not None else guess_types(stored)
+                if scale.decimal and vtype is None:
+                    types = [t for t in types if t.is_float]
+                rng = window(stored, u)
+                count = self._first(rng, None, progress, cancel, Compare.BETWEEN, types)
                 self.scale = scale
                 self.history = [label]
                 self._log_addresses()
@@ -138,6 +141,7 @@ class Scanner:
         progress: ProgressFn | None,
         cancel: threading.Event | None,
         cmp: Compare | None = None,
+        types: list[ValueType] | None = None,
     ) -> int:
         client = self.session.require_client()
         game = self.session.require_game()
@@ -145,7 +149,9 @@ class Scanner:
         self.reset()
         if cmp is None:
             cmp = Compare.UNKNOWN if value is None else Compare.EXACT
-        if vtype is not None:
+        if types:
+            candidates = types
+        elif vtype is not None:
             candidates = [vtype]
         elif value is None:
             candidates = [ValueType.FLOAT]  # health bars are almost always floats
