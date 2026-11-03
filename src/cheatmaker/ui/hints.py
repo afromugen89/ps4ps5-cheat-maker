@@ -142,3 +142,17 @@ CONFIRM_MOVED = (
     "it stopped changing it. It shows {value} now.\n\nTake a hit and watch this number. "
     "Press Yes only if it changes with your {name}."
 )
+TEST_HITS_WARNING = (
+    "This writes to the game's memory. Save your game first; a wrong address can crash it."
+)
+TEST_HITS_START = (
+    "Press Write it. Half of the candidates get the test value for a moment, then you say "
+    "whether the game showed it."
+)
+TEST_HITS_ASK = "Did the number in the game change to {value}? (Open the menu or look at the HUD.)"
+TEST_HITS_NEXT = "Values put back. Press Write it for the next question."
+TEST_HITS_FOUND = (
+    "Found it at {addr:#x}. It's in the Find list now: set it, freeze it or make a cheat."
+)
+TEST_HITS_STOPPED = "Stopped. Every value was put back."
+FIND_TEST_HITS = "Not sure which row is real? Press Test the hits."

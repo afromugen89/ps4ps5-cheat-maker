@@ -133,3 +133,27 @@ approved by Kein), steps 1-8, plus the pointer-scan cap fix from step 10. Step 9
   After the app itself restarts it can't tell its hook from one CheatRunner loaded
   (same bytes), so it leaves it in (harmless: the routine only records where the
   object is). Restart the game to clear it.
+
+## Hard values, Phase 1 and 2 (2026-11-03)
+
+Spec: `docs/spec-hard-values.md` (AC-H1 to AC-H6).
+
+- **Changed by** (`Compare.INCREASED_BY` / `DECREASED_BY`): the value passed to the client
+  is `(amount, tolerance)`, like BETWEEN's `(low, high)`, so the `ConsoleClient` contract
+  doesn't change. PC compare uses the tolerance for floats and an exact difference for whole
+  numbers; NG gets the amount only (IncreasedBy 6, DecreasedBy 8; its float rule is
+  unknown until C11a).
+- **Tolerance**: `FLOAT_TOLERANCE` is now 1.0 (strict), the same as NG FuzzyValue, instead
+  of 0.5. Typed decimals, and any scale, turn an exact search into an unknown search kept to
+  `value +- unit` (open ends) on the first scan, and into BETWEEN on later scans. Reason:
+  NG's exact float search is fixed at +-1, which for 0.87 would keep millions of values.
+- **Scale** lives in `Scanner.scale` until Start over. Fraction defaults to Decimal
+  (4 bytes); x10/x100/x1000 of a whole number default to 4-byte whole numbers.
+- **Guide** (`core/guide.py`) is pure logic; the Find view highlights one button. If the
+  player skips the first question, the guide assumes a number for a Search and a bar for
+  "I don't know the number". "Try it" runs the next way to store the value.
+- **Test the hits** (`core/hit_tester.py`): writes once (no freeze) to half A, restores the
+  original bytes after each answer. Values the game changes during the few seconds of a
+  round are restored to what they were before the round. Limit 500 matches.
+- Strategy item "pointer scan keeps the first 20k nodes" was already fixed on main
+  (`keep_nearest`), so it's not part of this work.

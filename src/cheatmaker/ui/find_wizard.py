@@ -24,6 +24,8 @@ from PySide6.QtWidgets import (
 )
 
 from cheatmaker.core import pointers as ptr
+from cheatmaker.core.guide import Action, Guide, Scan, Shows, Suggestion
+from cheatmaker.core.hit_tester import TEST_LIMIT
 from cheatmaker.core.pointers import Chain
 from cheatmaker.core.scanner import MAX_SHOW, Match
 from cheatmaker.core.templates import TEMPLATES, make_cheat
@@ -41,6 +43,7 @@ from cheatmaker.core.values import (
 from cheatmaker.errors import ReadFailed
 from cheatmaker.ui import hints
 from cheatmaker.ui.controller import Controller
+from cheatmaker.ui.hit_test_dialog import HitTestDialog
 from cheatmaker.ui.pointer_dialog import PointerDialog
 from cheatmaker.ui.tasks import _Signals
 
@@ -87,6 +90,21 @@ class FindWizard(QWidget):
 
         self.hint = QLabel(hints.FIND_START)
         self.hint.setWordWrap(True)
+        self.guide = Guide()  # AC-H5
+        self._scan_kind: Scan | None = None
+        self.suggestion: Suggestion | None = None
+        self.shows_btns = {
+            Shows.NUMBER: QPushButton("A number"),
+            Shows.BAR: QPushButton("A bar or meter"),
+            Shows.NOTHING: QPushButton("Nothing"),
+        }
+        self.try_btn = QPushButton("Try it")
+        self.try_btn.setVisible(False)
+        self.test_btn = QPushButton("Test the hits")
+        self.test_btn.setToolTip(
+            f"With 2 to {TEST_LIMIT} matches: write a test value to half of them and say "
+            "whether the game showed it, until one is left"
+        )
         self.number = QLineEdit()
         self.number.setPlaceholderText("The number you see, e.g. 2450")
         self.search_btn = QPushButton("Search")
@@ -207,9 +225,18 @@ class FindWizard(QWidget):
         for w in (self.add_type, self.add_btn, self.remove_btn, self.pointer_btn):
             add_row.addWidget(w)
         act = QHBoxLayout()
+        act.addWidget(self.test_btn)
         for w in (self.set_value, self.set_btn, self.freeze_btn, self.template, self.make_btn):
             act.addWidget(w)
+        shows_row = QHBoxLayout()
+        shows_row.addWidget(QLabel("What does the game show?"))
+        for shows, b in self.shows_btns.items():
+            shows_row.addWidget(b)
+            b.clicked.connect(lambda _c=False, s=shows: self.do_shows(s))
+        shows_row.addStretch(1)
+        shows_row.addWidget(self.try_btn)
         lay = QVBoxLayout(self)
+        lay.addLayout(shows_row)
         lay.addWidget(self.hint)
         lay.addLayout(top)
         lay.addLayout(cmp_row)
@@ -236,6 +263,8 @@ class FindWizard(QWidget):
         self.up_by_btn.clicked.connect(lambda: self.do_compare_by(Compare.INCREASED_BY))
         self.down_by_btn.clicked.connect(lambda: self.do_compare_by(Compare.DECREASED_BY))
         self.still_btn.clicked.connect(self.do_stand_still)
+        self.try_btn.clicked.connect(self.do_try_next)
+        self.test_btn.clicked.connect(self.do_test_hits)
         self.cancel_btn.clicked.connect(self.do_cancel)
         self.set_btn.clicked.connect(self.do_set)
         self.freeze_btn.clicked.connect(self.do_freeze)
@@ -280,6 +309,11 @@ class FindWizard(QWidget):
         ):
             b.setEnabled(ready and active)
         self.cancel_btn.setEnabled(busy)
+        count = self.ctl.scanner.count or 0
+        self.test_btn.setEnabled(ready and active and 2 <= count <= TEST_LIMIT)
+        self.try_btn.setEnabled(ready)
+        for b in self.shows_btns.values():
+            b.setEnabled(ready)
         sel = ready and self.selected() is not None and self.selected().address != 0
         for w in (self.set_btn, self.freeze_btn, self.make_btn):
             w.setEnabled(sel)
@@ -313,7 +347,16 @@ class FindWizard(QWidget):
         self.progress.setFormat("%p%")
         sc = self.ctl.scanner
         self.count.setText(f"{count:,} matches")
-        if count == 0:
+        kind, self._scan_kind = self._scan_kind, None
+        if self.guide.shows is None:  # the player skipped the question: guess it
+            self.guide.shows = Shows.BAR if self.unknown_mode else Shows.NUMBER
+        tip = self.guide.after_scan(kind, count) if kind is not None else None
+        if sc.few_left and count > 1:
+            self.hint.setText(f"{hints.FIND_FEW} {hints.FIND_TEST_HITS}")
+            self._suggest(tip, show_text=False)
+        elif tip is not None:
+            self._suggest(tip)
+        elif count == 0:
             self.hint.setText(hints.FIND_NONE)
         elif sc.few_left:
             self.hint.setText(hints.FIND_FEW)
@@ -321,6 +364,62 @@ class FindWizard(QWidget):
             self.hint.setText(hints.FIND_UNKNOWN if self.unknown_mode else hints.FIND_NARROW)
         self.refresh_live()
         self._update_buttons()
+
+    # -- guide (AC-H5) ----------------------------------------------------------
+    def _action_widget(self, action: Action):
+        return {
+            Action.SEARCH: self.search_btn,
+            Action.UNKNOWN: self.unknown_btn,
+            Action.TYPE_NEW: self.search_btn,
+            Action.MOVE: self.down_btn,
+            Action.STAND_STILL: self.still_btn,
+            Action.TEST_HITS: self.test_btn,
+            Action.MAKE_CHEAT: self.make_btn,
+            Action.TRY_NEXT: self.try_btn,
+            Action.START_OVER: self.try_btn,
+        }[action]
+
+    def _suggest(self, tip: Suggestion | None, show_text: bool = True) -> None:
+        """Show the guide's next step and make its button stand out."""
+        self.suggestion = tip
+        for w in {self._action_widget(a) for a in Action}:
+            w.setStyleSheet("")
+        has_try = tip is not None and tip.fallback is not None
+        self.try_btn.setVisible(has_try)
+        if has_try:
+            self.try_btn.setText(
+                "Start over and try it" if tip.action is Action.START_OVER else "Try it"
+            )
+        if tip is None:
+            return
+        if show_text:
+            self.hint.setText(tip.text)
+        if tip.action is not Action.START_OVER or has_try:
+            self._action_widget(tip.action).setStyleSheet("font-weight: bold")
+
+    def do_shows(self, shows: Shows) -> None:
+        self._suggest(self.guide.start(shows))
+        (self.number if shows is Shows.NUMBER else self.unknown_btn).setFocus()
+
+    def do_try_next(self) -> None:
+        """Run the guide's next way of storing the value (fraction, x10, ..., unknown)."""
+        tip = self.suggestion
+        if tip is None or tip.fallback is None:
+            return
+        key = tip.fallback
+        if self.ctl.scanner.active:
+            self.ctl.scanner.reset()
+        self.advanced.setChecked(key != "shown")
+        if key == "unknown":
+            self.guide.note_tried(key)
+            self.do_unknown()
+            return
+        self.scale.setCurrentIndex(next(i for i, (_l, k) in enumerate(SCALES) if k == key))
+        self.vtype.setCurrentIndex(0)  # Pick for me
+        if not self.number.text().strip():
+            self.hint.setText("Type the number you see, then press Try it.")
+            return
+        self.do_search()
 
     def _scan_failed(self, exc: BaseException) -> None:
         self._cancel = None
@@ -349,9 +448,14 @@ class FindWizard(QWidget):
             return
         sc = self.ctl.scanner
         if sc.active:
+            self._scan_kind = Scan.NEXT_EXACT
             self._run_scan(lambda p, c: sc.next_scan(Compare.EXACT, value, p, c, unit=unit))
         else:
             self.unknown_mode = False
+            self._scan_kind = Scan.FIRST_EXACT
+            self.guide.note_tried(
+                self.scale.currentData() if self.advanced.isChecked() else "shown"
+            )
             vt = self.vtype.currentData() if self.advanced.isChecked() else None
             self._run_scan(lambda p, c: sc.first_scan(value, vt, p, c, unit=unit, scale=scale))
 
@@ -385,10 +489,13 @@ class FindWizard(QWidget):
             self.ctl.fail(exc, "scan")
             return
         self.unknown_mode = True
+        self._scan_kind = Scan.FIRST_UNKNOWN
+        self.guide.note_tried("unknown")
         vt = self.vtype.currentData() if self.advanced.isChecked() else None
         self._run_scan(lambda p, c: self.ctl.scanner.first_scan(None, vt, p, c, value_range=rng))
 
     def do_compare(self, cmp: Compare) -> None:
+        self._scan_kind = Scan.COMPARE
         self._run_scan(lambda p, c: self.ctl.scanner.next_scan(cmp, None, p, c))
 
     def do_compare_by(self, cmp: Compare) -> None:
@@ -401,11 +508,13 @@ class FindWizard(QWidget):
             self.ctl.fail(exc, "scan")
             return
         sc = self.ctl.scanner
+        self._scan_kind = Scan.COMPARE
         self._run_scan(lambda p, c: sc.next_scan(cmp, amount, p, c, unit=unit))
 
     def do_stand_still(self) -> None:
         """AC-H4: Same, a few times, while the player leaves the controller alone."""
         self.hint.setText(hints.FIND_STILL)
+        self._scan_kind = Scan.STAND_STILL
         self._run_scan(lambda p, c: self.ctl.scanner.stand_still(progress=p, cancel=c))
 
     def do_cancel(self) -> None:
@@ -418,6 +527,8 @@ class FindWizard(QWidget):
         except Exception as exc:
             self.ctl.fail(exc, "scan")
         self.unknown_mode = False
+        self.guide.new_value()
+        self._suggest(None)
         self.rows = []
         self.count.setText("")
         self.number.clear()
@@ -590,6 +701,29 @@ class FindWizard(QWidget):
         self.add_addr.clear()
         self.refresh_live()
         self.table.selectRow(next(i for i, m in enumerate(self.rows) if m.address == addr))
+
+    def do_test_hits(self) -> None:
+        """AC-H6: narrow the current matches to the real one by asking the player."""
+        sc = self.ctl.scanner
+        if not sc.active or sc.vtype is None:
+            return
+        try:
+            addrs = [h.address for h in self.ctl.session.require_client().scan_results(TEST_LIMIT)]
+            dlg = HitTestDialog(self.ctl, addrs, sc.vtype, self.use_found, self)
+        except Exception as exc:
+            self.ctl.fail(exc, "test hits")
+            return
+        self.hit_dialog = dlg
+        dlg.exec()
+
+    def use_found(self, addr: int, vt: ValueType) -> None:
+        """The winner of Test the hits goes in the list like a typed-in address."""
+        log.info("action=test_hits_use addr=%#x type=%s", addr, vt.name)
+        self.manual[addr] = vt
+        self.refresh_live()
+        rows = [i for i, m in enumerate(self.rows) if m.address == addr]
+        if rows:
+            self.table.selectRow(rows[-1])
 
     def do_pointer_scan(self) -> None:
         i = self._selected_row()

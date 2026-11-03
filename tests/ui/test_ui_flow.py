@@ -10,6 +10,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QMessageBox
 
 from cheatmaker.console.uploader import Uploader
+from cheatmaker.core.guide import Action, Shows
 from cheatmaker.settings import Settings
 from cheatmaker.ui import hints, messages
 from cheatmaker.ui.cheats_view import COL_KEEPS, COL_NAME, COL_ON, COL_VALUE
@@ -102,7 +103,7 @@ def test_find_set_freeze_make_cheat(win, fake):  # AC-3, AC-4, AC-5
     connect(win)
     search(win, "100")
     assert win.find.count.text() == "2 matches"
-    assert win.find.hint.text() == hints.FIND_FEW and win.find.table.rowCount() == 2
+    assert win.find.hint.text().startswith(hints.FIND_FEW) and win.find.table.rowCount() == 2
     fake.poke(PID, HEALTH_ADDR, struct.pack("<i", 95))
     search(win, "95")
     assert win.find.count.text() == "1 matches" and win.find.table.rowCount() == 1
@@ -560,3 +561,64 @@ def test_fraction_scale_from_advanced(win, fake):  # AC-H3
     search(win, "87")
     assert win.find.count.text() == "1 matches"
     assert win.find.rows[0].address == BAR_ADDR
+
+
+def test_guide_suggests_and_tries_the_next_way(win, fake):  # AC-H5
+    from tests.conftest import BAR_ADDR
+
+    fake.poke(PID, BAR_ADDR, struct.pack("<f", 0.874))  # 87 of 100, stored as 0-1
+    connect(win)
+    f = win.find
+    f.shows_btns[Shows.NUMBER].click()
+    assert f.suggestion.action is Action.SEARCH
+    assert "font-weight: bold" in f.search_btn.styleSheet()
+    search(win, "87")
+    assert f.count.text() == "0 matches"
+    assert f.suggestion.action is Action.TRY_NEXT and f.suggestion.fallback == "fraction"
+    assert f.try_btn.isVisible() or not f.isVisible()
+    f.try_btn.click()
+    assert f.count.text() == "1 matches" and f.rows[0].address == BAR_ADDR
+    assert f.suggestion.action is Action.MAKE_CHEAT
+
+
+def test_test_the_hits_finds_the_real_one(win, fake, monkeypatch):  # AC-H6
+    from cheatmaker.ui.hit_test_dialog import HitTestDialog
+
+    connect(win)
+    search(win, "100")  # health and a decoy copy
+    f = win.find
+    assert f.test_btn.isEnabled()
+    seen = {}
+
+    def play(dlg):
+        seen["warned"] = dlg.warning.isVisibleTo(dlg)
+        assert dlg.value.text() == "111"
+        while not dlg.tester.done:
+            dlg.write_btn.click()
+            half = dlg.tester.testing if dlg.tester.waiting else []
+            assert "change to 111" in dlg.hint.text()
+            (dlg.yes_btn if HEALTH_ADDR in half else dlg.no_btn).click()
+        assert i32(fake, HEALTH_ADDR) == 100, "put back"
+        return 0
+
+    monkeypatch.setattr(HitTestDialog, "exec", play)
+    f.test_btn.click()
+    assert seen["warned"] and win.ctl.hit_test_warned
+    assert f.selected() is not None and f.selected().address == HEALTH_ADDR
+
+
+def test_test_the_hits_stop_puts_values_back(win, fake, monkeypatch):
+    from cheatmaker.ui.hit_test_dialog import HitTestDialog
+
+    connect(win)
+    search(win, "100")
+
+    def stop(dlg):
+        dlg.write_btn.click()
+        assert any(i32(fake, a) == 111 for a in dlg.tester.testing)
+        dlg.close_btn.click()
+        return 0
+
+    monkeypatch.setattr(HitTestDialog, "exec", stop)
+    win.find.test_btn.click()
+    assert i32(fake, HEALTH_ADDR) == 100
