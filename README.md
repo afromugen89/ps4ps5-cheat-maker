@@ -4,6 +4,8 @@ A Windows PC app that helps you make cheats for offline, single-player games on 
 jailbroken PS5 (PS5 games and PS4 games running on the PS5), test them live, and
 save them as `.json` / `.shn` files that [CheatRunner](https://github.com/notmaj0r/CheatRunner) loads.
 
+New here? Read the **[getting-started guide](docs/user-guide.md)**: a step-by-step workflow for players, with Returnal as a worked example.
+
 Licence: GPL-3.0 (see `LICENSE`).
 
 ## What you need
