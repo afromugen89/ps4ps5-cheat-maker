@@ -114,11 +114,15 @@ class Scanner:
         if value is not None:
             u = (unit if unit is not None else default_unit(value)) * scale.factor
             if u != 1 or scale.decimal:
-                # A window other than "less than 1 away": unknown search, then keep the window.
+                # A window other than "less than 1 away": one ValueBetween search.
                 if vtype is None:
                     vtype = ValueType.FLOAT if scale.decimal or u < 1 else ValueType.INT32
-                value_range = window(scale.apply(value), u)
-                value = None
+                rng = window(scale.apply(value), u)
+                count = self._first(rng, vtype, progress, cancel, Compare.BETWEEN)
+                self.scale = scale
+                self.history = [label]
+                self._log_addresses()
+                return count
         count = self._first(None if value is None else scale.apply(value), vtype, progress, cancel)
         self.scale = scale
         self.history = [label]
@@ -129,16 +133,18 @@ class Scanner:
 
     def _first(
         self,
-        value: float | int | None,
+        value,
         vtype: ValueType | None,
         progress: ProgressFn | None,
         cancel: threading.Event | None,
+        cmp: Compare | None = None,
     ) -> int:
         client = self.session.require_client()
         game = self.session.require_game()
         regions = self.session.scannable_regions()
         self.reset()
-        cmp = Compare.UNKNOWN if value is None else Compare.EXACT
+        if cmp is None:
+            cmp = Compare.UNKNOWN if value is None else Compare.EXACT
         if vtype is not None:
             candidates = [vtype]
         elif value is None:
@@ -190,7 +196,14 @@ class Scanner:
             if value <= 0:  # type: ignore[operator]
                 raise ValueError("Type how much it changed by, as a number more than 0.")
             u = (unit if unit is not None else default_unit(value)) * self.scale.factor
-            value = (self.scale.apply(value), u)  # type: ignore[arg-type]
+            amount = self.scale.apply(value)  # type: ignore[arg-type]
+            if self.vtype is not None and not self.vtype.is_float:
+                if not float(amount).is_integer():
+                    raise ValueError(
+                        f"{self.vtype.label} values change by whole numbers; {amount:g} isn't one."
+                    )
+                amount = int(amount)
+            value = (amount, u)
         elif cmp is Compare.EXACT:
             u = (unit if unit is not None else default_unit(value)) * self.scale.factor
             if u != 1 or self.scale.decimal:
@@ -238,7 +251,11 @@ class Scanner:
             if cancel is not None and cancel.is_set():
                 break
             if i:
-                sleep(interval_s)
+                if cancel is not None:
+                    if cancel.wait(interval_s):
+                        break
+                else:
+                    sleep(interval_s)
             before = count
             count = self.next_scan(Compare.UNCHANGED, None, None, cancel)
             if progress:

@@ -248,10 +248,12 @@ class FakeNgServer:
 
             size = lv // 2 if ct == 4 else lv  # ValueBetween sends low + high
 
+            fmt1 = {1: "<b", 3: "<h", 5: "<i", 7: "<q", 8: "<f", 9: "<d"}.get(vt, "<Q")
+
             def hit(chunk: bytes) -> bool:
                 if ct == 4:
-                    lo, hi = struct.unpack("<QQ", needle)
-                    return lo <= struct.unpack("<Q", chunk)[0] <= hi
+                    lo, hi = struct.unpack("<" + fmt1[1] * 2, needle)
+                    return lo <= struct.unpack(fmt1, chunk)[0] <= hi
                 if ct == 1:  # FuzzyValue: |scan - mem| < 1.0, float/double only
                     code = {8: "<f", 9: "<d"}[vt]
                     return abs(struct.unpack(code, needle)[0] - struct.unpack(code, chunk)[0]) < 1
@@ -712,3 +714,26 @@ def test_watch_listens_on_the_ps5s_fixed_port_by_default(server):
         assert cl.interrupt_port == 755 and cl.interrupt_bound == 0
     finally:
         cl.close()
+
+
+def test_typed_decimal_on_classic_path_uses_value_between(monkeypatch):  # review finding 2
+    """A whole number first, then a decimal with too many spans to read: re-scan on the
+    console with ValueBetween, not an error."""
+    from cheatmaker.console import ps5debug_ng
+
+    monkeypatch.setattr(ps5debug_ng, "MAX_READ_SPANS", 0)
+    server = FakeNgServer()
+    cl = Ps5DebugNgClient.connect("127.0.0.1", server.port, timeout=3)
+    regions = [m for m in cl.maps(PID) if m.writable]
+    assert BAR_ADDR in {h.address for h in _first(cl, regions, 87)}
+    server.fake.poke(PID, BAR_ADDR, struct.pack("<f", 86.52))
+    assert cl.scan_next(Compare.BETWEEN, (86.4, 86.6)) == 1
+    assert server.scan_compares[-1] == 4
+    cl.close()
+
+
+def test_first_search_window_runs_value_between_on_console(client, server):
+    regions = [m for m in client.maps(PID) if m.writable]
+    n = client.scan_start(PID, regions, ValueType.FLOAT, Compare.BETWEEN, (87.3, 87.5))
+    assert n >= 1 and BAR_ADDR in {h.address for h in client.scan_results(50)}
+    assert server.scan_compares[-1] == 4 and server.resident is None, "no snapshot needed"

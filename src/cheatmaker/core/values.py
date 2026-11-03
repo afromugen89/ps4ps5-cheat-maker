@@ -106,7 +106,7 @@ def matches(
         if target is None:
             raise ValueError("exact search needs a number")
         if vtype.is_float:
-            return abs(cur - float(target)) <= FLOAT_TOLERANCE
+            return abs(cur - float(target)) < FLOAT_TOLERANCE
         return cur == int(target)
     if cmp is Compare.BETWEEN:
         lo, hi = target  # type: ignore[misc]

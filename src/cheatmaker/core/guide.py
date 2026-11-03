@@ -59,10 +59,12 @@ class Suggestion:
 
 
 class Guide:
-    def __init__(self) -> None:
+    def __init__(self, show_limit: int = 10) -> None:
         self.shows: Shows | None = None
         self.tried: list[str] = []
         self.compares_in_row = 0
+        self.show_limit = show_limit  # the Find view's "Show up to"
+        self.last_count: int | None = None
 
     def start(self, shows: Shows) -> Suggestion:
         self.shows = shows
@@ -78,6 +80,7 @@ class Guide:
         """Start over: forget which ways of storing it were tried."""
         self.tried = []
         self.compares_in_row = 0
+        self.last_count = None
 
     def note_tried(self, key: str) -> None:
         if key in _LABEL and key not in self.tried:
@@ -91,6 +94,9 @@ class Guide:
             self.compares_in_row += 1
         else:
             self.compares_in_row = 0
+        first = scan in (Scan.FIRST_EXACT, Scan.FIRST_UNKNOWN)
+        stuck = not first and self.last_count == count  # narrowing dropped nothing
+        self.last_count = count
         if count == 0:
             return self._nothing(scan)
         if count == 1:
@@ -98,7 +104,9 @@ class Guide:
                 "Found it! Check the value in the list, then press Make a cheat.",
                 Action.MAKE_CHEAT,
             )
-        if count <= TEST_LIMIT:
+        # Writing to memory is the last resort: only when the list is short, or when
+        # narrowing down has stopped dropping anything (the rest change together).
+        if count <= TEST_LIMIT and (count <= self.show_limit or stuck):
             questions = math.ceil(math.log2(count))
             return Suggestion(
                 f"{count:,} left. Press Test the hits to find the real one in about "
@@ -128,7 +136,7 @@ class Guide:
         )
 
     def _narrow(self) -> Suggestion:
-        if self.compares_in_row >= 2:
+        if self.compares_in_row >= 2 and self.shows is not Shows.NUMBER:
             return Suggestion(
                 "Still too many. Press Stand still and leave the controller alone to drop "
                 "values that move on their own.",

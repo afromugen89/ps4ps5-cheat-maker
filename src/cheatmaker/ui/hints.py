@@ -154,5 +154,6 @@ TEST_HITS_NEXT = "Values put back. Press Write it for the next question."
 TEST_HITS_FOUND = (
     "Found it at {addr:#x}. It's in the Find list now: set it, freeze it or make a cheat."
 )
+TEST_HITS_STOPPING = "Stopping: putting the values back first..."
 TEST_HITS_STOPPED = "Stopped. Every value was put back."
 FIND_TEST_HITS = "Not sure which row is real? Press Test the hits."

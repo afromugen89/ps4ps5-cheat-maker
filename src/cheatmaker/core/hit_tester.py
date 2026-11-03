@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import math
+import threading
 from dataclasses import dataclass, field
 
 from cheatmaker.console.client import ConsoleClient
@@ -42,6 +43,7 @@ class HitTester:
     rounds: int = 0
     stopped: bool = False
     _written: dict[int, bytes] = field(default_factory=dict)
+    _cancel: threading.Event = field(default_factory=threading.Event)
 
     def __post_init__(self) -> None:
         self.candidates = sorted(set(self.candidates))
@@ -85,11 +87,17 @@ class HitTester:
         originals = self._read_all(half)
         try:
             for addr in half:
-                self.client.write(self.pid, addr, data)
+                if self._cancel.is_set():
+                    break
+                # Noted before the write: a write that lands but times out is put back too.
                 self._written[addr] = originals[addr]
+                self.client.write(self.pid, addr, data)
         except Exception:
             self.restore()
             raise
+        if self._cancel.is_set():  # Stop pressed mid-round
+            self.stop()
+            return []
         self.rounds += 1
         log.info(
             "action=test_hits round=%d wrote=%d of=%d value=%s",
@@ -105,7 +113,7 @@ class HitTester:
         None: not sure (stop, nothing found). The original values go back first."""
         if not self.waiting:
             raise ValueError("Write a test value first.")
-        half = list(self._written)
+        half = self.testing
         self.restore()
         if changed is None:
             self.stopped = True
@@ -116,14 +124,18 @@ class HitTester:
             self.candidates = [a for a in self.candidates if a not in keep]
         log.info("action=test_hits_answer changed=%s left=%d", changed, len(self.candidates))
 
+    def request_stop(self) -> None:
+        """From another thread: make a running ``write_test`` stop and put values back."""
+        self._cancel.set()
+
     def stop(self) -> None:
         """Put back what was written and end with no result."""
-        self.restore()
         self.stopped = True
+        self.restore()
 
     def restore(self) -> None:
         """Write the original bytes back. Keeps trying the rest if one write fails, then
-        raises the first error."""
+        raises the first error; the ones that failed stay noted, so it can be retried."""
         first: Exception | None = None
         for addr, data in list(self._written.items()):
             try:
@@ -132,7 +144,6 @@ class HitTester:
             except Exception as exc:  # a lost link: try the rest, report the first
                 log.warning("action=test_hits_restore_failed addr=%#x", addr)
                 first = first or exc
-        self._written.clear()
         if first is not None:
             raise first
 

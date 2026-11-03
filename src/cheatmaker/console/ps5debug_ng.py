@@ -458,10 +458,21 @@ class Ps5DebugNgClient:
         return self._turbo
 
     def _scan_slice(
-        self, pid: int, start: int, length: int, vtype: ValueType, value: float | int
+        self,
+        pid: int,
+        start: int,
+        length: int,
+        vtype: ValueType,
+        value: float | int | tuple[float, float],
     ) -> list[ScanHit]:
-        vbytes = vtype.encode(value)
-        compare = _NG_FUZZY if vtype.is_float else _NG_EXACT
+        """One console pass: exact (Fuzzy for decimals), or ValueBetween for a
+        ``(low, high)`` tuple (AC-H2: typed decimals and scaled values)."""
+        if isinstance(value, tuple):
+            vbytes = vtype.encode(value[0]) + vtype.encode(value[1])
+            compare = _NG_COMPARE[Compare.BETWEEN]
+        else:
+            vbytes = vtype.encode(value)
+            compare = _NG_FUZZY if vtype.is_float else _NG_EXACT
         hdr = struct.pack(
             "<IQIBBBI",
             pid,
@@ -488,14 +499,16 @@ class Ps5DebugNgClient:
                 raise ReadFailed(f"scan start at {start:#x}: console refused")
             self._w.send(vbytes)
             self._w.ok("scan", ReadFailed)
-            stride = 4 + vtype.size
+            stride = 4 + vtype.size  # ValueBetween hits carry one value, not two
             while (block_len := self._w.u64()) != SENTINEL_U64:
                 block = self._w.recv(block_len)
                 for off in range(0, len(block) - stride + 1, stride):
                     rel = struct.unpack_from("<I", block, off)[0]
                     hits.append(ScanHit(start + rel, block[off + 4 : off + stride]))
             self._w.ok("scan end", ReadFailed)
-        if vtype.is_float:
+        if isinstance(value, tuple):
+            hits = [h for h in hits if matches(vtype, Compare.BETWEEN, h.value, target=value)]
+        elif vtype.is_float:
             # Same rule as Fuzzy (< 1.0); re-checked on the PC so both always agree.
             hits = [h for h in hits if matches(vtype, Compare.EXACT, h.value, target=value)]
         return hits
@@ -568,11 +581,11 @@ class Ps5DebugNgClient:
         pid: int,
         ranges: list[tuple[int, int]],
         vtype: ValueType,
-        value: float | int,
+        value: float | int | tuple[float, float],
         progress: ProgressFn | None,
         cancel: threading.Event | None,
     ) -> list[ScanHit]:
-        """Exact-value turbo scan over address ranges, in slices for progress/Cancel."""
+        """Exact (or ValueBetween) turbo scan over address ranges, in slices for progress/Cancel."""
         self._auth()
         slices = [
             (s, min(SCAN_SLICE, end - s))
@@ -612,7 +625,7 @@ class Ps5DebugNgClient:
     ) -> int:
         self.scan_cancel()
         ranges = merge_ranges(regions)
-        if cmp is not Compare.EXACT or value is None:
+        if cmp not in (Compare.EXACT, Compare.BETWEEN) or value is None:
             return self._snapshot_start(pid, ranges, vtype, progress, cancel)
         hits = self._scan_ranges(pid, ranges, vtype, value, progress, cancel)
         # PROC_SCAN_GET (bulk read) timed out on PS5Debug-NG 1.3 (console test C3),
@@ -798,7 +811,7 @@ class Ps5DebugNgClient:
         spans = read_spans([h.address for h in scan.hits], scan.vtype.size)
         if len(spans) <= MAX_READ_SPANS:
             return scan.next(cmp, value, progress, cancel)
-        if cmp is not Compare.EXACT or value is None:
+        if cmp not in (Compare.EXACT, Compare.BETWEEN) or value is None:
             raise ValueError(
                 f"{len(scan.hits):,} matches is too many to compare. Type the number you "
                 "see now to narrow it down first."

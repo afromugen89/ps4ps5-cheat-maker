@@ -622,3 +622,46 @@ def test_test_the_hits_stop_puts_values_back(win, fake, monkeypatch):
     monkeypatch.setattr(HitTestDialog, "exec", stop)
     win.find.test_btn.click()
     assert i32(fake, HEALTH_ADDR) == 100
+
+
+def test_test_the_hits_asks_in_shown_units(win, fake, monkeypatch):  # review finding 3
+    from cheatmaker.ui.hit_test_dialog import HitTestDialog
+    from tests.conftest import BAR_ADDR, HEAP_BASE
+
+    copy = HEAP_BASE + 0x300
+    fake.poke(PID, BAR_ADDR, struct.pack("<f", 0.874))
+    fake.poke(PID, copy, struct.pack("<f", 0.874))
+    connect(win)
+    f = win.find
+    f.advanced.setChecked(True)
+    f.scale.setCurrentIndex(1)  # fraction of 100
+    search(win, "87")
+    assert f.count.text() == "2 matches"
+
+    def play(dlg):
+        assert float(dlg.value.text()) == pytest.approx(43.7, abs=0.01)
+        dlg.write_btn.click()
+        assert "43.7" in dlg.hint.text()
+        written = [a for a in (BAR_ADDR, copy) if a in dlg.tester.testing]
+        stored = struct.unpack("<f", fake.peek(PID, written[0], 4))[0]
+        assert stored == pytest.approx(0.437, abs=1e-4), "written in stored units"
+        dlg.yes_btn.click() if BAR_ADDR in written else dlg.no_btn.click()
+        return 0
+
+    monkeypatch.setattr(HitTestDialog, "exec", play)
+    f.test_btn.click()
+    assert f.selected().address == BAR_ADDR
+
+
+def test_start_over_after_try_it_is_a_plain_search_again(win, fake):  # review finding 6
+    from tests.conftest import BAR_ADDR
+
+    fake.poke(PID, BAR_ADDR, struct.pack("<f", 0.874))
+    connect(win)
+    f = win.find
+    f.shows_btns[Shows.NUMBER].click()
+    search(win, "87")
+    f.try_btn.click()  # fraction of 100
+    assert f.advanced.isChecked() and f.scale.currentData() == "fraction"
+    f.new_btn.click()
+    assert not f.advanced.isChecked() and f.scale.currentData() == "shown"

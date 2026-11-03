@@ -241,3 +241,35 @@ def test_stand_still_honours_cancel(session):
 def test_stand_still_needs_a_search(session):
     with pytest.raises(ValueError):
         Scanner(session).stand_still(sleep=lambda _s: None)
+
+
+def test_changed_by_on_whole_numbers_needs_a_whole_amount(session):  # review finding 5
+    sc = Scanner(session)
+    sc.first_scan(100, ValueType.INT32)
+    with pytest.raises(ValueError, match="whole numbers"):
+        sc.next_scan(Compare.DECREASED_BY, 0.5, unit=0.1)
+
+
+def test_scale_is_forgotten_when_the_search_is_lost(session):
+    from cheatmaker.core.values import make_scale
+
+    sc = Scanner(session)
+    sc.first_scan(2450, scale=make_scale("x10"))
+    sc._taken()
+    assert sc.scale.factor == 1 and not sc.active
+
+
+def test_stand_still_cancel_stops_the_wait(session):  # review finding 7
+    import time
+
+    sc = Scanner(session)
+    sc.first_scan(None)
+    cancel = threading.Event()
+
+    def sleep(_s):
+        raise AssertionError("must wait on the cancel event, not sleep")
+
+    threading.Timer(0.1, cancel.set).start()
+    t0 = time.monotonic()
+    sc.stand_still(interval_s=30, cancel=cancel, sleep=sleep)
+    assert time.monotonic() - t0 < 5

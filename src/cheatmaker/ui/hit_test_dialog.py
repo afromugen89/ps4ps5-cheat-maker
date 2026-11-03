@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
 )
 
 from cheatmaker.core.hit_tester import HitTester, suggest_value
-from cheatmaker.core.values import ValueType, parse_number
+from cheatmaker.core.values import SHOWN, Scale, ValueType, parse_number
 from cheatmaker.ui import hints
 from cheatmaker.ui.controller import Controller
 
@@ -34,10 +34,14 @@ class HitTestDialog(QDialog):
         vtype: ValueType,
         on_found: Callable[[int, ValueType], None],
         parent=None,
+        scale: Scale = SHOWN,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Test the hits")
         self.ctl, self.vtype, self.on_found = ctl, vtype, on_found
+        self.scale = scale  # test values are typed and asked about as the game shows them
+        self._busy = False  # a write or put-back is running on the console
+        self._close_pending = False
         game = ctl.session.require_game()
         self.tester = HitTester(ctl.session.require_client(), game.pid, vtype, addresses)
         self._value: float | int | None = None
@@ -85,19 +89,36 @@ class HitTestDialog(QDialog):
 
     def _prefill(self) -> None:
         try:
-            self.value.setText(_fmt(suggest_value(self.vtype, self.tester.current_value())))
+            shown = self.tester.current_value() / self.scale.factor
+            if not self.vtype.is_float and float(shown).is_integer():
+                shown = int(shown)
+            self.value.setText(_fmt(suggest_value(self._shown_type(), shown)))
         except Exception:  # a read that fails here fails again on Write it, with a message
             log.debug("couldn't read a value to suggest", exc_info=True)
 
+    def _shown_type(self) -> ValueType:
+        """Scaled whole numbers (x10) are still whole on screen only when the factor is."""
+        if self.vtype.is_float or float(self.scale.factor).is_integer():
+            return self.vtype
+        return ValueType.FLOAT
+
+    def _stored(self, shown: float | int) -> float | int:
+        stored = self.scale.apply(shown)
+        if not self.vtype.is_float:
+            stored = round(stored)
+        self.vtype.encode(stored)  # raises ValueError if it doesn't fit
+        return stored
+
     def _update(self) -> None:
         t = self.tester
-        waiting = t.waiting
+        waiting = t.waiting and not self._busy
         n = len(t.candidates)
         self.status.setText(
             "" if t.done else f"{n:,} candidates left, about {t.rounds_left} questions to go."
         )
-        self.write_btn.setEnabled(not waiting and not t.done)
-        self.value.setEnabled(not waiting and not t.done)
+        idle = not self._busy and not t.waiting and not t.done
+        self.write_btn.setEnabled(idle)
+        self.value.setEnabled(idle)
         for b in (self.yes_btn, self.no_btn, self.unsure_btn):
             b.setEnabled(waiting)
         self.close_btn.setText("Close" if t.done else "Stop")
@@ -105,28 +126,44 @@ class HitTestDialog(QDialog):
     def do_write(self) -> None:
         try:
             value = parse_number(self.value.text())
-            self.vtype.encode(value)
+            stored = self._stored(value)
         except ValueError as exc:
             self.ctl.fail(exc, "test hits")
             return
         self._value = value
-        self.write_btn.setEnabled(False)
-        self.ctl.tasks.run(lambda: self.tester.write_test(value), self._written, self._failed)
+        self._run(lambda: self.tester.write_test(stored), self._written)
+
+    def _run(self, fn, done) -> None:
+        """Console work off the UI thread; Stop/close waits for it (see reject)."""
+        self._busy = True
+        self._update()
+        self.ctl.tasks.run(fn, lambda r: self._finish(done, r), self._failed)
+
+    def _finish(self, done, result) -> None:
+        self._busy = False
+        if self._close_pending:
+            self._close_now()
+            return
+        done(result)
 
     def _written(self, _half) -> None:
-        self.hint.setText(hints.TEST_HITS_ASK.format(value=_fmt(self._value)))
+        if self.tester.done:  # stopped mid-round: values are back
+            self.hint.setText(hints.TEST_HITS_STOPPED)
+        else:
+            self.hint.setText(hints.TEST_HITS_ASK.format(value=_fmt(self._value)))
         self._update()
 
     def _failed(self, exc: BaseException) -> None:
+        self._busy = False
         self._update()
         self.ctl.fail(exc, "test hits")
+        if self._close_pending:
+            self._close_now()
 
     def do_answer(self, changed: bool | None) -> None:
-        try:
-            self.tester.answer(changed)
-        except Exception as exc:
-            self._failed(exc)
-            return
+        self._run(lambda: self.tester.answer(changed), self._answered)
+
+    def _answered(self, _r) -> None:
         t = self.tester
         if t.result is not None:
             self.hint.setText(hints.TEST_HITS_FOUND.format(addr=t.result))
@@ -140,8 +177,18 @@ class HitTestDialog(QDialog):
         self._update()
 
     def reject(self) -> None:
-        """Stop or close: put back anything still written."""
-        if not self.tester.done:
+        """Stop or close: put back anything still written. While a write runs, ask it
+        to stop and close once it has put the values back."""
+        if self._busy:
+            self._close_pending = True
+            self.tester.request_stop()
+            self.hint.setText(hints.TEST_HITS_STOPPING)
+            return
+        self._close_now()
+
+    def _close_now(self) -> None:
+        self._close_pending = False
+        if not self.tester.done or self.tester.waiting:
             try:
                 self.tester.stop()
             except Exception as exc:

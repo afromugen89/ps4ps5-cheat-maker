@@ -41,12 +41,22 @@ def test_guide_zero_after_compare_says_start_over():
 
 
 def test_guide_counts():
-    g = Guide()
+    g = Guide(show_limit=10)
     g.start(Shows.NUMBER)
     assert g.after_scan(Scan.NEXT_EXACT, 1).action is Action.MAKE_CHEAT
-    s = g.after_scan(Scan.NEXT_EXACT, 500)
-    assert s.action is Action.TEST_HITS and "about 9 questions" in s.text
+    assert g.after_scan(Scan.FIRST_EXACT, 400).action is Action.TYPE_NEW, "narrow first"
+    s = g.after_scan(Scan.NEXT_EXACT, 400)
+    assert s.action is Action.TEST_HITS and "about 9 questions" in s.text, "stuck at 400"
+    assert g.after_scan(Scan.NEXT_EXACT, 8).action is Action.TEST_HITS, "short list"
     assert g.after_scan(Scan.FIRST_EXACT, TEST_LIMIT + 1).action is Action.TYPE_NEW
+
+
+def test_guide_number_never_says_stand_still():
+    g = Guide()
+    g.start(Shows.NUMBER)
+    g.after_scan(Scan.FIRST_EXACT, 10**5)
+    g.after_scan(Scan.COMPARE, 10**4)
+    assert g.after_scan(Scan.COMPARE, 10**3).action is Action.TYPE_NEW
 
 
 def test_guide_bar_suggests_moving_then_stand_still():
@@ -129,3 +139,38 @@ def test_suggest_value():
     assert suggest_value(ValueType.FLOAT, 87.4) == pytest.approx(43.7)
     assert suggest_value(ValueType.FLOAT, 0.0) == 11.0
     assert suggest_value(ValueType.FLOAT, float("nan")) == 50.0
+
+
+def test_hit_tester_stop_during_write_restores_everything(fake, monkeypatch):
+    """Review finding 1: Stop pressed while a round is still writing."""
+    addrs = [HEAP_BASE + 0x300 + 4 * i for i in range(8)]
+    for a in addrs:
+        fake.poke(PID, a, struct.pack("<i", 100))
+    t = HitTester(fake, PID, ValueType.INT32, addrs)
+    real_write = fake.write
+    n = []
+
+    def write(pid, addr, data):
+        real_write(pid, addr, data)
+        n.append(addr)
+        if len(n) == 2:
+            t.request_stop()  # as if the UI thread pressed Stop now
+
+    monkeypatch.setattr(fake, "write", write)
+    assert t.write_test(111) == []
+    assert t.done and t.result is None and not t.waiting
+    for a in addrs:
+        assert struct.unpack("<i", fake.peek(PID, a, 4))[0] == 100
+
+
+def test_hit_tester_failed_put_back_can_be_retried(fake, monkeypatch):
+    t = HitTester(fake, PID, ValueType.INT32, [HEALTH_ADDR, GOLD_ADDR])
+    t.write_test(7)
+    real_write = fake.write
+    monkeypatch.setattr(fake, "write", lambda *a: (_ for _ in ()).throw(WriteFailed("x")))
+    with pytest.raises(WriteFailed):
+        t.answer(True)
+    assert t.waiting, "still noted for a retry"
+    monkeypatch.setattr(fake, "write", real_write)
+    t.restore()
+    assert struct.unpack("<i", fake.peek(PID, HEALTH_ADDR, 4))[0] == 100

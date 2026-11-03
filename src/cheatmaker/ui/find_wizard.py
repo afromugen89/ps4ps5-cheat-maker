@@ -90,7 +90,8 @@ class FindWizard(QWidget):
 
         self.hint = QLabel(hints.FIND_START)
         self.hint.setWordWrap(True)
-        self.guide = Guide()  # AC-H5
+        self.guide = Guide(ctl.scanner.show_limit)  # AC-H5
+        self._guide_set_advanced = False  # "Try it" changed Advanced; Start over undoes it
         self._scan_kind: Scan | None = None
         self.suggestion: Suggestion | None = None
         self.shows_btns = {
@@ -410,12 +411,15 @@ class FindWizard(QWidget):
         if self.ctl.scanner.active:
             self.ctl.scanner.reset()
         self.advanced.setChecked(key != "shown")
+        self._guide_set_advanced = key != "shown"
+        self.vtype.setCurrentIndex(0)  # Pick for me
+        self.range_lo.clear()
+        self.range_hi.clear()
         if key == "unknown":
             self.guide.note_tried(key)
             self.do_unknown()
             return
         self.scale.setCurrentIndex(next(i for i, (_l, k) in enumerate(SCALES) if k == key))
-        self.vtype.setCurrentIndex(0)  # Pick for me
         if not self.number.text().strip():
             self.hint.setText("Type the number you see, then press Try it.")
             return
@@ -529,6 +533,10 @@ class FindWizard(QWidget):
         self.unknown_mode = False
         self.guide.new_value()
         self._suggest(None)
+        if self._guide_set_advanced:  # back to the plain search the player expects
+            self.scale.setCurrentIndex(0)
+            self.advanced.setChecked(False)
+            self._guide_set_advanced = False
         self.rows = []
         self.count.setText("")
         self.number.clear()
@@ -579,6 +587,7 @@ class FindWizard(QWidget):
 
     def _set_show_limit(self, n: int) -> None:
         self.ctl.scanner.show_limit = n
+        self.guide.show_limit = n
         self.ctl.settings.show_matches = n
         try:
             self.ctl.settings.save()
@@ -709,7 +718,7 @@ class FindWizard(QWidget):
             return
         try:
             addrs = [h.address for h in self.ctl.session.require_client().scan_results(TEST_LIMIT)]
-            dlg = HitTestDialog(self.ctl, addrs, sc.vtype, self.use_found, self)
+            dlg = HitTestDialog(self.ctl, addrs, sc.vtype, self.use_found, self, sc.scale)
         except Exception as exc:
             self.ctl.fail(exc, "test hits")
             return

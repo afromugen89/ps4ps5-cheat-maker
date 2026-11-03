@@ -142,3 +142,8 @@ def test_scale_apply():  # AC-H3
     assert make_scale("x100").apply(87) == 8700 and isinstance(make_scale("x100").apply(87), int)
     assert make_scale("fraction", 200).apply(50) == pytest.approx(0.25)
     assert make_scale("shown") is SHOWN
+
+
+def test_exact_float_one_unit_away_is_out():  # review finding 4
+    assert not matches(ValueType.FLOAT, Compare.EXACT, struct.pack("<f", 88.0), target=87)
+    assert matches(ValueType.FLOAT, Compare.EXACT, struct.pack("<f", 87.99), target=87)
