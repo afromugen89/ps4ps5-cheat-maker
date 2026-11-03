@@ -113,3 +113,11 @@ What is still unverified on the console (all behind fake-PS5 tests):
   right when the hook goes in (connect, Find it next time, ticking a cheat).
 - That the game's module sits at a fixed base for PS4 (CUSA) games too, and that object
   classes (vtables) are in the module there (C10g).
+
+## C11 Finding hard values (added 2026-11-03)
+
+| # | Test | Steps | Pass when | Send back |
+|---|---|---|---|---|
+| C11a | Went up by / Went down by on the console | Find: **I don't know the number** (any game, Decimal). Take a hit you can read the size of (or spend a known amount). Type it in **How much** and press **Went down by**; then gain some and press **Went up by**. | The count drops each time and the real value is still in the list. Log `action=resident_next cmp=decreased by`. If the count goes to 0 every time, the PS5 may compare floats exactly: say so. | The `action=resident_next` lines. |
+| C11b | Typed decimals and fraction of max | Pick a value that is a bar. Advanced > **Game stores it as: a fraction (0 to 1) of max**, max 100, type the percent you see, Search. Then type a decimal you see somewhere (e.g. 1.5) with Advanced off. | Both searches finish (the first takes about as long as an unknown search) and keep fewer matches than the same number without decimals. | The `action=scan_first` and `action=scan_next` lines. |
+| C11c | Test the hits | Search a number until 2 to 500 matches are left (Returnal health or Obolites found several copies in C3). Save your game. Press **Test the hits**, Write it, answer each question. | It ends with one address; Set on that row changes the game. All other values look normal after the test (no copy left at the test value). | Copy log (`action=test_hits` lines). |

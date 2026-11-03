@@ -248,10 +248,12 @@ class FakeNgServer:
 
             size = lv // 2 if ct == 4 else lv  # ValueBetween sends low + high
 
+            fmt1 = {1: "<b", 3: "<h", 5: "<i", 7: "<q", 8: "<f", 9: "<d"}.get(vt, "<Q")
+
             def hit(chunk: bytes) -> bool:
                 if ct == 4:
-                    lo, hi = struct.unpack("<QQ", needle)
-                    return lo <= struct.unpack("<Q", chunk)[0] <= hi
+                    lo, hi = struct.unpack("<" + fmt1[1] * 2, needle)
+                    return lo <= struct.unpack(fmt1, chunk)[0] <= hi
                 if ct == 1:  # FuzzyValue: |scan - mem| < 1.0, float/double only
                     code = {8: "<f", 9: "<d"}[vt]
                     return abs(struct.unpack(code, needle)[0] - struct.unpack(code, chunk)[0]) < 1
@@ -330,6 +332,9 @@ class FakeNgServer:
                 ok = now == needle
             elif ct == 1:
                 ok = abs(struct.unpack(fmt, needle)[0] - v) < 1
+            elif ct in (6, 8):
+                by = struct.unpack(fmt, needle)[0]
+                ok = (v - o if ct == 6 else o - v) == by
             else:
                 ok = {5: v > o, 7: v < o, 9: v != o, 10: v == o}[ct]
             if ok:
@@ -519,6 +524,22 @@ def test_unknown_value_then_went_down_on_console():
     cl.close()
 
 
+def test_unknown_then_went_down_by_on_console():
+    """AC-H1: Went down by / up by run on the console (IncreasedBy 6, DecreasedBy 8)."""
+    server = FakeNgServer(snapshot=True)
+    cl = Ps5DebugNgClient.connect("127.0.0.1", server.port, timeout=3)
+    regions = [m for m in cl.maps(PID) if m.writable]
+    cl.scan_start(PID, regions, ValueType.FLOAT, Compare.UNKNOWN, None)
+    before = struct.unpack("<f", server.fake.read(PID, BAR_ADDR, 4))[0]
+    server.fake.poke(PID, BAR_ADDR, struct.pack("<f", before - 15))
+    assert cl.scan_next(Compare.DECREASED_BY, (15, 1.0)) == 1
+    server.fake.poke(PID, BAR_ADDR, struct.pack("<f", before - 5))
+    assert cl.scan_next(Compare.INCREASED_BY, (10, 1.0)) == 1
+    assert cl.scan_results(5)[0].address == BAR_ADDR
+    assert server.scan_compares[-2:] == [8, 6]
+    cl.close()
+
+
 def test_unknown_then_between_on_console():
     server = FakeNgServer(snapshot=True)
     cl = Ps5DebugNgClient.connect("127.0.0.1", server.port, timeout=3)
@@ -617,8 +638,8 @@ def test_float_search_matches_rounded_number_on_console(monkeypatch):
     server.fake.poke(PID, BAR_ADDR, struct.pack("<f", 79.6))
     assert cl.scan_next(Compare.EXACT, 80) == 1
     assert cl.scan_results(5)[0].address == BAR_ADDR
-    server.fake.poke(PID, BAR_ADDR, struct.pack("<f", 80.7))
-    assert cl.scan_next(Compare.EXACT, 80) == 0, "keeps the app's +-0.5 rule"
+    server.fake.poke(PID, BAR_ADDR, struct.pack("<f", 81.2))
+    assert cl.scan_next(Compare.EXACT, 80) == 0, "keeps the app's one-unit rule"
     assert set(server.scan_compares) == {1}
     cl.close()
 
@@ -693,3 +714,26 @@ def test_watch_listens_on_the_ps5s_fixed_port_by_default(server):
         assert cl.interrupt_port == 755 and cl.interrupt_bound == 0
     finally:
         cl.close()
+
+
+def test_typed_decimal_on_classic_path_uses_value_between(monkeypatch):  # review finding 2
+    """A whole number first, then a decimal with too many spans to read: re-scan on the
+    console with ValueBetween, not an error."""
+    from cheatmaker.console import ps5debug_ng
+
+    monkeypatch.setattr(ps5debug_ng, "MAX_READ_SPANS", 0)
+    server = FakeNgServer()
+    cl = Ps5DebugNgClient.connect("127.0.0.1", server.port, timeout=3)
+    regions = [m for m in cl.maps(PID) if m.writable]
+    assert BAR_ADDR in {h.address for h in _first(cl, regions, 87)}
+    server.fake.poke(PID, BAR_ADDR, struct.pack("<f", 86.52))
+    assert cl.scan_next(Compare.BETWEEN, (86.4, 86.6)) == 1
+    assert server.scan_compares[-1] == 4
+    cl.close()
+
+
+def test_first_search_window_runs_value_between_on_console(client, server):
+    regions = [m for m in client.maps(PID) if m.writable]
+    n = client.scan_start(PID, regions, ValueType.FLOAT, Compare.BETWEEN, (87.3, 87.5))
+    assert n >= 1 and BAR_ADDR in {h.address for h in client.scan_results(50)}
+    assert server.scan_compares[-1] == 4 and server.resident is None, "no snapshot needed"

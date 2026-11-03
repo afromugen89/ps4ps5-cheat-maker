@@ -5,6 +5,7 @@ NO_GAME = "Start a game on the PS5, then press Refresh."
 FIND_START = "Type a number you see in the game (like your gold), then press Search."
 FIND_UNKNOWN = "Now make the value change in the game, then press Went up, Went down or Same."
 FIND_NARROW = "Change the number in the game (spend gold, take damage), then type the new number."
+FIND_STILL = "Don't touch the controller while this runs."
 FIND_NONE = "Nothing found. Check the number and search again, or try Advanced > type."
 FIND_FEW = (
     "Found it! Pick a row, then make a cheat, set it, or freeze it. If the game puts "
@@ -141,3 +142,18 @@ CONFIRM_MOVED = (
     "it stopped changing it. It shows {value} now.\n\nTake a hit and watch this number. "
     "Press Yes only if it changes with your {name}."
 )
+TEST_HITS_WARNING = (
+    "This writes to the game's memory. Save your game first; a wrong address can crash it."
+)
+TEST_HITS_START = (
+    "Press Write it. Half of the candidates get the test value for a moment, then you say "
+    "whether the game showed it."
+)
+TEST_HITS_ASK = "Did the number in the game change to {value}? (Open the menu or look at the HUD.)"
+TEST_HITS_NEXT = "Values put back. Press Write it for the next question."
+TEST_HITS_FOUND = (
+    "Found it at {addr:#x}. It's in the Find list now: set it, freeze it or make a cheat."
+)
+TEST_HITS_STOPPING = "Stopping: putting the values back first..."
+TEST_HITS_STOPPED = "Stopped. Every value was put back."
+FIND_TEST_HITS = "Not sure which row is real? Press Test the hits."
