@@ -173,3 +173,42 @@ def test_settings_default_on_and_wired(qtbot, fake):
     ctl = Controller(lambda ip, port: fake, s, TaskRunner(sync=True))
     assert not ctl.scanner.scan_log.enabled and ctl.scanner.scan_log.max_lines == 7
     ctl.shutdown()
+
+
+def test_fetching_matches_for_the_file_never_fails_the_scan(session, fake, monkeypatch, caplog):
+    from cheatmaker.errors import ReadFailed
+
+    sc = Scanner(session)
+    monkeypatch.setattr(fake, "scan_results", lambda _n: (_ for _ in ()).throw(ReadFailed("x")))
+    assert sc.first_scan(100) == 2 and sc.active
+    assert scan_files(scans_dir()) == [] and "action=scan_file_fetch" in caplog.text
+
+
+def test_a_lost_link_while_fetching_still_reaches_the_ui(session, fake, monkeypatch):
+    import pytest
+
+    from cheatmaker.errors import ConnectionLost
+
+    sc = Scanner(session)
+    monkeypatch.setattr(fake, "scan_results", lambda _n: (_ for _ in ()).throw(ConnectionLost()))
+    with pytest.raises(ConnectionLost):
+        sc.first_scan(100)
+
+
+def test_close_floats_print_differently():
+    a = struct.pack("<f", 0.1)
+    b = struct.pack("<I", struct.unpack("<I", a)[0] + 1)
+    assert fmt_scan_value(ValueType.FLOAT, a) == "0.1"
+    assert fmt_scan_value(ValueType.FLOAT, b) != "0.1"
+    assert fmt_scan_value(ValueType.FLOAT, struct.pack("<f", float("nan"))) == "nan"
+
+
+def test_bad_scan_settings_fall_back(tmp_path):
+    import json
+
+    Settings.path().parent.mkdir(parents=True, exist_ok=True)
+    Settings.path().write_text(json.dumps({"scan_file_max": "5000", "save_scan_files": "no"}))
+    s = Settings.load()
+    assert s.scan_file_max == 100_000 and s.save_scan_files is True
+    Settings.path().write_text(json.dumps({"scan_file_max": -3}))
+    assert Settings.load().scan_file_max == 0

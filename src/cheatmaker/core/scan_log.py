@@ -13,6 +13,7 @@ Works the same for every game: nothing here knows about a particular title.
 from __future__ import annotations
 
 import logging
+import math
 import re
 from collections.abc import Callable, Sequence
 from datetime import datetime
@@ -50,7 +51,12 @@ def fmt_scan_value(vtype: ValueType, raw: bytes) -> str:
         return "?"
     v = vtype.decode(data)
     if vtype.is_float:
-        return format(v, ".7g" if vtype.size == 4 else ".15g")
+        # Shortest text that reads back as the same stored number.
+        for digits in range(6, 18):
+            text = format(v, f".{digits}g")
+            if math.isnan(v) or vtype.encode(float(text)) == data:
+                return text
+        return repr(v)
     return str(v)
 
 
@@ -76,7 +82,9 @@ class ScanLog:
     @property
     def limit(self) -> int:
         """How many matches to fetch for a file (0 when files are off)."""
-        return max(0, self.max_lines) if self.enabled else 0
+        if not self.enabled or not isinstance(self.max_lines, int):
+            return 0
+        return max(0, self.max_lines)
 
     def new_search(self, game: GameInfo) -> None:
         """A first scan: the next file goes into a new folder, numbered from 1."""

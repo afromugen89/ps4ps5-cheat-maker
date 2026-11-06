@@ -14,6 +14,7 @@ from cheatmaker.console.client import ProgressFn
 from cheatmaker.core.scan_log import ScanLog
 from cheatmaker.core.session import Session
 from cheatmaker.core.values import SHOWN, Compare, Scale, ValueType, guess_types
+from cheatmaker.errors import ConnectionLost
 
 log = logging.getLogger(__name__)
 LOG_MATCHES = 50  # match lists this short are written to the log
@@ -281,7 +282,17 @@ class Scanner:
         log where they are (helps console-test triage). One fetch serves both."""
         count = self.count or 0
         want = min(count, max(self.scan_log.limit, LOG_MATCHES if count <= LOG_MATCHES else 0))
-        hits = self.session.require_client().scan_results(want) if want else []
+        hits = []
+        if want:
+            started = time.monotonic()
+            try:
+                hits = self.session.require_client().scan_results(want)
+            except ConnectionLost:
+                raise  # the link is gone: the UI must hear about it now
+            except Exception as exc:  # the scan itself worked; only the file/log suffers
+                log.warning("action=scan_file_fetch reason=%s; scan kept", exc)
+                return
+            log.info("action=scan_results n=%d secs=%.2f", len(hits), time.monotonic() - started)
         if 0 < count <= LOG_MATCHES:
             log.info("action=matches addrs=%s", " ".join(f"{h.address:#x}" for h in hits))
         shown = hits[: self.scan_log.limit]

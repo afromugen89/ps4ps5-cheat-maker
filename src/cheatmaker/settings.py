@@ -46,6 +46,11 @@ class Settings:
         s = cls(**{k: v for k, v in raw.items() if k in known})
         if s.output_format not in FORMATS:
             s.output_format = "json"
+        if not isinstance(s.save_scan_files, bool):
+            s.save_scan_files = True
+        if not isinstance(s.scan_file_max, int) or isinstance(s.scan_file_max, bool):
+            s.scan_file_max = 100_000
+        s.scan_file_max = max(0, s.scan_file_max)
         return s
 
     def save(self) -> None:
