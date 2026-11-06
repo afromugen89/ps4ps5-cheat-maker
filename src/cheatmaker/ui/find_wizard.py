@@ -5,8 +5,10 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from pathlib import Path
 
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QTimer, QUrl
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QComboBox,
     QGroupBox,
@@ -111,6 +113,10 @@ class FindWizard(QWidget):
         self.search_btn = QPushButton("Search")
         self.unknown_btn = QPushButton("I don't know the number")
         self.new_btn = QPushButton("Start over")
+        self.files_btn = QPushButton("Scan files")
+        self.files_btn.setToolTip(
+            "Open the folder where every scan saves its matches (address and value)"
+        )
         self.count = QLabel("")
         self.show_n = QSpinBox()
         self.show_n.setRange(1, MAX_SHOW)
@@ -204,7 +210,7 @@ class FindWizard(QWidget):
         self.make_btn = QPushButton("Make a cheat")
 
         top = QHBoxLayout()
-        for w in (self.number, self.search_btn, self.unknown_btn, self.new_btn):
+        for w in (self.number, self.search_btn, self.unknown_btn, self.new_btn, self.files_btn):
             top.addWidget(w)
         cmp_row = QHBoxLayout()
         cmp_row.addWidget(self.count, 1)
@@ -257,6 +263,7 @@ class FindWizard(QWidget):
         self.number.returnPressed.connect(self.do_search)
         self.unknown_btn.clicked.connect(self.do_unknown)
         self.new_btn.clicked.connect(self.do_reset)
+        self.files_btn.clicked.connect(self.open_scan_files)
         self.up_btn.clicked.connect(lambda: self.do_compare(Compare.INCREASED))
         self.down_btn.clicked.connect(lambda: self.do_compare(Compare.DECREASED))
         self.changed_btn.clicked.connect(lambda: self.do_compare(Compare.CHANGED))
@@ -299,6 +306,7 @@ class FindWizard(QWidget):
         self.search_btn.setText("Search again" if active else "Search")
         self.unknown_btn.setEnabled(ready and not active)
         self.new_btn.setEnabled(ready and active)
+        self.files_btn.setVisible(self.ctl.scanner.scan_log.enabled)
         for b in (
             self.up_btn,
             self.down_btn,
@@ -348,6 +356,8 @@ class FindWizard(QWidget):
         self.progress.setFormat("%p%")
         sc = self.ctl.scanner
         self.count.setText(f"{count:,} matches")
+        last = sc.scan_log.last_file
+        self.count.setToolTip(f"Saved to {last}" if last is not None else "")
         kind, self._scan_kind = self._scan_kind, None
         if self.guide.shows is None:  # the player skipped the question: guess it
             self.guide.shows = Shows.BAR if self.unknown_mode else Shows.NUMBER
@@ -463,6 +473,20 @@ class FindWizard(QWidget):
             )
             vt = self.vtype.currentData() if self.advanced.isChecked() else None
             self._run_scan(lambda p, c: sc.first_scan(value, vt, p, c, unit=unit, scale=scale))
+
+    def scan_files_folder(self) -> Path:
+        """This search's folder once it has a file, else the folder of all scan files."""
+        log_ = self.ctl.scanner.scan_log
+        return log_.folder if log_.folder is not None else log_.root()
+
+    def open_scan_files(self) -> None:
+        folder = self.scan_files_folder()
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            self.ctl.fail(exc, "scan files")
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
 
     def _scale(self) -> Scale:
         """Advanced > "Game stores it as" (AC-H3). Raises ValueError."""

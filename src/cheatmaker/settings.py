@@ -22,6 +22,8 @@ class Settings:
     ng_port: int = 744
     ftp_port: int = 2121
     show_matches: int = 10  # list matches with live values once this few are left
+    save_scan_files: bool = True  # every scan writes its matches to its own text file
+    scan_file_max: int = 100_000  # at most this many matches per scan file
 
     @classmethod
     def path(cls) -> Path:
@@ -44,6 +46,11 @@ class Settings:
         s = cls(**{k: v for k, v in raw.items() if k in known})
         if s.output_format not in FORMATS:
             s.output_format = "json"
+        if not isinstance(s.save_scan_files, bool):
+            s.save_scan_files = True
+        if not isinstance(s.scan_file_max, int) or isinstance(s.scan_file_max, bool):
+            s.scan_file_max = 100_000
+        s.scan_file_max = max(0, s.scan_file_max)
         return s
 
     def save(self) -> None:

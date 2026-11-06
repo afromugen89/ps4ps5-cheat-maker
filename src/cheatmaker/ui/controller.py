@@ -38,6 +38,8 @@ class Controller(QObject):
         self.session = Session(factory)
         self.scanner = Scanner(self.session)
         self.scanner.on_lost.append(self.search_lost.emit)
+        self.scanner.scan_log.enabled = settings.save_scan_files
+        self.scanner.scan_log.max_lines = settings.scan_file_max
         self.freezer = Freezer(
             self.session,
             on_lost=self._lost.emit,

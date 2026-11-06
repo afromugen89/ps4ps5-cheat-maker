@@ -21,6 +21,15 @@ def logs_dir() -> Path:
     return app_data_dir() / "logs"
 
 
+def scans_dir() -> Path:
+    """Folder for the per-scan match lists (Documents\\CheatMaker\\scans). Under
+    CHEATMAKER_HOME when that is set, so tests never write to the real Documents."""
+    override = os.environ.get("CHEATMAKER_HOME")
+    if override:
+        return Path(override) / "scans"
+    return Path.home() / "Documents" / APP_DIR_NAME / "scans"
+
+
 def default_save_dir() -> Path:
     """Folder where cheat files are saved on the PC (save-to-PC fallback, AC-6.3)."""
     return Path.home() / "Documents" / APP_DIR_NAME / "cheats"

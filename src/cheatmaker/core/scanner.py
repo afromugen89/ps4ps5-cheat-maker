@@ -11,8 +11,10 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 from cheatmaker.console.client import ProgressFn
+from cheatmaker.core.scan_log import ScanLog
 from cheatmaker.core.session import Session
 from cheatmaker.core.values import SHOWN, Compare, Scale, ValueType, guess_types
+from cheatmaker.errors import ConnectionLost
 
 log = logging.getLogger(__name__)
 LOG_MATCHES = 50  # match lists this short are written to the log
@@ -52,6 +54,7 @@ class Scanner:
         self.history: list[str] = []
         self.show_limit = FEW_MATCHES  # list the matches once this few are left
         self.scale: Scale = SHOWN  # AC-H3, kept until Start over
+        self.scan_log = ScanLog()  # each scan's matches go to their own text file
         session.on_game_changed.append(lambda _g: self.reset())  # AC-2.3
         session.on_search_taken.append(self._taken)
         self.on_lost: list[Callable[[], None]] = []  # the search was ended by another
@@ -124,14 +127,14 @@ class Scanner:
                 count = self._first(rng, None, progress, cancel, Compare.BETWEEN, types)
                 self.scale = scale
                 self.history = [label]
-                self._log_addresses()
+                self._record()
                 return count
         count = self._first(None if value is None else scale.apply(value), vtype, progress, cancel)
         self.scale = scale
         self.history = [label]
         if value is None and value_range is not None and count:
-            return self._narrow(Compare.BETWEEN, value_range, None, cancel)
-        self._log_addresses()
+            count = self._narrow(Compare.BETWEEN, value_range, None, cancel)
+        self._record()
         return count
 
     def _first(
@@ -147,6 +150,7 @@ class Scanner:
         game = self.session.require_game()
         regions = self.session.scannable_regions()
         self.reset()
+        self.scan_log.new_search(game)
         if cmp is None:
             cmp = Compare.UNKNOWN if value is None else Compare.EXACT
         if types:
@@ -222,6 +226,7 @@ class Scanner:
                 raise ValueError("The first number of the range must be the smaller one.")
         count = self._narrow(cmp, value, progress, cancel)
         self.history.append(label)
+        self._record()
         return count
 
     def _narrow(
@@ -234,7 +239,6 @@ class Scanner:
         count = self.session.require_client().scan_next(cmp, value, progress, cancel)
         log.info("action=scan_next cmp=%s value=%s count=%d", cmp.value, value, count)
         self.count = count
-        self._log_addresses()
         return count
 
     def stand_still(
@@ -273,11 +277,26 @@ class Scanner:
             progress(1.0)
         return count
 
-    def _log_addresses(self) -> None:
-        """With only a few matches left, log where they are (helps console-test triage)."""
-        if 0 < self.count <= LOG_MATCHES:
-            hits = self.session.require_client().scan_results(self.count)
+    def _record(self) -> None:
+        """After every scan: write its scan file, and with only a few matches left
+        log where they are (helps console-test triage). One fetch serves both."""
+        count = self.count or 0
+        want = min(count, max(self.scan_log.limit, LOG_MATCHES if count <= LOG_MATCHES else 0))
+        hits = []
+        if want:
+            started = time.monotonic()
+            try:
+                hits = self.session.require_client().scan_results(want)
+            except ConnectionLost:
+                raise  # the link is gone: the UI must hear about it now
+            except Exception as exc:  # the scan itself worked; only the file/log suffers
+                log.warning("action=scan_file_fetch reason=%s; scan kept", exc)
+                return
+            log.info("action=scan_results n=%d secs=%.2f", len(hits), time.monotonic() - started)
+        if 0 < count <= LOG_MATCHES:
             log.info("action=matches addrs=%s", " ".join(f"{h.address:#x}" for h in hits))
+        shown = hits[: self.scan_log.limit]
+        self.scan_log.write(self.vtype, count, shown, self.history, self.scale)
 
     def matches(self, limit: int | None = None) -> list[Match]:
         """Current values of up to ``limit`` matches, read fresh (AC-3.4 live list)."""
