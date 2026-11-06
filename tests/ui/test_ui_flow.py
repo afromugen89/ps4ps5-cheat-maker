@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import struct
+from pathlib import Path
 
 import pytest
 from PySide6.QtCore import Qt
@@ -680,4 +681,4 @@ def test_scan_files_button_opens_this_searchs_folder(win, monkeypatch):
     assert folder is not None and (folder / "scan-001.txt").exists()
     assert "scan-001.txt" in f.count.toolTip()
     f.files_btn.click()
-    assert [u.toLocalFile() for u in opened] == [str(folder)]
+    assert [Path(u.toLocalFile()) for u in opened] == [folder]
