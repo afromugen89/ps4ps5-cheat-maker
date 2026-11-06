@@ -665,3 +665,19 @@ def test_start_over_after_try_it_is_a_plain_search_again(win, fake):  # review f
     assert f.advanced.isChecked() and f.scale.currentData() == "fraction"
     f.new_btn.click()
     assert not f.advanced.isChecked() and f.scale.currentData() == "shown"
+
+
+def test_scan_files_button_opens_this_searchs_folder(win, monkeypatch):
+    from cheatmaker.ui import find_wizard
+
+    opened = []
+    monkeypatch.setattr(find_wizard.QDesktopServices, "openUrl", lambda url: opened.append(url))
+    connect(win)
+    f = win.find
+    assert f.scan_files_folder() == win.ctl.scanner.scan_log.root()
+    search(win, "100")
+    folder = win.ctl.scanner.scan_log.folder
+    assert folder is not None and (folder / "scan-001.txt").exists()
+    assert "scan-001.txt" in f.count.toolTip()
+    f.files_btn.click()
+    assert [u.toLocalFile() for u in opened] == [str(folder)]

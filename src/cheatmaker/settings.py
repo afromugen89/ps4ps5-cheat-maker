@@ -22,6 +22,8 @@ class Settings:
     ng_port: int = 744
     ftp_port: int = 2121
     show_matches: int = 10  # list matches with live values once this few are left
+    save_scan_files: bool = True  # every scan writes its matches to its own text file
+    scan_file_max: int = 100_000  # at most this many matches per scan file
 
     @classmethod
     def path(cls) -> Path:

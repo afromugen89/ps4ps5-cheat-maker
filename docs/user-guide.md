@@ -188,6 +188,14 @@ uses that value instead.
   press **Re-check with this address** to keep only the paths that still work. This takes
   a few minutes. Most people won't need it: **Find it next time** (section 6.3) does the
   same job for you.
+- **Scan files**: every scan (the first one and each one after it) saves its matches,
+  address in hex and value, to its own text file: `scan-001.txt`, `scan-002.txt`, and so
+  on. Each new search gets a new folder under
+  `Documents\CheatMaker\scans\<title id>_<version>\<date and time>`. The button opens this
+  search's folder; hover over the match count to see the last file. A search with millions
+  of matches lists the first 100,000 and says how many there were in all. To turn the
+  files off or change that number, set `save_scan_files` or `scan_file_max` in
+  `%APPDATA%\CheatMaker\settings.json`.
 
 ---
 
