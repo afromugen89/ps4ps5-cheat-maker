@@ -307,19 +307,26 @@ class Scanner:
         game = self.session.require_game()
         size = self.vtype.size
         hits = client.scan_results(limit)
-        # One read per cluster of nearby matches, not one per match (~36 ms each on PS5).
+        # One read per cluster of nearby matches, not one per match (~36 ms each on PS5),
+        # and all of them in one go when the client can pipeline reads.
         values: dict[int, bytes] = {}
         addrs = sorted(h.address for h in hits)
+        spans: list[tuple[int, int, list[int]]] = []
         i = 0
         while i < len(addrs):
             j = i
             while j + 1 < len(addrs) and addrs[j + 1] + size - addrs[i] <= READ_SPAN:
                 j += 1
-            start = addrs[i]
-            data = client.read(game.pid, start, addrs[j] + size - start)
-            for a in addrs[i : j + 1]:
-                values[a] = data[a - start : a - start + size]
+            spans.append((addrs[i], addrs[j] + size - addrs[i], addrs[i : j + 1]))
             i = j + 1
+        read_many = getattr(client, "read_many", None)
+        if read_many is not None and len(spans) > 1:
+            blobs = read_many(game.pid, [(a, n) for a, n, _ in spans])
+        else:
+            blobs = [client.read(game.pid, a, n) for a, n, _ in spans]
+        for (start, _n, group), data in zip(spans, blobs, strict=True):
+            for a in group:
+                values[a] = data[a - start : a - start + size]
         return [
             Match(h.address, self.vtype.decode(values[h.address]), values[h.address]) for h in hits
         ]

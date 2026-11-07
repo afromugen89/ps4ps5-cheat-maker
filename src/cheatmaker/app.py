@@ -24,7 +24,16 @@ def main() -> int:
 
     app = QApplication(sys.argv)
     app.setApplicationName("Cheat Maker")
-    ctl = Controller(lambda ip, port: Ps5DebugNgClient.connect(ip, port), Settings.load())
+    settings = Settings.load()
+    ctl = Controller(
+        lambda ip, port: Ps5DebugNgClient.connect(
+            ip,
+            port,
+            scan_connections=settings.scan_connections,
+            fast_scan=settings.fast_scan,
+        ),
+        settings,
+    )
     win = MainWindow(ctl)
     win.show()
     win.show_first_run_warning()

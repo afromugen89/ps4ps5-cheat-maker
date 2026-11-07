@@ -29,6 +29,7 @@ from cheatmaker.errors import (
     ConnectionLost,
     ConsoleUnreachable,
     ReadFailed,
+    ScanCancelled,
     ScanNotSupported,
     WriteFailed,
 )
@@ -86,7 +87,9 @@ class FakeNgServer:
         parallel: bool = False,
         refuse_flags: bool = False,
         snapshot: bool = False,
+        aliasing: bool = False,
     ) -> None:
+        self.aliasing = aliasing
         self.snapshot = snapshot
         self.resident: dict | None = None  # {"pid","vt","fmt","size","vals": {addr: bytes}}
         self.parallel, self.refuse_flags = parallel, refuse_flags
@@ -100,11 +103,16 @@ class FakeNgServer:
         self.dial_port = lambda: 755  # where the client listens (the fixture sets it)
         self.watchpoints: list[tuple[int, ...]] = []
         self.commands: list[int] = []
+        self.count_flags: list[int] = []
+        self.scan_conns: set[int] = set()  # connections that ran an exact/between scan
+        self.slices: list[tuple[int, int]] = []
         self.connections = 0
+        self.fail_scan_on: set[int] = set()  # connection numbers that hang up mid-scan
         self.sock = socket.socket()
         self.sock.bind(("127.0.0.1", 0))
-        self.sock.listen(1)
+        self.sock.listen(8)
         self.port = self.sock.getsockname()[1]
+        self._local = threading.local()
         self.thread = threading.Thread(target=self._serve, daemon=True)
         self.thread.start()
 
@@ -118,29 +126,42 @@ class FakeNgServer:
         return buf
 
     def _serve(self):
-        while True:  # one client at a time; a dropped client may reconnect
+        while True:  # like NG: one thread per client, several clients at once
             try:
                 c, _ = self.sock.accept()
             except OSError:
                 return
             self.connections += 1
-            with c:
-                try:
-                    while True:
-                        magic, cmd, ln = struct.unpack("<III", self._recv(c, 12))
-                        assert magic == MAGIC
-                        body = self._recv(c, ln) if ln else b""
-                        self.commands.append(cmd)
-                        if cmd == 0xDEAD:
-                            return
-                        if cmd == Cmd.CONSOLE_FOREGROUND_APP and self.foreground == "drop":
-                            break  # like a PS5Debug-NG build without this command
-                        if cmd == Cmd.PROC_INFO and struct.unpack("<I", body)[0] == 0:
-                            c.sendall(ERR)  # real NG 1.3: error, then hang up
-                            break
-                        self._handle(c, cmd, body)
-                except (EOFError, OSError):
-                    continue
+            threading.Thread(target=self._client, args=(c, self.connections), daemon=True).start()
+
+    def _client(self, c, conn_no):
+        self._local.conn = conn_no
+        with c:
+            try:
+                while True:
+                    magic, cmd, ln = struct.unpack("<III", self._recv(c, 12))
+                    assert magic == MAGIC
+                    body = self._recv(c, ln) if ln else b""
+                    self.commands.append(cmd)
+                    if cmd == 0xDEAD:
+                        return
+                    if cmd == Cmd.CONSOLE_FOREGROUND_APP and self.foreground == "drop":
+                        return  # like a PS5Debug-NG build without this command
+                    if cmd == Cmd.PROC_INFO and struct.unpack("<I", body)[0] == 0:
+                        c.sendall(ERR)  # real NG 1.3: error, then hang up
+                        return
+                    self._handle(c, cmd, body)
+            except (EOFError, OSError):
+                return
+
+    def _read0(self, pid, addr, n):
+        """NG reads what it can and leaves the rest as zeros (proc_read_mem + memset)."""
+        out = bytearray(n)
+        for m in self.fake.maps(pid):
+            lo, hi = max(addr, m.start), min(addr + n, m.end)
+            if lo < hi:
+                out[lo - addr : hi - addr] = self.fake.read(pid, lo, hi - lo)
+        return bytes(out)
 
     def _handle(self, c, cmd, body):
         f = self.fake
@@ -216,6 +237,7 @@ class FakeNgServer:
             c.sendall(OK if self.authed else struct.pack("<I", Status.DATA_NULL))
         elif cmd == Cmd.TURBOSCAN_CAPS:
             engines = (0x100 if self.parallel else 0) | (0x418 if self.snapshot else 0)
+            engines |= 0x202 if self.aliasing else 0
             caps = struct.pack("<IIII", 1, engines, 8, 0)
             c.sendall(OK + caps if self.turbo else ERR)
         elif cmd == Cmd.TURBOSCAN_START and struct.unpack("<I", body[23:27])[0] & 0x04:
@@ -244,7 +266,11 @@ class FakeNgServer:
             c.sendall(OK)
             needle = self._recv(c, lv)
             c.sendall(OK)
-            data = f.read(pid, addr, n)
+            self.scan_conns.add(self._local.conn)
+            self.slices.append((addr, n))
+            if self._local.conn in self.fail_scan_on:
+                raise EOFError  # this connection dies mid-scan
+            data = self._read0(pid, addr, n)
 
             size = lv // 2 if ct == 4 else lv  # ValueBetween sends low + high
 
@@ -313,6 +339,7 @@ class FakeNgServer:
     def _resident_count(self, c, body):
         pid, _base, _vt, ct, lv, flags = struct.unpack("<IQBBII", body)
         assert flags & 0x02 and self.resident is not None
+        self.count_flags.append(flags)
         self.scan_compares.append(ct)
         c.sendall(OK)
         needle = self._recv(c, lv) if lv else b""
@@ -610,7 +637,7 @@ def test_merge_ranges_joins_touching_maps():
 @pytest.mark.parametrize("refuse", [False, True])
 def test_parallel_compare_flag_used_and_dropped_if_refused(refuse):
     server = FakeNgServer(parallel=True, refuse_flags=refuse)
-    cl = Ps5DebugNgClient.connect("127.0.0.1", server.port, timeout=3)
+    cl = Ps5DebugNgClient.connect("127.0.0.1", server.port, timeout=3, scan_connections=1)
     regions = [m for m in cl.maps(PID) if m.writable]
     assert cl.scan_start(PID, regions, ValueType.INT32, Compare.EXACT, 100) == 2
     assert server.scan_flags[0] == 0x80
@@ -619,11 +646,248 @@ def test_parallel_compare_flag_used_and_dropped_if_refused(refuse):
     cl.close()
 
 
-def test_ranges_with():
-    from cheatmaker.console.ps5debug_ng import ranges_with
+def test_candidate_windows_cluster_candidates_inside_their_range():
+    from cheatmaker.console.ps5debug_ng import candidate_windows
 
-    r = [(0x1000, 0x2000), (0x3000, 0x4000), (0x5000, 0x6000)]
-    assert ranges_with(r, [0x1500, 0x5000, 0x7000, 0x10]) == [(0x1000, 0x2000), (0x5000, 0x6000)]
+    r = [(0x1000, 0x9000), (0x9000_0000, 0x9100_0000)]
+    addrs = [0x10, 0x1500, 0x1600, 0x8FFC, 0x9000_0000, 0x90F0_0000]
+    assert candidate_windows(r, addrs, 4, gap=0x1000) == [
+        (0x1500, 0x1604),
+        (0x8FFC, 0x9000),
+        (0x9000_0000, 0x9000_0004),
+        (0x90F0_0000, 0x90F0_0004),
+    ]
+    # A big gap joins nearby candidates, but never across two ranges.
+    assert candidate_windows(r, addrs, 4, gap=1 << 40) == [
+        (0x1500, 0x9000),
+        (0x9000_0000, 0x90F0_0004),
+    ]
+    assert candidate_windows(r, [], 4) == []
+
+
+def test_plan_slices_bridges_small_gaps_and_cuts_long_runs():
+    from cheatmaker.console.ps5debug_ng import plan_slices
+
+    r = [(0x1000, 0x2000), (0x2800, 0x3000), (0x10000, 0x10100)]
+    assert plan_slices(r, 4, 4, slice_len=0x10000, bridge=0x1000) == [
+        (0x1000, 0x2000),  # two ranges 0x800 apart: one request
+        (0x10000, 0x100),
+    ]
+    # INT64 on 4-byte alignment: each cut piece reaches 4 bytes into the next.
+    assert plan_slices([(0, 0x3000)], 8, 4, slice_len=0x1000, bridge=0) == [
+        (0, 0x1004),
+        (0x1000, 0x1004),
+        (0x2000, 0x1000),
+    ]
+
+
+def test_value_across_a_slice_cut_is_found_once(monkeypatch):
+    from cheatmaker.console import ps5debug_ng
+
+    monkeypatch.setattr(ps5debug_ng, "SCAN_SLICE", 0x100)
+    server = FakeNgServer()
+    server.fake.poke(PID, HEAP_BASE + 0xFC, struct.pack("<q", 77777))  # crosses 0x100
+    for conns in (1, 4):
+        cl = Ps5DebugNgClient.connect("127.0.0.1", server.port, timeout=3, scan_connections=conns)
+        regions = [m for m in cl.maps(PID) if m.writable]
+        assert cl.scan_start(PID, regions, ValueType.INT64, Compare.EXACT, 77777) == 1
+        assert cl.scan_results(5)[0].address == HEAP_BASE + 0xFC
+        cl.close()
+
+
+def test_inside_drops_matches_outside_the_ranges():
+    from cheatmaker.console.client import ScanHit
+    from cheatmaker.console.ps5debug_ng import inside
+
+    r = [(0x1000, 0x2000), (0x3000, 0x4000)]
+    hits = [ScanHit(a, b"") for a in (0x1000, 0x1FFC, 0x1FFE, 0x2500, 0x3000)]
+    assert [h.address for h in inside(hits, r, 4)] == [0x1000, 0x1FFC, 0x3000]
+    same = [ScanHit(0x1100, b""), ScanHit(0x1200, b"")]
+    assert inside(same, r, 4) is same
+
+
+def test_bridged_gap_matches_are_dropped():
+    """Two ranges 0x1000 apart share one request; anything NG finds in the gap
+    between them (it reads the gap as zeros) must not become a match."""
+    from cheatmaker.console.ps5debug_ng import plan_slices
+
+    server = FakeNgServer()
+    server.fake.add_region(PID, "[anon]", HEAP_BASE + 0x2000, bytes(0x100), 3)
+    cl = Ps5DebugNgClient.connect("127.0.0.1", server.port, timeout=3, scan_connections=1)
+    regions = [m for m in cl.maps(PID) if m.writable]
+    ranges = [(HEAP_BASE, HEAP_BASE + 0x1000), (HEAP_BASE + 0x2000, HEAP_BASE + 0x2100)]
+    assert plan_slices(ranges, 4, 4) == [(HEAP_BASE, 0x2100)]
+    hits = cl._scan_ranges(PID, ranges, ValueType.INT32, (-1, 1), None, None)
+    addrs = [h.address for h in hits]
+    assert addrs == sorted(addrs)
+    assert not [a for a in addrs if HEAP_BASE + 0x1000 <= a < HEAP_BASE + 0x2000]
+    assert HEAP_BASE + 0x2000 in addrs and HEAP_BASE + 0x20FC in addrs
+    del regions
+    cl.close()
+
+
+def _many_slices(monkeypatch):
+    from cheatmaker.console import ps5debug_ng
+
+    monkeypatch.setattr(ps5debug_ng, "SCAN_SLICE", 0x100)
+    monkeypatch.setattr(ps5debug_ng, "BRIDGE_GAP", 0)
+
+
+def test_scan_shares_slices_over_several_connections(monkeypatch):
+    _many_slices(monkeypatch)
+    server = FakeNgServer(parallel=True, aliasing=True)
+    cl = Ps5DebugNgClient.connect("127.0.0.1", server.port, timeout=3, scan_connections=4)
+    regions = [m for m in cl.maps(PID) if m.writable]
+    seen = []
+    assert cl.scan_start(PID, regions, ValueType.INT32, Compare.EXACT, 100, seen.append) == 2
+    assert [h.address for h in cl.scan_results(5)] == [HEALTH_ADDR, HEAP_BASE + 0x200]
+    assert seen[-1] == 1.0
+    assert len(server.scan_conns) > 1, "slices ran on more than one connection"
+    assert set(server.scan_flags) == {0x01}, "in-place reads; no parallel flag with 4 conns"
+    assert len(server.slices) == 17  # 16 heap slices + module data
+    cl.close()
+
+
+def test_fast_scan_off_sends_no_aliasing_flag(monkeypatch):
+    server = FakeNgServer(aliasing=True, snapshot=True)
+    cl = Ps5DebugNgClient.connect("127.0.0.1", server.port, timeout=3, fast_scan=False)
+    regions = [m for m in cl.maps(PID) if m.writable]
+    cl.scan_start(PID, regions, ValueType.INT32, Compare.EXACT, 100)
+    assert set(server.scan_flags) == {0}
+    cl.scan_start(PID, regions, ValueType.FLOAT, Compare.UNKNOWN, None)
+    cl.scan_next(Compare.UNCHANGED, None)
+    assert not server.count_flags[-1] & 0x100
+    cl.close()
+
+
+def test_unknown_search_narrows_with_in_place_reads():
+    server = FakeNgServer(aliasing=True, snapshot=True)
+    cl = Ps5DebugNgClient.connect("127.0.0.1", server.port, timeout=3)
+    regions = [m for m in cl.maps(PID) if m.writable]
+    cl.scan_start(PID, regions, ValueType.FLOAT, Compare.UNKNOWN, None)
+    cl.scan_next(Compare.UNCHANGED, None)
+    assert server.count_flags[-1] & 0x100, "TS_RESCAN_ALIASING"
+    cl.close()
+
+
+def test_a_scan_connection_that_dies_hands_its_slice_back(monkeypatch):
+    _many_slices(monkeypatch)
+    server = FakeNgServer()
+    cl = Ps5DebugNgClient.connect("127.0.0.1", server.port, timeout=3, scan_connections=3)
+    regions = [m for m in cl.maps(PID) if m.writable]
+    cl.scan_start(PID, regions, ValueType.INT32, Compare.EXACT, 5)  # opens the pool
+    server.fail_scan_on = {2}  # the first extra connection hangs up on its next scan
+    assert cl.scan_start(PID, regions, ValueType.INT32, Compare.EXACT, 100) == 2
+    assert len(cl._pool) == 1
+    assert cl.version() == "1.3"
+    cl.close()
+
+
+def test_extra_connections_refused_scans_on_one(monkeypatch):
+    _many_slices(monkeypatch)
+    server = FakeNgServer()
+    cl = Ps5DebugNgClient.connect("127.0.0.1", server.port, timeout=3, scan_connections=4)
+    regions = [m for m in cl.maps(PID) if m.writable]
+    cl.port = 1  # extra connections can't be opened
+    assert cl.scan_start(PID, regions, ValueType.INT32, Compare.EXACT, 100) == 2
+    assert server.scan_conns == {1} and cl._pool_failed_at is not None
+    cl.port = server.port
+    cl.scan_start(PID, regions, ValueType.INT32, Compare.EXACT, 100)
+    assert server.scan_conns == {1}, "no new tries right after a failure"
+    cl._pool_failed_at -= 3600
+    cl.scan_start(PID, regions, ValueType.INT32, Compare.EXACT, 100)
+    assert len(server.scan_conns) > 1, "tries again later"
+    cl.close()
+
+
+def test_progress_waits_while_extra_connections_finish(monkeypatch):
+    """Review blocker: once the main connection's worker is done, waiting must not
+    spin (it flooded the UI with progress signals)."""
+    import time as _time
+
+    _many_slices(monkeypatch)
+    server = FakeNgServer()
+    cl = Ps5DebugNgClient.connect("127.0.0.1", server.port, timeout=3, scan_connections=2)
+    regions = [m for m in cl.maps(PID) if m.writable]
+    real = Ps5DebugNgClient._scan_slice
+
+    def slow(self, *a, **k):
+        if self is not cl:
+            _time.sleep(0.5)
+        return real(self, *a, **k)
+
+    monkeypatch.setattr(Ps5DebugNgClient, "_scan_slice", slow)
+    calls = []
+    cl.scan_start(PID, regions, ValueType.INT32, Compare.EXACT, 100, calls.append)
+    assert len(calls) < 100
+    cl.close()
+
+
+def test_zero_search_does_not_bridge_gaps():
+    server = FakeNgServer()
+    server.fake.add_region(PID, "[anon]", HEAP_BASE + 0x2000, bytes(0x100), 3)
+    cl = Ps5DebugNgClient.connect("127.0.0.1", server.port, timeout=3, scan_connections=1)
+    regions = [m for m in cl.maps(PID) if m.writable]
+    cl.scan_start(PID, regions, ValueType.INT32, Compare.EXACT, 0)
+    assert (HEAP_BASE, 0x2100) not in server.slices
+    server.slices.clear()
+    cl.scan_start(PID, regions, ValueType.INT32, Compare.EXACT, 100)
+    assert (HEAP_BASE, 0x2100) in server.slices
+    cl.close()
+
+
+def test_reconnect_forgets_refused_flags(server):
+    cl = Ps5DebugNgClient.connect("127.0.0.1", server.port, timeout=3)
+    cl._flags_refused = True
+    cl._reconnect()
+    assert not cl._flags_refused
+    cl.close()
+
+
+def test_scan_cancel_stops_handing_out_slices(monkeypatch):
+    import threading
+
+    _many_slices(monkeypatch)
+    server = FakeNgServer()
+    cl = Ps5DebugNgClient.connect("127.0.0.1", server.port, timeout=3, scan_connections=2)
+    regions = [m for m in cl.maps(PID) if m.writable]
+    stop = threading.Event()
+    stop.set()
+    with pytest.raises(ScanCancelled):
+        cl.scan_start(PID, regions, ValueType.INT32, Compare.EXACT, 100, cancel=stop)
+    assert cl.version() == "1.3"
+    cl.close()
+
+
+def test_read_many_pipelines_and_stays_in_step(client, server, monkeypatch):
+    from cheatmaker.console import ps5debug_ng
+
+    monkeypatch.setattr(ps5debug_ng, "PIPELINE_DEPTH", 3)
+    spans = [(HEALTH_ADDR, 4), (GOLD_ADDR, 4), (BAR_ADDR, 4), (HEAP_BASE, 0x10), (GOLD_ADDR, 8)]
+    got = client.read_many(PID, spans)
+    assert got == [server.fake.read(PID, a, n) for a, n in spans]
+    conns = server.connections
+    with pytest.raises(ReadFailed, match="0x10"):
+        client.read_many(PID, [(HEALTH_ADDR, 4), (0x10, 4), (GOLD_ADDR, 4)])
+    assert client.version() == "1.3"
+    assert server.connections == conns + 1, "NG hangs up after a refusal: fresh connection"
+    assert Cmd.PROC_SCAN_GET not in server.commands
+
+
+def test_next_scan_rescans_windows_around_candidates(monkeypatch):
+    from cheatmaker.console import ps5debug_ng
+
+    monkeypatch.setattr(ps5debug_ng, "MAX_READ_SPANS", 0)
+    server = FakeNgServer()
+    server.fake.add_region(PID, "[anon]", 0x3000_0000, bytes(0x10000), 3)  # 64 KiB, no match
+    cl = Ps5DebugNgClient.connect("127.0.0.1", server.port, timeout=3)
+    regions = [m for m in cl.maps(PID) if m.writable]
+    assert cl.scan_start(PID, regions, ValueType.INT32, Compare.EXACT, 100) == 2
+    server.slices.clear()
+    server.fake.poke(PID, HEALTH_ADDR, struct.pack("<i", 90))
+    assert cl.scan_next(Compare.EXACT, 90) == 1
+    assert server.slices == [(HEALTH_ADDR, HEAP_BASE + 0x204 - HEALTH_ADDR)]
+    cl.close()
 
 
 def test_float_search_matches_rounded_number_on_console(monkeypatch):
@@ -737,3 +1001,27 @@ def test_first_search_window_runs_value_between_on_console(client, server):
     n = client.scan_start(PID, regions, ValueType.FLOAT, Compare.BETWEEN, (87.3, 87.5))
     assert n >= 1 and BAR_ADDR in {h.address for h in client.scan_results(50)}
     assert server.scan_compares[-1] == 4 and server.resident is None, "no snapshot needed"
+
+
+def test_speed_settings_default_and_fall_back(tmp_path):
+    import json
+
+    from cheatmaker.settings import Settings
+
+    s = Settings()
+    assert s.scan_connections == 4 and s.fast_scan is True
+    Settings.path().parent.mkdir(parents=True, exist_ok=True)
+    Settings.path().write_text(json.dumps({"scan_connections": 99, "fast_scan": "yes"}))
+    s = Settings.load()
+    assert s.scan_connections == 8 and s.fast_scan is True
+    Settings.path().write_text(json.dumps({"scan_connections": 0, "fast_scan": False}))
+    s = Settings.load()
+    assert s.scan_connections == 1 and s.fast_scan is False
+    Settings.path().write_text(json.dumps({"scan_connections": "4"}))
+    assert Settings.load().scan_connections == 4
+
+
+def test_client_clamps_scan_connections(server):
+    cl = Ps5DebugNgClient.connect("127.0.0.1", server.port, timeout=3, scan_connections=50)
+    assert cl.scan_connections == 8
+    cl.close()

@@ -24,6 +24,8 @@ class Settings:
     show_matches: int = 10  # list matches with live values once this few are left
     save_scan_files: bool = True  # every scan writes its matches to its own text file
     scan_file_max: int = 100_000  # at most this many matches per scan file
+    scan_connections: int = 4  # connections that scan at once (1 = one, like before)
+    fast_scan: bool = True  # ask PS5Debug-NG to read game memory in place (faster)
 
     @classmethod
     def path(cls) -> Path:
@@ -51,6 +53,11 @@ class Settings:
         if not isinstance(s.scan_file_max, int) or isinstance(s.scan_file_max, bool):
             s.scan_file_max = 100_000
         s.scan_file_max = max(0, s.scan_file_max)
+        if not isinstance(s.scan_connections, int) or isinstance(s.scan_connections, bool):
+            s.scan_connections = 4
+        s.scan_connections = max(1, min(8, s.scan_connections))
+        if not isinstance(s.fast_scan, bool):
+            s.fast_scan = True
         return s
 
     def save(self) -> None:

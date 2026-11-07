@@ -46,11 +46,32 @@ log = logging.getLogger(__name__)
 MAGIC = 0xFFAABBCC
 MAX_BODY = 0x100000  # 1 MiB per read/write request
 SCAN_SLICE = 64 * 1024 * 1024  # first scan in slices so Cancel and progress respond
+BRIDGE_GAP = 1 << 20
+"""Writable ranges this close are scanned in one request (one round trip instead of
+many); matches that land in the gap are dropped. NG reads unmapped memory as zeros,
+so a gap costs at most the time to compare 1 MiB, less than one round trip."""
+RESCAN_GAP = 4 << 20
+"""Next search with many candidates: candidates this close are re-scanned in one window
+(scanning 4 MiB costs about one request's overhead)."""
+SCAN_CONNECTIONS = 4
+"""Connections that scan slices at the same time. NG runs each connection on its own
+thread, so this hides the per-request delay and compares on several cores. NG allows
+12 clients; the app also needs one for itself and one for Cancel."""
+MAX_SCAN_CONNECTIONS = 8
+POOL_RETRY_S = 60.0  # after an extra connection fails, scan without it this long
+PIPELINE_DEPTH = 128
+"""Plain reads sent before waiting for the answers. NG reads requests in order with
+exact lengths, so they queue on the socket; this skips one round trip plus the
+server's 10 ms idle poll per read."""
 IO_TIMEOUT = 4.0  # short, so a dropped PS5 is noticed within 5 s while freezing (AC-1.4)
 SCAN_TIMEOUT = 60.0  # one scan slice runs on the console and may take a while
 SENTINEL_U64 = 0xFFFFFFFFFFFFFFFF
 TSE_PARALLEL_COMPARE = 0x100  # turbo engine bit: server can compare on several threads
-TS_PARALLEL_COMPARE = 0x80  # turbo request flag asking for that
+TS_PARALLEL_COMPARE = 0x80  # turbo request flag asking for that (single connection only)
+TSE_ALIASING = 0x02  # engine: reads the game's memory in place instead of copying it
+TS_USE_ALIASING = 0x01  # request flag for that; NG falls back to copying on any miss
+TSE_RESCAN_ALIASING = 0x200  # engine: narrowing on the console reads in place too
+TS_RESCAN_ALIASING = 0x100
 # Unknown-value search keeps a snapshot ON THE CONSOLE (NG scan_turbo.c), so 12 GiB of
 # game memory never crosses the network. Engine bits / request flags from PROTOCOL.md.
 TSE_SNAPSHOT = 0x08
@@ -175,8 +196,9 @@ def merge_ranges(regions: list[MemMap]) -> list[tuple[int, int]]:
     return out
 
 
-MAX_READ_SPANS = 400
-"""Above this many reads, narrowing down re-scans on the console instead."""
+MAX_READ_SPANS = 4000
+"""Above this many reads, narrowing down re-scans on the console instead. Reads are
+pipelined (read_many), so a few thousand cost about a second."""
 
 
 def read_spans(addrs: list[int], size: int) -> list[tuple[int, int]]:
@@ -185,17 +207,78 @@ def read_spans(addrs: list[int], size: int) -> list[tuple[int, int]]:
     return list(_batched_reads(sorted(addrs), size))
 
 
-def ranges_with(ranges: list[tuple[int, int]], sorted_addrs: list[int]) -> list[tuple[int, int]]:
-    """The ranges that contain at least one of the (sorted) addresses."""
+def plan_slices(
+    ranges: list[tuple[int, int]],
+    size: int,
+    align: int,
+    slice_len: int | None = None,
+    bridge: int | None = None,
+) -> list[tuple[int, int]]:
+    """(start, length) requests covering ``ranges``: ranges less than ``bridge`` apart
+    share a request, and long runs are cut into ``slice_len`` pieces. A piece reaches
+    ``size - align`` bytes into the next one, so a value that starts just before a cut
+    is still found (in exactly one piece)."""
+    slice_len = SCAN_SLICE if slice_len is None else slice_len
+    bridge = BRIDGE_GAP if bridge is None else bridge
+    runs: list[list[int]] = []
+    for s, e in sorted(ranges):
+        if runs and s - runs[-1][1] <= bridge:
+            runs[-1][1] = max(runs[-1][1], e)
+        else:
+            runs.append([s, e])
+    out = []
+    for s, e in runs:
+        for a in range(s, e, slice_len):
+            out.append((a, min(a + slice_len + size - align, e) - a))
+    return out
+
+
+def inside(hits: list[ScanHit], ranges: list[tuple[int, int]], size: int) -> list[ScanHit]:
+    """Only the matches that lie wholly inside one of the (sorted, disjoint) ranges.
+    Drops what a bridged request found in the gap between two ranges."""
     import bisect
 
+    if not hits:
+        return hits
     starts = [s for s, _ in ranges]
-    keep: dict[int, tuple[int, int]] = {}
+    lo = min(h.address for h in hits)
+    hi = max(h.address for h in hits)
+    i = bisect.bisect_right(starts, lo) - 1
+    if i >= 0 and lo >= ranges[i][0] and hi + size <= ranges[i][1]:
+        return hits  # all in one range: the usual case, no per-match work
+    out = []
+    for h in hits:
+        j = bisect.bisect_right(starts, h.address) - 1
+        if j >= 0 and h.address + size <= ranges[j][1]:
+            out.append(h)
+    return out
+
+
+def candidate_windows(
+    ranges: list[tuple[int, int]], sorted_addrs: list[int], size: int, gap: int | None = None
+) -> list[tuple[int, int]]:
+    """Address windows to re-scan for a next search: candidates less than ``gap``
+    apart share a window, cut to the range that holds them. Much less than re-scanning
+    every range that holds a candidate (a range can be gigabytes)."""
+    import bisect
+
+    gap = RESCAN_GAP if gap is None else gap
+    starts = [s for s, _ in ranges]
+    out: list[tuple[int, int]] = []
+    cur: list[int] | None = None  # [start, end, range index]
     for a in sorted_addrs:
         i = bisect.bisect_right(starts, a) - 1
-        if i >= 0 and ranges[i][0] <= a < ranges[i][1]:
-            keep[i] = ranges[i]
-    return [keep[i] for i in sorted(keep)]
+        if i < 0 or a + size > ranges[i][1]:
+            continue
+        if cur is not None and cur[2] == i and a - cur[1] <= gap:
+            cur[1] = a + size
+            continue
+        if cur is not None:
+            out.append((cur[0], cur[1]))
+        cur = [a, a + size, i]
+    if cur is not None:
+        out.append((cur[0], cur[1]))
+    return out
 
 
 def _cstr(raw: bytes) -> str:
@@ -265,9 +348,24 @@ class _Wire:
 
 
 class Ps5DebugNgClient:
-    def __init__(self, sock: socket.socket, host: str, port: int = 744) -> None:
+    def __init__(
+        self,
+        sock: socket.socket,
+        host: str,
+        port: int = 744,
+        scan_connections: int = SCAN_CONNECTIONS,
+        fast_scan: bool = True,
+    ) -> None:
         self._w = _Wire(sock)
         self.host, self.port = host, port
+        # Speed settings (settings.json): how many connections scan at once, and
+        # whether to ask NG to read memory in place (TS_USE_ALIASING).
+        self.scan_connections = max(1, min(MAX_SCAN_CONNECTIONS, int(scan_connections)))
+        self.fast_scan = bool(fast_scan)
+        self._pool: list[Ps5DebugNgClient] = []  # extra scan connections, opened on demand
+        self._pool_lock = threading.Lock()
+        self._pool_failed_at: float | None = None  # last time an extra connection failed
+        self._flags_refused = False  # the PS5 refused turbo request flags: send none
         self._lock = threading.RLock()  # freezer thread and UI share the socket
         # The PS5 dials back here for watchpoint hits. Tests set 0 (any free port) and
         # read the one bound from interrupt_bound.
@@ -275,7 +373,6 @@ class Ps5DebugNgClient:
         self.interrupt_bound = 0
         self._authed = False
         self._turbo: bool | None = None
-        self._turbo_flags = 0
         self._engines = 0
         self._resident: tuple[int, ValueType, int] | None = None  # pid, type, float flags
         self._resident_count = 0
@@ -285,9 +382,16 @@ class Ps5DebugNgClient:
         self._fg_supported = True
 
     @classmethod
-    def connect(cls, host: str, port: int = 744, timeout: float = 8.0) -> Ps5DebugNgClient:
+    def connect(
+        cls,
+        host: str,
+        port: int = 744,
+        timeout: float = 8.0,
+        scan_connections: int = SCAN_CONNECTIONS,
+        fast_scan: bool = True,
+    ) -> Ps5DebugNgClient:
         """Open the connection. Fails within ``timeout`` seconds (AC-1.2: under 10 s)."""
-        return cls(cls._open(host, port, timeout), host, port)
+        return cls(cls._open(host, port, timeout), host, port, scan_connections, fast_scan)
 
     @staticmethod
     def _open(host: str, port: int, timeout: float = 8.0) -> socket.socket:
@@ -302,14 +406,23 @@ class Ps5DebugNgClient:
     def _reconnect(self) -> None:
         """Open a fresh socket after the server dropped us (scan auth is per socket)."""
         self.close()
+        self._pool_failed_at = None
+        self._flags_refused = False  # a refusal was probably not about the flags
         self._w = _Wire(self._open(self.host, self.port))
         self._authed = False
         self._scan = None
         self._resident = None  # the console frees it when the socket closes
 
     def close(self) -> None:
+        self._close_pool()
         with contextlib.suppress(OSError):
             self._w.sock.close()
+
+    def _close_pool(self) -> None:
+        with self._pool_lock:
+            pool, self._pool = self._pool, []
+        for w in pool:
+            w.close()
 
     @contextlib.contextmanager
     def _timeout(self, seconds: float):
@@ -411,18 +524,36 @@ class Ps5DebugNgClient:
                 self._w.ok(f"write {addr + i:#x}", WriteFailed)
 
     def read_many(self, pid: int, spans: list[tuple[int, int]]) -> list[bytes]:
-        """Bulk fetch with CMD_PROC_SCAN_GET (one round trip for many spans)."""
-        self._auth()
-        with self._lock, self._timeout(SCAN_TIMEOUT):
-            body = struct.pack("<II", pid, len(spans)) + b"".join(
-                struct.pack("<QI", a, n) for a, n in spans
-            )
-            self._w.request(Cmd.PROC_SCAN_GET, body)
-            self._w.ok("bulk read", ReadFailed)
-            out = [self._w.recv(n) for _, n in spans]
-            if self._w.u64() != SENTINEL_U64:
-                raise ProtocolError("bulk read: missing end marker")
-            return out
+        """Many plain reads, pipelined: up to PIPELINE_DEPTH requests go out before the
+        answers are read, so a batch costs about one round trip, not one per read.
+
+        (PROC_SCAN_GET, NG's own bulk read, timed out on NG 1.3 in console test C3.)
+        NG only refuses a read when it is out of memory, and then hangs up (proc.c
+        returns 1), so the answers still queued can't be trusted: a refusal opens a
+        fresh connection and raises ReadFailed."""
+        out: list[bytes] = []
+        bad: int | None = None
+        with self._lock:
+            for i in range(0, len(spans), PIPELINE_DEPTH):
+                batch = spans[i : i + PIPELINE_DEPTH]
+                self._w.last_cmd = Cmd.PROC_READ.name
+                self._w.send(
+                    b"".join(
+                        struct.pack("<III", MAGIC, Cmd.PROC_READ, 16)
+                        + struct.pack("<IQI", pid, a, n)
+                        for a, n in batch
+                    )
+                )
+                for a, n in batch:
+                    if self._w.status() != Status.SUCCESS:
+                        bad = a
+                        break
+                    out.append(self._w.recv(n))
+                if bad is not None:
+                    log.warning("action=read_many refused=%#x; reconnecting", bad)
+                    self._reconnect()
+                    raise ReadFailed(f"read {bad:#x}: console refused")
+        return out
 
     # -- scanning ------------------------------------------------------------
     def _auth(self) -> None:
@@ -446,16 +577,58 @@ class Ps5DebugNgClient:
                 if self._turbo:
                     ver, engines, threads, _r = struct.unpack("<IIII", self._w.recv(16))
                     self._engines = engines
-                    if engines & TSE_PARALLEL_COMPARE:
-                        self._turbo_flags = TS_PARALLEL_COMPARE
                     log.info(
                         "turbo scan caps: version=%d engines=%#x max_threads=%d",
                         ver,
                         engines,
                         threads,
                     )
-            log.info("turbo scan available: %s flags=%#x", self._turbo, self._turbo_flags)
+            log.info("turbo scan available: %s", self._turbo)
         return self._turbo
+
+    def _start_flags(self, connections: int) -> int:
+        """Turbo START flags for an exact/between scan run on ``connections`` sockets."""
+        if self._flags_refused:
+            return 0
+        flags = 0
+        if self.fast_scan and self._engines & TSE_ALIASING:
+            flags |= TS_USE_ALIASING
+        # NG: parallel compare is for single-connection clients only; with several
+        # connections the server already uses one thread each (over-subscribed otherwise).
+        if connections == 1 and self._engines & TSE_PARALLEL_COMPARE:
+            flags |= TS_PARALLEL_COMPARE
+        return flags
+
+    def _scan_pool(self) -> list[Ps5DebugNgClient]:
+        """This connection plus the extra scan connections (opened and authed once)."""
+        want = self.scan_connections - 1
+        with self._pool_lock:
+            failed = self._pool_failed_at
+            if failed is not None and time.monotonic() - failed < POOL_RETRY_S:
+                want = len(self._pool)  # an extra connection failed lately: don't ask yet
+            while len(self._pool) < want:
+                try:
+                    w = Ps5DebugNgClient(
+                        self._open(self.host, self.port), self.host, self.port, 1, self.fast_scan
+                    )
+                    try:
+                        w._auth()
+                    except Exception:
+                        w.close()
+                        raise
+                except Exception as exc:  # e.g. the PS5's 12 client slots are full
+                    log.warning("action=scan_pool reason=%s; scanning on fewer connections", exc)
+                    self._pool_failed_at = time.monotonic()
+                    break
+                w._turbo, w._engines = self._turbo, self._engines
+                self._pool.append(w)
+            return [self, *self._pool]
+
+    def _drop_from_pool(self, w: Ps5DebugNgClient) -> None:
+        with self._pool_lock:
+            if w in self._pool:
+                self._pool.remove(w)
+        w.close()
 
     def _scan_slice(
         self,
@@ -464,6 +637,7 @@ class Ps5DebugNgClient:
         length: int,
         vtype: ValueType,
         value: float | int | tuple[float, float],
+        flags: int = 0,
     ) -> list[ScanHit]:
         """One console pass: exact (Fuzzy for decimals), or ValueBetween for a
         ``(low, high)`` tuple (AC-H2: typed decimals and scaled values)."""
@@ -485,26 +659,30 @@ class Ps5DebugNgClient:
         )
         turbo = self._has_turbo()
         cmd = Cmd.TURBOSCAN_START if turbo else Cmd.PROC_SCAN_START
-        flags = self._turbo_flags
+        if self._flags_refused:
+            flags = 0
         body = hdr + (struct.pack("<I", flags) if turbo else b"")
         hits = []
         with self._lock, self._timeout(SCAN_TIMEOUT):
             self._w.request(cmd, body)
             if self._w.status() != Status.SUCCESS:
-                if flags:
-                    # Server refused the parallel flag: stop asking and retry plainly.
+                if turbo and flags:
+                    # Server refused the flags: stop asking and retry plainly.
                     log.warning("turbo scan refused flags=%#x; retrying without", flags)
-                    self._turbo_flags = 0
+                    self._flags_refused = True
                     return self._scan_slice(pid, start, length, vtype, value)
                 raise ReadFailed(f"scan start at {start:#x}: console refused")
             self._w.send(vbytes)
             self._w.ok("scan", ReadFailed)
-            stride = 4 + vtype.size  # ValueBetween hits carry one value, not two
+            # ValueBetween hits carry one value, not two
+            rec = struct.Struct(f"<I{vtype.size}s")
             while (block_len := self._w.u64()) != SENTINEL_U64:
                 block = self._w.recv(block_len)
-                for off in range(0, len(block) - stride + 1, stride):
-                    rel = struct.unpack_from("<I", block, off)[0]
-                    hits.append(ScanHit(start + rel, block[off + 4 : off + stride]))
+                usable = len(block) - len(block) % rec.size
+                hits.extend(
+                    ScanHit(start + rel, raw)
+                    for rel, raw in rec.iter_unpack(memoryview(block)[:usable])
+                )
             self._w.ok("scan end", ReadFailed)
         if isinstance(value, tuple):
             hits = [h for h in hits if matches(vtype, Compare.BETWEEN, h.value, target=value)]
@@ -585,33 +763,102 @@ class Ps5DebugNgClient:
         progress: ProgressFn | None,
         cancel: threading.Event | None,
     ) -> list[ScanHit]:
-        """Exact (or ValueBetween) turbo scan over address ranges, in slices for progress/Cancel."""
+        """Exact (or ValueBetween) turbo scan over address ranges.
+
+        Nearby ranges share a request (``plan_slices``), and the slices are shared out
+        over several connections that scan at the same time (``scan_connections``).
+        Matches come back in address order, only from inside ``ranges``."""
         self._auth()
-        slices = [
-            (s, min(SCAN_SLICE, end - s))
-            for start, end in ranges
-            for s in range(start, end, SCAN_SLICE)
-        ]
+        self._has_turbo()
+        size, align = vtype.size, alignment_for(vtype)
+        # NG reads unmapped gaps as zeros: a search that zeros match must not bridge
+        # them, or every gap streams back a flood of matches that are thrown away.
+        zero = bytes(size)
+        if isinstance(value, tuple):
+            zero_matches = matches(vtype, Compare.BETWEEN, zero, target=value)
+        else:
+            zero_matches = (
+                abs(value) < 1
+                if vtype.is_float
+                else matches(vtype, Compare.EXACT, zero, target=value)
+            )
+        slices = plan_slices(ranges, size, align, bridge=0 if zero_matches else None)
         total = sum(n for _, n in slices) or 1
-        done, hits = 0, []
+        conns = self._scan_pool() if len(slices) > 1 else [self]
+        flags = self._start_flags(len(conns))
+        results: dict[int, list[ScanHit]] = {}
+        todo = list(range(len(slices)))[::-1]  # pop() takes the lowest address first
+        lock = threading.Lock()
+        done = [0]
+        failure: list[BaseException] = []
         t0 = time.monotonic()
-        for s, n in slices:
-            if cancel is not None and cancel.is_set():
-                raise ScanCancelled("scan cancelled by the player")
-            hits.extend(self._scan_slice(pid, s, n, vtype, value))
-            done += n
+
+        def stop() -> bool:
+            return bool(failure) or (cancel is not None and cancel.is_set())
+
+        def work(cl: Ps5DebugNgClient) -> None:
+            while True:
+                with lock:
+                    if stop() or not todo:
+                        return
+                    i = todo.pop()
+                s, n = slices[i]
+                try:
+                    hits = cl._scan_slice(pid, s, n, vtype, value, flags)
+                except BaseException as exc:
+                    with lock:
+                        if cl is self or isinstance(exc, ScanCancelled):
+                            failure.append(exc)
+                        else:  # an extra connection broke: this one takes its slice
+                            log.warning("action=scan_conn_lost reason=%s; slice retried", exc)
+                            todo.append(i)
+                    if cl is not self:
+                        self._drop_from_pool(cl)
+                    return
+                hits = inside(hits, ranges, size)
+                with lock:
+                    results[i] = hits
+                    done[0] += n
+
+        threads = [
+            threading.Thread(target=work, args=(cl,), daemon=True, name="scan-conn") for cl in conns
+        ]
+        for t in threads:
+            t.start()
+        while any(t.is_alive() for t in threads):
+            for t in threads:
+                if t.is_alive():
+                    t.join(0.1)  # waits even when the first worker has already finished
+                    break
             if progress:
-                progress(done / total)
+                progress(min(done[0] / total, 1.0))
+        if failure:
+            raise failure[0]
+        if cancel is not None and cancel.is_set():
+            raise ScanCancelled("scan cancelled by the player")
+        if todo:  # every extra connection broke; finish here
+            for i in sorted(todo):
+                if cancel is not None and cancel.is_set():
+                    raise ScanCancelled("scan cancelled by the player")
+                s, n = slices[i]
+                results[i] = inside(self._scan_slice(pid, s, n, vtype, value, flags), ranges, size)
+                done[0] += n
+                if progress:
+                    progress(min(done[0] / total, 1.0))
+        if progress:
+            progress(1.0)
         log.info(
-            "action=scan_stats requests=%d ranges=%d mib=%.0f seconds=%.1f turbo=%s flags=%#x",
+            "action=scan_stats requests=%d ranges=%d mib=%.0f seconds=%.1f turbo=%s "
+            "flags=%#x connections=%d",
             len(slices),
             len(ranges),
             total / 2**20,
             time.monotonic() - t0,
             self._turbo,
-            self._turbo_flags,
+            flags,
+            len(conns),
         )
-        return hits
+        return [h for i in range(len(slices)) for h in results[i]]
 
     def scan_start(
         self,
@@ -628,9 +875,11 @@ class Ps5DebugNgClient:
         if cmp not in (Compare.EXACT, Compare.BETWEEN) or value is None:
             return self._snapshot_start(pid, ranges, vtype, progress, cancel)
         hits = self._scan_ranges(pid, ranges, vtype, value, progress, cancel)
-        # PROC_SCAN_GET (bulk read) timed out on PS5Debug-NG 1.3 (console test C3),
-        # so only plain reads are used for re-checking candidates.
-        self._scan = LocalScanSession(lambda a, n: self.read(pid, a, n))
+        # PROC_SCAN_GET (bulk read) timed out on PS5Debug-NG 1.3 (console test C3), so
+        # candidates are re-checked with plain reads, pipelined (read_many).
+        self._scan = LocalScanSession(
+            lambda a, n: self.read(pid, a, n), lambda spans: self.read_many(pid, spans)
+        )
         self._scan.set_results(vtype, hits)
         self._scan_pid = pid
         self._scan_ranges_list = ranges
@@ -724,6 +973,8 @@ class Ps5DebugNgClient:
             val = vtype.encode(value) if cmp.needs_value and value is not None else b""
         total = max(self._resident_count, 1)
         cancelled = False
+        rescan = TS_RESCAN_ALIASING if self._rescan_aliasing() else 0
+        t0 = time.monotonic()
         with self._lock, self._timeout(SCAN_TIMEOUT):
             self._w.request(
                 Cmd.TURBOSCAN_COUNT,
@@ -734,7 +985,7 @@ class Ps5DebugNgClient:
                     _NG_VTYPE[vtype],
                     code,
                     len(val),
-                    TS_SERVER_RESIDENT | float_flags,
+                    TS_SERVER_RESIDENT | float_flags | rescan,
                 ),
             )
             self._w.ok("narrow down", ReadFailed)
@@ -747,12 +998,23 @@ class Ps5DebugNgClient:
                     cancelled = self._send_cancel(pid)
             count = self._w.u64()
             self._w.ok("narrow down end", ReadFailed)
-        log.info("action=resident_next cmp=%s count=%d", cmp.value, count)
+        log.info(
+            "action=resident_next cmp=%s count=%d seconds=%.1f flags=%#x",
+            cmp.value,
+            count,
+            time.monotonic() - t0,
+            rescan,
+        )
         if cancelled:
             self._end_resident()
             raise ScanCancelled("scan cancelled; start a new search")
         self._resident_count = count
         return count
+
+    def _rescan_aliasing(self) -> bool:
+        return (
+            self.fast_scan and not self._flags_refused and bool(self._engines & TSE_RESCAN_ALIASING)
+        )
 
     def _resident_results(self, limit: int) -> list[ScanHit]:
         assert self._resident is not None
@@ -800,9 +1062,8 @@ class Ps5DebugNgClient:
         cancel: threading.Event | None = None,
     ) -> int:
         """Narrow down. Snapshot search: compare on the console. Few candidates: read
-        them. Many: for an exact number, scan again on the console over the ranges
-        that still hold candidates and keep the overlap (one read per candidate is
-        ~36 ms on the PS5, far too slow)."""
+        them (pipelined). Many: for an exact number, scan again on the console over
+        windows around the candidates and keep the overlap."""
         if self._resident is not None:
             return self._resident_next(cmp, value, progress, cancel)
         scan = self._scan
@@ -817,10 +1078,10 @@ class Ps5DebugNgClient:
                 "see now to narrow it down first."
             )
         addrs = {h.address for h in scan.hits}
-        ranges = ranges_with(self._scan_ranges_list, sorted(addrs))
-        new = self._scan_ranges(self._scan_pid, ranges, scan.vtype, value, progress, cancel)
+        windows = candidate_windows(self._scan_ranges_list, sorted(addrs), scan.vtype.size)
+        new = self._scan_ranges(self._scan_pid, windows, scan.vtype, value, progress, cancel)
         scan.set_results(scan.vtype, [h for h in new if h.address in addrs])
-        self._scan_ranges_list = ranges
+        self._scan_ranges_list = windows
         return len(scan.hits)
 
     def scan_results(self, limit: int) -> list[ScanHit]:
