@@ -18,7 +18,7 @@ import math
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 
-from cheatmaker.core.values import Scale, ValueType
+from cheatmaker.core.values import Scale, ValueType, subnormal
 
 RATIO_TOL = 0.01  # linked when one is the other x the same number, within 1%
 NEAR = 64  # bytes: same object
@@ -131,6 +131,14 @@ def _scaled(k: float | None, tol: float) -> bool:
     return k is not None and abs(k - 1) > tol
 
 
+def _noise(m: Member) -> bool:
+    """A decimal that only ever held subnormal numbers: another kind of data (a whole
+    number's bytes) read as a decimal. Left out of the groups, so the whole number it
+    shadows is the one a group row acts on."""
+    nonzero = [v for v in m.values if v]
+    return bool(nonzero) and all(subnormal(m.vtype, v) for v in nonzero)
+
+
 def _overlap(a: Member, b: Member) -> bool:
     lo, hi = (a, b) if a.address <= b.address else (b, a)
     return hi.address < lo.address + lo.vtype.size
@@ -146,13 +154,15 @@ def group_matches(
     """Groups of linked matches, best first (AC-G2 to AC-G4).
 
     ``history`` holds each match's value at every recorded scan (None when unknown),
-    ``tags`` how it keeps the number. Order: groups with a likely real match first, then
+    ``tags`` how it keeps the number. Decimals that only held subnormal numbers (another
+    type's bytes, see ``_noise``) are left out. Order: groups with a likely real match first, then
     smaller groups; matches that never changed come last, each on its own."""
     tags = tags or {}
     every = [
         Member(a, vt, tags.get((a, vt)), tuple(vals))
         for (a, vt), vals in sorted(history.items(), key=lambda kv: kv[0][0])
     ]
+    every = [m for m in every if not _noise(m)]
     moving = [m for m in every if m.changed]
     still = [m for m in every if not m.changed]
     n = len(moving)
@@ -163,14 +173,25 @@ def group_matches(
     buckets: dict[tuple, list[int]] = {}
     for i, m in enumerate(moving):
         buckets.setdefault(_moves(m), []).append(i)
+    # One place in memory is never in a group twice (a value read as two types).
     for idx in buckets.values():
-        firsts: list[int] = []
+        firsts: dict[int, list[int]] = {}  # a group's first member -> its members
         for i in idx:
-            j = next((f for f in firsts if link_ratio(moving[f], moving[i], ratio_tol)), None)
+            m = moving[i]
+            j = next(
+                (
+                    f
+                    for f, own in firsts.items()
+                    if not any(_overlap(moving[k], m) for k in own)
+                    and link_ratio(moving[f], m, ratio_tol)
+                ),
+                None,
+            )
             if j is None:
-                firsts.append(i)
+                firsts[i] = [i]
             else:
                 roots[i] = j
+                firsts[j].append(i)
 
     # Likely real: something that changed with it sits close by at another scale.
     likely = [False] * n

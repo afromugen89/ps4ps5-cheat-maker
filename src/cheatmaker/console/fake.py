@@ -28,6 +28,7 @@ from cheatmaker.console.local_scan import (
     MultiScan,
     check_ways,
     drop_empty,
+    one_way_each,
     restrict,
     way_parts,
 )
@@ -230,6 +231,7 @@ class FakeConsole:
                     progress((i + 1) / len(parts))
             if not sessions:
                 raise ValueError("no number type can hold that percent")
+            one_way_each(sessions)
             drop_empty(sessions, lambda s: len(s.hits))
             self._scan = MultiScan(sessions)
             return len(self._scan.hits)
@@ -288,6 +290,19 @@ class FakeConsole:
         pid = self._scan_pid
         fallback = next(iter(self.scan_counts()), None)
         self._scan = restrict(hits, lambda: self._session(pid), fallback)
+        return len(self._scan.hits)
+
+    def scan_rebase(
+        self,
+        progress: ProgressFn | None = None,
+        cancel: threading.Event | None = None,
+    ) -> int:
+        self._alive()
+        if self._scan is None:
+            raise ValueError("no scan to narrow down; start a new search")
+        if isinstance(self._scan, MultiScan):
+            return self._scan.rebase(progress, cancel)
+        self._scan.hits = self._scan.rebased(progress, cancel)
         return len(self._scan.hits)
 
     def scan_cancel(self) -> None:

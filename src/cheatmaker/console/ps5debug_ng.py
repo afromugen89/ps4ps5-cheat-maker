@@ -13,11 +13,13 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import math
 import queue
 import socket
 import struct
 import threading
 import time
+from collections.abc import Callable
 from enum import IntEnum
 
 from cheatmaker.console.client import (
@@ -36,6 +38,7 @@ from cheatmaker.console.local_scan import (
     check_ways,
     drop_empty,
     merge_results,
+    one_way_each,
     restrict,
     way_parts,
 )
@@ -240,6 +243,14 @@ def plan_slices(
         for a in range(s, e, slice_len):
             out.append((a, min(a + slice_len + size - align, e) - a))
     return out
+
+
+KEEP_EVERY = (-math.inf, math.inf)
+
+
+def _every(vtype: ValueType) -> tuple[float, float] | tuple[int, int]:
+    """A range compare that keeps every value of ``vtype`` (but a decimal's NaN)."""
+    return KEEP_EVERY if vtype.is_float else vtype.int_range()
 
 
 def inside(hits: list[ScanHit], ranges: list[tuple[int, int]], size: int) -> list[ScanHit]:
@@ -945,6 +956,7 @@ class Ps5DebugNgClient:
             log.info("action=scan_part type=%s way=%s count=%d", vt.name, way.label, len(hits))
         if not sessions:
             raise ValueError("no number type can hold that percent")
+        one_way_each(sessions)
         drop_empty(sessions, lambda s: len(s.hits))
         self._scan = MultiScan(sessions)
         if progress:
@@ -1195,7 +1207,10 @@ class Ps5DebugNgClient:
         value,
         progress: ProgressFn | None,
         cancel: threading.Event | None,
+        per_type: Callable[[ValueType], object] | None = None,
     ) -> int:
+        """Narrow every type's snapshot at once. ``per_type(vtype)``: the value for that
+        type, when it isn't ``value`` made to fit it."""
         conns = self._multi
         assert conns is not None
         done = [0.0] * len(conns)
@@ -1207,7 +1222,11 @@ class Ps5DebugNgClient:
                 if c._resident is None:
                     done[i] = 1.0
                     return  # this type was emptied earlier
-                v = value_for(c._resident[1], cmp, value) if value is not None else None
+                vt = c._resident[1]
+                if per_type is not None:
+                    v = per_type(vt)
+                else:
+                    v = value_for(vt, cmp, value) if value is not None else None
                 if value is not None and v is None:
                     c._resident_count = 0  # no number of this type can match:
                     c._end_resident()  # free it so nothing stale is listed later
@@ -1308,6 +1327,35 @@ class Ps5DebugNgClient:
             )
         scan.hits = hits
         return len(hits)
+
+    def scan_rebase(
+        self,
+        progress: ProgressFn | None = None,
+        cancel: threading.Event | None = None,
+    ) -> int:
+        """Keep every match with its value now as the baseline. Snapshots: a range
+        compare over every number the type holds (decimals from -inf to inf; NG has no
+        "keep all" compare, so a decimal that is NaN now is dropped). Candidates on the
+        PC: read them. Too many to read: refused, before anything changes (re-scanning
+        windows for every value would send back every address in them)."""
+        if self._multi is not None:
+            return self._multi_next(Compare.BETWEEN, KEEP_EVERY, progress, cancel, _every)
+        if self._resident is not None:
+            return self._resident_next(Compare.BETWEEN, _every(self._resident[1]), progress, cancel)
+        scan = self._scan
+        if scan is None or self._scan_pid is None:
+            raise ValueError("no scan to narrow down; start a new search")
+        parts = scan.sessions if isinstance(scan, MultiScan) else [scan]
+        n = sum(len(s.hits) for s in parts)
+        if any(self._rescans(s) for s in parts):
+            raise ValueError(
+                f"{n:,} matches is too many to note a percent. Make it go up or down, "
+                "then type the % again."
+            )
+        if isinstance(scan, MultiScan):
+            return scan.rebase(progress, cancel)
+        scan.hits = scan.rebased(progress, cancel)
+        return len(scan.hits)
 
     @staticmethod
     def _rescans(scan: LocalScanSession) -> bool:

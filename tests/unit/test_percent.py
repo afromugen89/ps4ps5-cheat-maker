@@ -7,6 +7,7 @@ import struct
 
 import pytest
 
+from cheatmaker.console.client import ScanHit
 from cheatmaker.console.fake import FakeConsole
 from cheatmaker.console.local_scan import way_parts
 from cheatmaker.core import percent_filter as pf
@@ -366,8 +367,10 @@ def test_plain_number_in_a_full_search_counts_as_a_percent(fake, session):
     sc.mark_full()
     show_hp(fake, 100)
     assert sc.next_scan(Compare.EXACT, 40) == 2 and sc.history[-1] == "40%"
-    with pytest.raises(ValueError, match="0 to 100"):
+    with pytest.raises(ValueError, match=r"In a Full search, type the % the game shows"):
         sc.next_scan(Compare.EXACT, 250)
+    with pytest.raises(ValueError, match="press Start over"):
+        sc.next_scan(Compare.EXACT, 180)
 
 
 def test_about_buttons_keep_a_wide_range(fake, session):
@@ -540,3 +543,51 @@ def test_percent_check_can_be_cancelled_while_reading(fake, session):
     with pytest.raises(ScanCancelled):
         sc.percent_scan(40, 1.0, cancel=ev)
     assert sc.count == before and sc.full_mode
+
+
+# -- QA round (BUG-02, BUG-03, BUG-04) ---------------------------------------------------
+def test_one_way_each_keeps_the_narrowest_way_of_a_type():
+    from cheatmaker.console.local_scan import LocalScanSession, one_way_each
+
+    def part(vt, way, addrs):
+        s = LocalScanSession(lambda a, n: b"")
+        s.set_results(vt, [ScanHit(a, b"\0" * 4) for a in addrs], way)
+        return s
+
+    x10, pct, frac, whole = (
+        part(F, X10, [1, 2, 3]),
+        part(F, PERCENT, [2, 3]),
+        part(F, FRACTION, [3]),
+        part(W, X10, [1, 2]),
+    )
+    one_way_each([x10, pct, frac, whole])
+    assert [h.address for h in frac.hits] == [3]
+    assert [h.address for h in pct.hits] == [2]
+    assert [h.address for h in x10.hits] == [1]
+    assert [h.address for h in whole.hits] == [1, 2], "another type is another match"
+
+
+def test_noted_percent_under_the_limit_keeps_nan_and_inf(fake, session):
+    f32(fake, HEAP_BASE + 0x500, float("nan"))
+    f32(fake, HEAP_BASE + 0x508, float("inf"))
+    sc = Scanner(session)
+    sc.mark_full(F)
+    sc.last_pct = None  # as after a manual compare: no value when full is known
+    sc.pc_limit = 100_000
+    before = sc.count
+    assert sc.percent_scan(40, 1.0) == before and sc.note == NOTED
+    assert {HEAP_BASE + 0x500, HEAP_BASE + 0x508} <= {m.address for m in sc.matches(before)}
+
+
+def test_zero_percent_then_went_up_over_the_limit_compares(fake, session):
+    """Over the limit, 0% then 30% is a plain Went up (it can tell the direction)."""
+    f32(fake, HEAP_BASE + 0x500, 1700.0)
+    sc = Scanner(session)
+    sc.pc_limit = 0  # always over the limit
+    sc.mark_full(F)
+    f32(fake, HEAP_BASE + 0x500, 0.0)
+    sc.percent_scan(0, 1.0)
+    f32(fake, HEAP_BASE + 0x500, 510.0)
+    sc.percent_scan(30, 1.0)
+    assert sc.history[-1] == "30% (as went up)" and sc.note == TOO_MANY
+    assert HEAP_BASE + 0x500 in {m.address for m in sc.matches(5000)}

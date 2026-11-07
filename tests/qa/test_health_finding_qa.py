@@ -454,10 +454,6 @@ def test_bug01_int_health_group_head_is_the_whole_number(fake, session):
     assert g.copies == 0 or all(m.address != HP for m in g.members[1:])
 
 
-@pytest.mark.xfail(
-    reason="BUG-01: a whole number's 4-byte-decimal twin (denormal) heads its group",
-    strict=True,
-)
 def test_bug01_plain_unknown_search_group_head_is_the_whole_number(fake, session):
     sc = Scanner(session)
     i32(fake, HP, 250)
@@ -492,10 +488,6 @@ def test_bug01_ui_set_on_group_row_writes_a_whole_number(hwin, fake):
     assert struct.unpack("<i", fake.peek(PID, HP, 4))[0] == 200
 
 
-@pytest.mark.xfail(
-    reason="BUG-02: after a 0% compare the next % check can't know Full and drops all",
-    strict=True,
-)
 def test_bug02_zero_percent_then_percent_keeps_the_real_value(fake, session):
     f32(fake, EDGE, 1700.0)  # a shield out of 1,700
     sc = Scanner(session)
@@ -509,10 +501,6 @@ def test_bug02_zero_percent_then_percent_keeps_the_real_value(fake, session):
     assert EDGE in addrs(sc), f"count={sc.count} history={sc.history}"
 
 
-@pytest.mark.xfail(
-    reason="BUG-02: after a 0% compare the next % check can't know Full and drops all",
-    strict=True,
-)
 def test_bug02_zero_percent_then_about_keeps_the_real_value(fake, session):
     f32(fake, EDGE, 1700.0)
     sc = Scanner(session)
@@ -525,9 +513,6 @@ def test_bug02_zero_percent_then_about_keeps_the_real_value(fake, session):
     assert EDGE in addrs(sc)
 
 
-@pytest.mark.xfail(
-    reason="BUG-03: 0% / 1% list the same address once per overlapping way", strict=True
-)
 @pytest.mark.parametrize("pct,stored", [(1, 1.5), (0, 0.5)])
 def test_bug03_low_percent_lists_each_address_once(fake, session, pct, stored):
     f32(fake, EDGE, stored)
@@ -538,7 +523,6 @@ def test_bug03_low_percent_lists_each_address_once(fake, session, pct, stored):
     assert sc.count == len(set(found)), "the match count counts each address once"
 
 
-@pytest.mark.xfail(reason="BUG-04: a noted percent scan drops values (inf, > 1e37)", strict=True)
 def test_bug04_noted_scan_drops_nothing(fake, session):
     f32(fake, EDGE, float("inf"))
     f32(fake, EDGE + 8, 3e38)

@@ -245,3 +245,39 @@ def test_no_chains_of_close_enough_links():
     assert link_ratio(Member(1, F, None, a), Member(3, F, None, c)) is None
     sizes = sorted(len(g.members) for g in group_matches(h))
     assert sizes == [1, 2]
+
+
+# -- QA BUG-01: a whole number's bytes read as a decimal ---------------------------------
+def _as_float(i: int) -> float:
+    return struct.unpack("<f", struct.pack("<i", i))[0]
+
+
+def test_subnormal_decimal_twin_is_left_out_and_the_whole_number_heads():
+    hp = [250, 200, 150, 100]
+    hist = {
+        (0x1000, W): [float(v) for v in hp],
+        (0x1000, F): [_as_float(v) for v in hp],  # 3.5e-43 ...: same bytes, never health
+        (0x1008, F): [v / 250 for v in hp],  # its fraction, next to it
+    }
+    groups = group_matches(hist)
+    assert all(m.vtype is not F or m.address != 0x1000 for g in groups for m in g.members)
+    [g] = [g for g in groups if g.head.address == 0x1000]
+    assert g.head.vtype is W and g.label == LIKELY
+
+
+def test_one_place_in_memory_is_never_twice_in_a_group():
+    """Two types at one address that both look like numbers stay in separate groups."""
+    a = [100.0, 90.0, 80.0, 70.0]
+    hist = {(0x1000, W): a, (0x1000, ValueType.INT16): a, (0x2000, F): a}
+    for g in group_matches(hist):
+        assert len({m.address for m in g.members}) == len(g.members)
+
+
+def test_of_full_never_keeps_a_subnormal_decimal():
+    from cheatmaker.core import percent_filter as pf
+    from cheatmaker.core.values import OF_FULL
+
+    target = pf.Target(40, 1.0)
+    full = pf.Full(_as_float(250))
+    assert not pf.matches_way(_as_float(100), OF_FULL, full, target, F)
+    assert pf.matches_way(100.0, OF_FULL, pf.Full(250.0), target, F)

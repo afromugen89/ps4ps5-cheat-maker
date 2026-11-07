@@ -174,6 +174,18 @@ class LocalScanSession:
             if h.address in current and matches(vt, cmp, current[h.address], h.value, value)
         ]
 
+    def rebased(
+        self,
+        progress: ProgressFn | None = None,
+        cancel: threading.Event | None = None,
+    ) -> list[ScanHit]:
+        """Every match with its value now (none dropped, whatever it holds), not kept
+        yet: the baseline for the next compare."""
+        if self.vtype is None:
+            raise ValueError("no scan to narrow down; start a new search")
+        current = self.current_values(self.hits, cancel, progress)
+        return [ScanHit(h.address, current[h.address]) for h in self.hits if h.address in current]
+
     def results(self, limit: int) -> list[ScanHit]:
         if self.way is None:
             return self.hits[:limit]
@@ -256,6 +268,29 @@ class MultiScan:
         drop_empty(self.sessions, lambda s: len(s.hits))
         return sum(len(s.hits) for s in self.sessions)
 
+    def rebase(
+        self,
+        progress: ProgressFn | None = None,
+        cancel: threading.Event | None = None,
+        rebased: Callable[..., list[ScanHit]] | None = None,
+    ) -> int:
+        """Keep every match, with its value now as the baseline, all or nothing.
+        ``rebased(session, progress, cancel)`` works out one part (default: read it)."""
+        new: list[list[ScanHit]] = []
+        n = len(self.sessions)
+        for i, s in enumerate(self.sessions):
+
+            def mine(p: float, i: int = i) -> None:
+                if progress:
+                    progress((i + p) / n)
+
+            new.append(rebased(s, mine, cancel) if rebased else s.rebased(mine, cancel))
+        for s, hits in zip(self.sessions, new, strict=True):
+            s.hits = hits
+        if progress:
+            progress(1.0)
+        return sum(len(s.hits) for s in self.sessions)
+
     def results(self, limit: int) -> list[ScanHit]:
         return merge_results([(s.vtype, s.results(limit)) for s in self.sessions], limit)
 
@@ -266,6 +301,16 @@ def drop_empty(sessions: list, count: Callable) -> list:
     gone = [s for s in sessions if s not in keep]
     sessions[:] = keep
     return gone
+
+
+def one_way_each(sessions: list[LocalScanSession]) -> None:
+    """A percent first scan: an address that fits several ways of one type (0% or 1%:
+    the windows overlap) stays only in the narrowest way (smallest factor)."""
+    seen: dict[ValueType | None, set[int]] = {}
+    for s in sorted(sessions, key=lambda s: s.way.factor if s.way else 1):
+        mine = seen.setdefault(s.vtype, set())
+        s.hits = [h for h in s.hits if h.address not in mine]
+        mine.update(h.address for h in s.hits)
 
 
 def merge_results(per_type: list, limit: int) -> list[ScanHit]:

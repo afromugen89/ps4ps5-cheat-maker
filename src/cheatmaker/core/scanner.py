@@ -44,7 +44,6 @@ PERCENT_PC_LIMIT = 20_000
 ABOUT = (75, 50, 25)  # AC-P3 buttons
 TOO_MANY = "too many"  # Scanner.note after a percent scan that ran as a plain compare
 NOTED = "noted"  # Scanner.note after a percent scan that could only note the percent
-KEEP_ALL = (-1e37, 1e37)
 """A range every real value is in: a scan with it drops nothing but makes now the
 baseline (x10 of it still fits a 4-byte decimal)."""
 GROUP_SCANS = 3  # grouping needs each match's value from this many scans (2 changes)
@@ -282,6 +281,12 @@ class Scanner:
         if cmp is Compare.EXACT and (self.percent_search or self.full_mode):
             # In a percent or Full search a plain number counts as a percent, so every
             # match is checked the same way (AC-P1).
+            if not 0 <= value <= 100:  # type: ignore[operator]
+                kind = "Full" if self.full_mode else "percent"
+                raise ValueError(
+                    f"In a {kind} search, type the % the game shows (e.g. 40%). To search "
+                    f"for the number {value:g} instead, press Start over."
+                )
             return self.percent_scan(value, unit, None, progress, cancel)  # type: ignore[arg-type]
         given = label
         label = cmp.value if value is None else str(value)
@@ -451,16 +456,8 @@ class Scanner:
         hits = client.scan_results(count) if count else []
         if cancel is not None and cancel.is_set():
             raise ScanCancelled("scan cancelled by the player")
-        if (
-            self.full_mode
-            and last is None
-            and any((h.address, h.vtype or self.vtype) not in self.full for h in hits)
-        ):
-            # A manual compare since the last percent: no value when full to check against.
-            return self._note_percent(target, text, progress, cancel)
         raw = self._read_values(hits, progress, cancel)
-        kept: list[ScanHit] = []
-        full: dict[tuple[int, ValueType], percent_filter.Full] = {}
+        ests: dict[tuple[int, ValueType], percent_filter.Full | None] = {}
         for h in hits:
             vt = h.vtype or self.vtype
             if vt is None:
@@ -468,9 +465,25 @@ class Scanner:
             key = (h.address, vt)
             est = self.full.get(key)
             if est is None and self.full_mode:
-                est = percent_filter.full_estimate(
-                    vt.decode(h.value), self.last_pct, self.last_unit
-                )
+                est = percent_filter.full_estimate(vt.decode(h.value), last, self.last_unit)
+            ests[key] = est
+        if self.full_mode and any(est is None for est in ests.values()):
+            # No value when full to check some match against (a manual compare since the
+            # last percent, or it was 0%): note it, and now is the baseline.
+            now_hits = [
+                ScanHit(h.address, raw[h.address][: vt.size], vt, h.way)
+                for h in hits
+                if (vt := h.vtype or self.vtype) is not None and h.address in raw
+            ]
+            return self._note_percent(target, text, progress, cancel, now_hits)
+        kept: list[ScanHit] = []
+        full: dict[tuple[int, ValueType], percent_filter.Full] = {}
+        for h in hits:
+            vt = h.vtype or self.vtype
+            if vt is None:
+                continue
+            key = (h.address, vt)
+            est = ests[key]
             now = raw[h.address][: vt.size]
             way = percent_filter.check(vt, h.way, vt.decode(now), est, target)
             if way is None:
@@ -502,9 +515,21 @@ class Scanner:
         text: str,
         progress: ProgressFn | None,
         cancel: threading.Event | None,
+        now: list[ScanHit] | None = None,
     ) -> tuple[int, str]:
-        """Drop nothing, but make now the baseline at which the game shows ``target``."""
-        count = self._narrow(Compare.BETWEEN, KEEP_ALL, progress, cancel)
+        """Drop nothing, but make now the baseline at which the game shows ``target``.
+        ``now``: every match with its value now, already read (else read again where the
+        matches are)."""
+        client = self.session.require_client()
+        if now is not None:
+            count = client.scan_restrict(now)
+        else:
+            count = client.scan_rebase(progress, cancel)
+        self.count = count
+        self._sync_types(self.vtype)
+        log.info("action=scan_percent_noted count=%d", count)
+        if progress:
+            progress(1.0)
         self.note = NOTED
         self.last_pct, self.last_unit = target.value, target.unit
         return count, f"{text} (noted)"

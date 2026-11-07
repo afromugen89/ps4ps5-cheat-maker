@@ -1263,3 +1263,44 @@ def test_scan_restrict_failing_keeps_the_console_search(monkeypatch):
     assert server.resident is not None, "the snapshot wasn't freed"
     assert cl.scan_next(Compare.UNCHANGED, None) > 0
     cl.close()
+
+
+def test_scan_rebase_keeps_every_snapshot_match_with_its_value_now():
+    """QA BUG-04: a noted percent keeps inf and huge decimals (only NaN can't be kept:
+    NG has no "keep all" compare, so it is a range from -inf to inf)."""
+    server = FakeNgServer(snapshot=True)
+    cl = Ps5DebugNgClient.connect("127.0.0.1", server.port, timeout=3)
+    server.fake.poke(PID, BAR_ADDR, struct.pack("<f", float("inf")))
+    server.fake.poke(PID, BAR_ADDR + 8, struct.pack("<f", 3e38))
+    regions = [m for m in cl.maps(PID) if m.writable]
+    types = (ValueType.FLOAT, ValueType.INT32)
+    n = cl.scan_start(PID, regions, types, Compare.UNKNOWN, None)
+    assert cl.scan_rebase() == n
+    assert {BAR_ADDR, BAR_ADDR + 8} <= {h.address for h in cl.scan_results(n)}
+    server.fake.poke(PID, GOLD_ADDR, struct.pack("<i", 2000))
+    assert GOLD_ADDR in {h.address for h in cl.scan_results(n)}
+    assert cl.scan_next(Compare.EXACT, 2000) == 1, "the baseline moved, the search goes on"
+    cl.close()
+
+
+def test_scan_rebase_on_the_pc_reads_and_refuses_too_many(monkeypatch):
+    from cheatmaker.console import ps5debug_ng
+    from cheatmaker.core.values import FRACTION, PERCENT
+
+    server = FakeNgServer()
+    cl = Ps5DebugNgClient.connect("127.0.0.1", server.port, timeout=3)
+    _show_pct(server.fake, 40)
+    regions = [m for m in cl.maps(PID) if m.writable]
+    types = (ValueType.FLOAT, ValueType.FLOAT)
+    cl.scan_start(PID, regions, types, Compare.BETWEEN, (39.5, 40.5), ways=(PERCENT, FRACTION))
+    server.fake.poke(PID, HEAP_BASE + 0x300, struct.pack("<f", float("nan")))
+    monkeypatch.setattr(ps5debug_ng, "MAX_READ_SPANS", 0)
+    scans = len(server.scan_compares)
+    with pytest.raises(ValueError, match="too many to note a percent"):
+        cl.scan_rebase()
+    assert len(server.scan_compares) == scans, "no window re-scan for every value"
+    monkeypatch.setattr(ps5debug_ng, "MAX_READ_SPANS", 4000)
+    assert cl.scan_rebase() == 2, "read on the PC: even NaN is kept"
+    pct = next(h for h in cl.scan_results(5) if h.way == PERCENT)
+    assert struct.unpack("<f", pct.value)[0] != struct.unpack("<f", pct.value)[0]
+    cl.close()

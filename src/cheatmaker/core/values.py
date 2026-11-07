@@ -239,6 +239,16 @@ def scale_target(way: Scale | None, cmp: Compare, value):
     return value
 
 
+_TINIEST = {ValueType.FLOAT: 1.1754943508222875e-38, ValueType.DOUBLE: 2.2250738585072014e-308}
+
+
+def subnormal(vtype: ValueType, value: float | int) -> bool:
+    """A decimal so tiny it is almost surely another kind of data read as a decimal
+    (a whole number's bytes read as a 4-byte decimal are 1e-43 and the like)."""
+    tiniest = _TINIEST.get(vtype)
+    return tiniest is not None and value != 0 and abs(value) < tiniest
+
+
 def f32(x: float) -> float:
     """``x`` as a 4-byte decimal holds it (nearest)."""
     return struct.unpack("<f", struct.pack("<f", x))[0]

@@ -161,6 +161,15 @@ class ConsoleClient(Protocol):
         ``way`` say how it is narrowed. Returns the match count."""
         ...
 
+    def scan_rebase(
+        self,
+        progress: ProgressFn | None = None,
+        cancel: threading.Event | None = None,
+    ) -> int:
+        """Keep every match, but make its value now the baseline for the next compare
+        (a percent that can only be noted). Returns the match count."""
+        ...
+
     def scan_cancel(self) -> None:
         """Drop the current scan session."""
         ...

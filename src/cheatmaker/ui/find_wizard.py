@@ -95,7 +95,7 @@ class FindWizard(QWidget):
         self.groups: list[Group] = []  # shown as the tree when they fold copies together
         self._n_matches = 0  # rows[:_n_matches] are matches, the rest typed in / pointers
         # (address, is an expanded member) selected before the tree was built again
-        self._tree_pick: tuple[int, bool] | None = None
+        self._tree_pick: tuple[int, ValueType, bool] | None = None
         self.manual: dict[int, ValueType] = {}  # addresses the player typed in
         self.pointers: dict[Chain, ValueType] = {}  # chains followed on every refresh
         self.row_chains: list[Chain | None] = []
@@ -812,9 +812,9 @@ class FindWizard(QWidget):
                 top.setData(0, ROW, i)
                 self.tree.addTopLevelItem(top)
             if self._tree_pick is not None:
-                addr, member = self._tree_pick
+                addr, vt, member = self._tree_pick
                 self._tree_pick = None
-                row = next((i for i, m in enumerate(self.rows) if m.address == addr), None)
+                row = index.get((addr, vt))
                 if row is not None:
                     self._select_row(row, member)
         for t in range(self.tree.topLevelItemCount()):
@@ -895,13 +895,13 @@ class FindWizard(QWidget):
         if self.tree.selectedItems() and self.tree.selectedItems()[0].isHidden():
             self.tree.clearSelection()
 
-    def _tree_selection(self) -> tuple[int, bool] | None:
-        """The selected (address, is an expanded member) in the tree."""
+    def _tree_selection(self) -> tuple[int, ValueType, bool] | None:
+        """The selected (address, number type, is an expanded member) in the tree."""
         items = self.tree.selectedItems()
         i = items[0].data(0, ROW) if items else None
         if not isinstance(i, int) or not 0 <= i < len(self.rows):
             return None
-        return self.rows[i].address, items[0].parent() is not None
+        return self.rows[i].address, self.row_types[i], items[0].parent() is not None
 
     def _select_row(self, i: int, member: bool = False) -> None:
         """Select row ``i`` in whichever list is showing. In the tree a group's row is
@@ -1019,9 +1019,11 @@ class FindWizard(QWidget):
         tests its members (AC-G4).
 
         One test value has to mean the same to every candidate, so when they keep the
-        number different ways (percent, fraction, x10, ...) only the ones stored the most
-        common way are tested (the first group's way on a tie). Raises ValueError when
-        fewer than 2 are left that way."""
+        number different ways (percent, fraction, x10, ...) only the ones stored the way
+        the first candidate is are tested: the first group's head (or the row picked in
+        it). Without groups there is no head, and when the head's way would leave just
+        the head there is nothing to test it against: then the most common way is used
+        (the first candidate's on a tie). Raises ValueError when fewer than 2 are left."""
         sc = self.ctl.scanner
         hits = self.ctl.session.require_client().scan_results(TEST_LIMIT)
         # (address, way), in the order they are offered: first group first
@@ -1034,13 +1036,15 @@ class FindWizard(QWidget):
             cands = []
             for g in self.groups:
                 use = g.head
-                if pick is not None and pick[1]:  # an expanded row was picked
-                    use = next((m for m in g.members if m.address == pick[0]), g.head)
+                if pick is not None and pick[2]:  # an expanded row was picked
+                    use = next((m for m in g.members if (m.address, m.vtype) == pick[:2]), g.head)
                 cands.append((use.address, use.way))
         counts: dict[Scale | None, int] = {}
         for _a, w in cands:
             counts[w] = counts.get(w, 0) + 1
-        way = max(counts, key=lambda w: (counts[w], w == cands[0][1])) if cands else None
+        way = cands[0][1] if cands else None  # the head's way
+        if not self.grouped or counts.get(way, 0) < 2:
+            way = max(counts, key=lambda w: (counts[w], w == cands[0][1])) if cands else None
         addrs = [a for a, w in cands if w == way]
         if len(counts) > 1 and len(addrs) < 2:
             raise ValueError(

@@ -26,6 +26,7 @@ from cheatmaker.core.values import (
     Scale,
     ValueType,
     open_window,
+    subnormal,
     window,
 )
 
@@ -85,6 +86,8 @@ def matches_way(
     if way == OF_FULL:
         if full is None or full.value == 0 or not math.isfinite(full.value):
             return False  # AC-P2: 0 at Full never matches
+        if subnormal(vtype, cur) or subnormal(vtype, full.value):
+            return False  # a whole number's bytes read as a decimal: scales the same way
         tol = (ABOUT_TOL if target.about else FULL_TOL) + target.value * full.rel_err
         return abs(cur * 100.0 / full.value - target.value) <= tol
     if target.about:

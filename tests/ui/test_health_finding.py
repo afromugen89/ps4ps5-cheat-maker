@@ -137,7 +137,8 @@ def full_and_three_hits(win, fake) -> None:
 
 def test_test_the_hits_on_one_group_tests_members_stored_one_way(win, fake):
     """Health is kept "of full", its copies as fractions: one test value can't mean the
-    same to both, so the fractions (the most common way) are tested, asked in %."""
+    same to both. The head's way would leave the head alone, so the fractions (the most
+    common way) are tested, asked in %."""
     from cheatmaker.core.values import FRACTION
 
     f = win.find
@@ -158,6 +159,24 @@ def test_test_the_hits_refuses_when_every_candidate_is_stored_differently(win, f
     ]
     with pytest.raises(ValueError, match="different ways"):
         f._test_candidates()
+
+
+def test_test_the_hits_uses_the_heads_way_over_the_most_common(win, fake):
+    """QA minor C: the first group's head decides the way, not a head count."""
+    from cheatmaker.core.grouping import Group, Member
+    from cheatmaker.core.values import FRACTION, OF_FULL
+
+    f = win.find
+    full_and_three_hits(win, fake)
+    f.groups = [
+        Group([Member(HP, ValueType.FLOAT, OF_FULL, ())]),
+        Group([Member(COPIES[0], ValueType.FLOAT, OF_FULL, ())]),
+        Group([Member(HP_FRAC, ValueType.FLOAT, FRACTION, ())]),
+        Group([Member(COPIES[1], ValueType.FLOAT, FRACTION, ())]),
+        Group([Member(COPIES[2], ValueType.FLOAT, FRACTION, ())]),
+    ]
+    addrs, scale = f._test_candidates()
+    assert addrs == [HP, COPIES[0]] and scale == OF_FULL
 
 
 def test_make_a_cheat_on_group_row_and_on_expanded_row(win, fake):  # AC-G4
