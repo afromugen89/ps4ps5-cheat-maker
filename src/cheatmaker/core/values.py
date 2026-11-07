@@ -194,6 +194,70 @@ class Scale:
 
 SHOWN = Scale("the number shown", 1)
 
+# Ways a game keeps a percent it shows (spec-health-finding AC-P1). "of full" is only a
+# label: those values are checked on the PC against each match's value when full.
+PERCENT = Scale("percent", 1)
+FRACTION = Scale("fraction", 0.01, decimal=True)
+X10 = Scale("x10", 10)
+OF_FULL = Scale("of full", 1)
+PERCENT_WAYS = (PERCENT, FRACTION, X10)
+PERCENT_TYPES = (ValueType.FLOAT, ValueType.INT32)
+
+
+def _whole(x: float) -> bool:
+    return abs(x - round(x)) < 1e-9
+
+
+def percent_parts(
+    value: float | int, picked: ValueType | None = None
+) -> list[tuple[ValueType, Scale]]:
+    """(number type, way) pairs a percent search looks for: decimals as percent,
+    fraction and x10; whole numbers as percent and x10 when those are whole. A picked
+    type searches that type only."""
+    types = (picked,) if picked is not None else PERCENT_TYPES
+    out = []
+    for vt in types:
+        for way in PERCENT_WAYS:
+            if vt.is_float or (not way.decimal and _whole(value * way.factor)):
+                out.append((vt, way))
+    return out
+
+
+def scale_target(way: Scale | None, cmp: Compare, value):
+    """The search value ``value`` (as the game shows it) for matches stored ``way``."""
+    if way is None or way.factor == 1 or value is None:
+        return value
+    f = way.factor
+    if cmp is Compare.BETWEEN:
+        lo, hi = value
+        return (lo * f, hi * f)
+    if cmp.by_amount:
+        amount, tol = value
+        return (amount * f, tol * f)
+    if cmp is Compare.EXACT:
+        return way.apply(value)
+    return value
+
+
+def parse_percent(text: str) -> tuple[float | int, float] | None:
+    """A percent the player typed ("40%", "40.5 %") as (value, unit), or None when the
+    text has no %. Raises ValueError in plain English when it isn't 0 to 100."""
+    t = text.strip()
+    if not t.endswith("%"):
+        return None
+    num = t[:-1].strip()
+    if not num:
+        raise ValueError("Type a number before the %, e.g. 40%.")
+    value = parse_number(num)
+    if not 0 <= value <= 100:
+        raise ValueError(f'"{t}" isn\'t a percent. Type a number from 0 to 100, then %.')
+    return value, unit_of(num)
+
+
+def window(value: float | int, unit: float) -> tuple[float, float]:
+    """Values less than ``unit`` away from ``value`` (open ends), as an inclusive range."""
+    return (math.nextafter(value - unit, math.inf), math.nextafter(value + unit, -math.inf))
+
 
 def make_scale(kind: str, max_value: float | int = 100) -> Scale:
     """``kind``: "shown", "fraction", "x10", "x100" or "x1000". Raises ValueError."""

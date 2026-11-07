@@ -1123,3 +1123,99 @@ def test_whole_numbers_left_then_a_decimal_number_lists_nothing_stale():
     assert cl.scan_counts() == {ValueType.INT32: 0} and cl.scan_results(10) == []
     assert cl.scan_next(Compare.INCREASED, None) == 0, "an emptied type stays empty"
     cl.close()
+
+
+# -- percent search (spec-health-finding) -----------------------------------------------
+def _show_pct(fake, pct):
+    fake.poke(PID, HEAP_BASE + 0x300, struct.pack("<f", pct))
+    fake.poke(PID, HEAP_BASE + 0x310, struct.pack("<f", pct / 100))
+    fake.poke(PID, HEAP_BASE + 0x320, struct.pack("<i", round(pct * 10)))
+
+
+def test_percent_search_runs_one_value_between_pass_per_part():
+    from cheatmaker.core.values import FRACTION, PERCENT, X10, percent_parts
+
+    server = FakeNgServer()
+    cl = Ps5DebugNgClient.connect("127.0.0.1", server.port, timeout=3)
+    _show_pct(server.fake, 40)
+    regions = [m for m in cl.maps(PID) if m.writable]
+    parts = percent_parts(40)
+    seen = []
+    n = cl.scan_start(
+        PID,
+        regions,
+        tuple(t for t, _ in parts),
+        Compare.BETWEEN,
+        (39.5, 40.5),
+        seen.append,
+        ways=tuple(w for _, w in parts),
+    )
+    assert n == 3 and seen[-1] == 1.0
+    assert server.scan_compares and set(server.scan_compares) == {4}, "ValueBetween only"
+    assert cl.scan_way_counts() == {
+        (ValueType.FLOAT, PERCENT): 1,
+        (ValueType.FLOAT, FRACTION): 1,
+        (ValueType.INT32, X10): 1,
+    }
+    assert cl.scan_counts() == {ValueType.FLOAT: 2, ValueType.INT32: 1}
+    _show_pct(server.fake, 30)
+    assert cl.scan_next(Compare.BETWEEN, (29.5, 30.5)) == 3
+    ways = {h.address: h.way for h in cl.scan_results(10)}
+    assert ways == {HEAP_BASE + 0x300: PERCENT, HEAP_BASE + 0x310: FRACTION, HEAP_BASE + 0x320: X10}
+    _show_pct(server.fake, 30.4)
+    assert cl.scan_next(Compare.INCREASED, None) == 3, "compares need no scaling"
+    cl.close()
+
+
+def test_percent_parts_rescan_on_console_when_many(monkeypatch):
+    from cheatmaker.console import ps5debug_ng
+    from cheatmaker.core.values import FRACTION, PERCENT
+
+    monkeypatch.setattr(ps5debug_ng, "MAX_READ_SPANS", 0)
+    server = FakeNgServer()
+    cl = Ps5DebugNgClient.connect("127.0.0.1", server.port, timeout=3)
+    _show_pct(server.fake, 40)
+    regions = [m for m in cl.maps(PID) if m.writable]
+    types = (ValueType.FLOAT, ValueType.FLOAT)
+    cl.scan_start(PID, regions, types, Compare.BETWEEN, (39.5, 40.5), ways=(PERCENT, FRACTION))
+    _show_pct(server.fake, 20)
+    reads = server.commands.count(Cmd.PROC_READ)
+    assert cl.scan_next(Compare.BETWEEN, (19.5, 20.5)) == 2
+    assert server.commands.count(Cmd.PROC_READ) == reads, "re-scanned on the console"
+    cl.close()
+
+
+def test_scan_restrict_frees_snapshots_and_continues_on_the_pc():
+    from cheatmaker.console.client import ScanHit
+    from cheatmaker.core.values import OF_FULL
+
+    server = FakeNgServer(snapshot=True)
+    cl = Ps5DebugNgClient.connect("127.0.0.1", server.port, timeout=3)
+    regions = [m for m in cl.maps(PID) if m.writable]
+    cl.scan_start(PID, regions, (ValueType.FLOAT, ValueType.INT32), Compare.UNKNOWN, None)
+    assert len(server.residents) == 2
+    keep = [ScanHit(BAR_ADDR, server.fake.read(PID, BAR_ADDR, 4), ValueType.FLOAT, OF_FULL)]
+    assert cl.scan_restrict(keep) == 1
+    assert not server.residents, "the console's snapshots were freed"
+    assert cl.scan_way_counts() == {(ValueType.FLOAT, OF_FULL): 1}
+    server.fake.poke(PID, BAR_ADDR, struct.pack("<f", 20.0))
+    assert cl.scan_next(Compare.DECREASED, None) == 1
+    [hit] = cl.scan_results(5)
+    assert hit.address == BAR_ADDR and hit.way == OF_FULL and hit.vtype is ValueType.FLOAT
+    assert cl.version() == "1.3"
+    cl.close()
+
+
+def test_snapshot_rows_give_the_value_at_the_last_scan():
+    """Grouping and the Full point read each match's value at the last scan from the
+    snapshot rows (C12b); this fake sends it first in each row, as PROTOCOL.md says."""
+    server = FakeNgServer(snapshot=True)
+    cl = Ps5DebugNgClient.connect("127.0.0.1", server.port, timeout=3)
+    regions = [m for m in cl.maps(PID) if m.writable]
+    cl.scan_start(PID, regions, ValueType.FLOAT, Compare.UNKNOWN, None)
+    server.fake.poke(PID, BAR_ADDR, struct.pack("<f", 50.0))
+    cl.scan_next(Compare.DECREASED, None)
+    server.fake.poke(PID, BAR_ADDR, struct.pack("<f", 45.0))  # after the scan
+    [hit] = cl.scan_results(5)
+    assert struct.unpack("<f", hit.value)[0] == 50.0
+    cl.close()

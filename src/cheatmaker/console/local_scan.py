@@ -11,7 +11,7 @@ import threading
 from collections.abc import Callable, Iterable
 
 from cheatmaker.console.client import MemMap, ProgressFn, ScanHit
-from cheatmaker.core.values import Compare, ValueType, matches, value_for
+from cheatmaker.core.values import Compare, Scale, ValueType, matches, scale_target, value_for
 from cheatmaker.errors import ScanCancelled
 
 ReadFn = Callable[[int, int], bytes]
@@ -78,10 +78,12 @@ class LocalScanSession:
         self._read = read
         self._read_many = read_many
         self.vtype: ValueType | None = None
+        self.way: Scale | None = None  # percent search: how these matches keep the number
         self.hits: list[ScanHit] = []
 
     def reset(self) -> None:
         self.vtype = None
+        self.way = None
         self.hits = []
 
     def first(
@@ -106,8 +108,9 @@ class LocalScanSession:
         self.hits = hits
         return len(hits)
 
-    def set_results(self, vtype: ValueType, hits: list[ScanHit]) -> None:
+    def set_results(self, vtype: ValueType, hits: list[ScanHit], way: Scale | None = None) -> None:
         self.vtype = vtype
+        self.way = way
         self.hits = hits
 
     def current_values(
@@ -157,12 +160,18 @@ class LocalScanSession:
         return len(self.hits)
 
     def results(self, limit: int) -> list[ScanHit]:
-        return self.hits[:limit]
+        if self.way is None:
+            return self.hits[:limit]
+        return [ScanHit(h.address, h.value, h.vtype, self.way) for h in self.hits[:limit]]
+
+
+NarrowFn = Callable[..., int]  # (session, cmp, value, cancel) -> matches left
 
 
 class MultiScan:
-    """Several LocalScanSessions, one per number type, narrowed together (an
-    "I don't know the number" search over decimals and whole numbers)."""
+    """Several LocalScanSessions, one per number type (an "I don't know the number"
+    search over decimals and whole numbers) or per (type, way) of a percent search,
+    narrowed together."""
 
     def __init__(self, sessions: list[LocalScanSession]) -> None:
         self.sessions = sessions
@@ -176,7 +185,14 @@ class MultiScan:
         return [h for s in self.sessions for h in s.hits]
 
     def counts(self) -> dict[ValueType, int]:
-        return {s.vtype: len(s.hits) for s in self.sessions if s.vtype is not None}
+        out: dict[ValueType, int] = {}
+        for s in self.sessions:
+            if s.vtype is not None:
+                out[s.vtype] = out.get(s.vtype, 0) + len(s.hits)
+        return out
+
+    def way_counts(self) -> dict[tuple[ValueType, Scale | None], int]:
+        return {(s.vtype, s.way): len(s.hits) for s in self.sessions if s.vtype is not None}
 
     def next(
         self,
@@ -184,12 +200,18 @@ class MultiScan:
         value,
         progress: ProgressFn | None = None,
         cancel: threading.Event | None = None,
+        narrow: NarrowFn | None = None,
     ) -> int:
+        """``narrow(session, cmp, value, cancel)`` narrows one part (default: read the
+        candidates on the PC); it gets the value already scaled for the part's way."""
         for s in self.sessions:
             assert s.vtype is not None
-            v = value_for(s.vtype, cmp, value) if value is not None else None
+            v = scale_target(s.way, cmp, value)
+            v = value_for(s.vtype, cmp, v) if value is not None else None
             if value is not None and v is None:
                 s.hits = []  # no number of this type can match
+            elif narrow is not None:
+                narrow(s, cmp, v, cancel)
             else:
                 s.next(cmp, v, None, cancel)
         if progress:
@@ -210,11 +232,53 @@ def drop_empty(sessions: list, count: Callable) -> list:
 
 
 def merge_results(per_type: list, limit: int) -> list[ScanHit]:
-    """Matches of several types in address order (each tagged with its type), at most
-    ``limit``."""
-    tagged = [ScanHit(h.address, h.value, vt) for vt, hits in per_type for h in hits]
+    """Matches of several types in address order (each tagged with its type, and its
+    way when known), at most ``limit``."""
+    tagged = [ScanHit(h.address, h.value, vt, h.way) for vt, hits in per_type for h in hits]
     tagged.sort(key=lambda h: h.address)
     return tagged[:limit]
+
+
+def way_parts(
+    vtype: ValueType | tuple[ValueType, ...], ways: tuple[Scale, ...]
+) -> list[tuple[ValueType, Scale]]:
+    """The (type, way) parts of a percent first scan: ``vtype[i]`` with ``ways[i]``, or
+    one type with every way."""
+    types = vtype if isinstance(vtype, tuple) else (vtype,) * len(ways)
+    if len(types) != len(ways):
+        raise ValueError("a percent search needs one number type per way")
+    return list(zip(types, ways, strict=True))
+
+
+def check_ways(cmp: Compare, value) -> None:
+    if cmp is not Compare.BETWEEN or value is None:
+        raise ValueError("a search with ways is a range search (BETWEEN)")
+
+
+def restrict(
+    hits: list[ScanHit],
+    make: Callable[[], LocalScanSession],
+    fallback: ValueType | None,
+) -> MultiScan:
+    """A PC-side search holding just ``hits``, one part per (type, way). A hit's
+    value is its baseline for the next compare. ``fallback`` is the type of hits that
+    don't name one (and of the empty search when ``hits`` is empty)."""
+    parts: dict[tuple[ValueType, Scale | None], list[ScanHit]] = {}
+    for h in sorted(hits, key=lambda h: h.address):
+        vt = h.vtype or fallback
+        if vt is None:
+            raise ValueError("no number type for a match; start a new search")
+        parts.setdefault((vt, h.way), []).append(ScanHit(h.address, h.value))
+    if not parts:
+        if fallback is None:
+            raise ValueError("no search to narrow down; start a new search")
+        parts[(fallback, None)] = []
+    sessions = []
+    for (vt, way), part in parts.items():
+        s = make()
+        s.set_results(vt, part, way)
+        sessions.append(s)
+    return MultiScan(sessions)
 
 
 def unpack_all(vtype: ValueType, data: bytes) -> list[float | int]:

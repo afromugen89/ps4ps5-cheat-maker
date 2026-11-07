@@ -40,6 +40,7 @@ class Controller(QObject):
         self.scanner.on_lost.append(self.search_lost.emit)
         self.scanner.scan_log.enabled = settings.save_scan_files
         self.scanner.scan_log.max_lines = settings.scan_file_max
+        self.scanner.pc_limit = settings.percent_pc_limit
         self.freezer = Freezer(
             self.session,
             on_lost=self._lost.emit,

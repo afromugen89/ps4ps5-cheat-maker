@@ -163,23 +163,32 @@ class ScanLog:
         ]
         if scale is not SHOWN:
             lines.append(f"# Game stores it as: {scale.label}")
+        ways = any(h.way is not None for h in hits)
+        if ways:  # a percent search: each match keeps the number its own way
+            seen = dict.fromkeys(way_label(h.way) for h in sorted(hits, key=lambda h: h.address))
+            lines.append(f"# Stored as: {', '.join(seen)}")
         lines += [
             f"# Time: {self.now().strftime('%Y-%m-%d %H:%M:%S')}",
             f"# Matches: {count:,}",
             f"# Listed: {listed_text}",
             "# Value = what the game had when this scan ran.",
             "",
-            "Address\tValue" + ("\tType" if len(kinds) > 1 else ""),
+            "Address\tValue"
+            + ("\tType" if len(kinds) > 1 else "")
+            + ("\tStored as" if ways else ""),
         ]
-        if len(kinds) > 1:
-            body = [
-                f"{fmt_address(h.address)}\t{fmt_scan_value(vt, h.value)}\t{vt.label}"
-                for h in sorted(hits, key=lambda h: h.address)
-                for vt in [h.vtype or kinds[0]]
-            ]
-        else:
-            body = [
-                f"{fmt_address(h.address)}\t{fmt_scan_value(kinds[0], h.value)}"
-                for h in sorted(hits, key=lambda h: h.address)
-            ]
+        body = []
+        for h in sorted(hits, key=lambda h: h.address):
+            vt = h.vtype or kinds[0]
+            line = f"{fmt_address(h.address)}\t{fmt_scan_value(vt, h.value)}"
+            if len(kinds) > 1:
+                line += f"\t{vt.label}"
+            if ways:
+                line += f"\t{way_label(h.way)}"
+            body.append(line)
         return "\n".join(lines + body) + "\n"
+
+
+def way_label(way: Scale | None) -> str:
+    """How a match keeps the number: percent, fraction, x10, of full, or plain."""
+    return "plain" if way is None else way.label

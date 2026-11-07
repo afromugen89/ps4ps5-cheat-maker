@@ -23,8 +23,15 @@ from cheatmaker.console.client import (
     WatchHit,
     WatchKind,
 )
-from cheatmaker.console.local_scan import LocalScanSession, MultiScan
-from cheatmaker.core.values import Compare, ValueType
+from cheatmaker.console.local_scan import (
+    LocalScanSession,
+    MultiScan,
+    check_ways,
+    drop_empty,
+    restrict,
+    way_parts,
+)
+from cheatmaker.core.values import Compare, Scale, ValueType, scale_target, value_for
 from cheatmaker.errors import ConnectionLost, ReadFailed, ScanNotSupported, WriteFailed
 
 PROT_R, PROT_W, PROT_X = 1, 2, 4
@@ -202,25 +209,47 @@ class FakeConsole:
         value: float | int | None,
         progress: ProgressFn | None = None,
         cancel: threading.Event | None = None,
+        ways: tuple[Scale, ...] = (),
     ) -> int:
         self._alive()
         if cmp is Compare.UNKNOWN and not self.supports_unknown_scan:
             raise ScanNotSupported("unknown-value scan not available")
         self._scan_pid = pid
+        if ways:
+            check_ways(cmp, value)
+            parts = way_parts(vtype, ways)
+            sessions = []
+            for i, (vt, way) in enumerate(parts):
+                v = value_for(vt, cmp, scale_target(way, cmp, value))
+                if v is not None:
+                    s = self._session(pid)
+                    s.first(regions, vt, cmp, v, None, cancel)
+                    s.way = way
+                    sessions.append(s)
+                if progress:
+                    progress((i + 1) / len(parts))
+            if not sessions:
+                raise ValueError("no number type can hold that percent")
+            drop_empty(sessions, lambda s: len(s.hits))
+            self._scan = MultiScan(sessions)
+            return len(self._scan.hits)
         if isinstance(vtype, tuple):
             if cmp is not Compare.UNKNOWN or value is not None:
                 raise ValueError("several number types at once is for unknown searches only")
             sessions = []
             for i, vt in enumerate(vtype):
-                s = LocalScanSession(lambda a, n: self.read(pid, a, n))
+                s = self._session(pid)
                 s.first(regions, vt, cmp, value, None, cancel)
                 sessions.append(s)
                 if progress:
                     progress((i + 1) / len(vtype))
             self._scan = MultiScan(sessions)
             return len(self._scan.hits)
-        self._scan = LocalScanSession(lambda a, n: self.read(pid, a, n))
+        self._scan = self._session(pid)
         return self._scan.first(regions, vtype, cmp, value, progress, cancel)
+
+    def _session(self, pid: int) -> LocalScanSession:
+        return LocalScanSession(lambda a, n: self.read(pid, a, n))
 
     def scan_next(
         self,
@@ -244,6 +273,22 @@ class FakeConsole:
         if isinstance(self._scan, MultiScan):
             return self._scan.counts()
         return {} if self._scan.vtype is None else {self._scan.vtype: len(self._scan.hits)}
+
+    def scan_way_counts(self) -> dict[tuple[ValueType, Scale | None], int]:
+        if isinstance(self._scan, MultiScan):
+            return self._scan.way_counts()
+        if self._scan is None or self._scan.vtype is None:
+            return {}
+        return {(self._scan.vtype, self._scan.way): len(self._scan.hits)}
+
+    def scan_restrict(self, hits: list[ScanHit]) -> int:
+        self._alive()
+        if self._scan_pid is None:
+            raise ValueError("no search to narrow down; start a new search")
+        pid = self._scan_pid
+        fallback = next(iter(self.scan_counts()), None)
+        self._scan = restrict(hits, lambda: self._session(pid), fallback)
+        return len(self._scan.hits)
 
     def scan_cancel(self) -> None:
         self._scan = None
