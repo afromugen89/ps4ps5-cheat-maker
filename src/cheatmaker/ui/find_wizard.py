@@ -773,7 +773,6 @@ class FindWizard(QWidget):
             return
         keep = self.table.selectionModel().selectedRows()
         keep_row = keep[0].row() if keep else None
-        self.table.setColumnHidden(1, not self.advanced.isChecked())
         self.table.setRowCount(len(self.rows))
         for i, m in enumerate(self.rows):
             self.table.setItem(i, 0, QTableWidgetItem(self._row_text(i)))
@@ -823,7 +822,6 @@ class FindWizard(QWidget):
             self._item_text(top, g, None)
             for c in range(top.childCount()):
                 self._item_text(top.child(c), g, top.child(c).data(1, ROW))
-        self.tree.setColumnHidden(3, not self.advanced.isChecked())
         self._apply_filter()
 
     def _item_text(self, item: QTreeWidgetItem, g: Group | None, member: int | None) -> None:

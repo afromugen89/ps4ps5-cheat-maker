@@ -109,7 +109,8 @@ def test_find_set_freeze_make_cheat(win, fake):  # AC-3, AC-4, AC-5
     fake.poke(PID, HEALTH_ADDR, struct.pack("<i", 95))
     search(win, "95")
     assert win.find.count.text() == "1 matches" and win.find.table.rowCount() == 1
-    assert win.find.table.isColumnHidden(1), "no addresses unless Advanced"
+    assert not win.find.table.isColumnHidden(1), "addresses show without Advanced"
+    assert win.find.table.item(0, 1).text() == f"{HEALTH_ADDR:#x}"
     win.find.table.selectRow(0)
     win.find.set_value.setText("250")
     win.find.set_btn.click()
