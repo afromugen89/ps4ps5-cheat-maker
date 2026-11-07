@@ -23,6 +23,7 @@ from cheatmaker.core.values import Scale, ValueType
 RATIO_TOL = 0.01  # linked when one is the other x the same number, within 1%
 NEAR = 64  # bytes: same object
 FAR = 65536  # bytes: copies further apart than this are probably display copies
+FLOAT_SLACK = 1e-6  # 4-byte decimals keep about 7 digits
 
 LIKELY = "likely real"
 COPIES = "copies (probably display)"
@@ -96,6 +97,13 @@ def link_ratio(a: Member, b: Member, tol: float = RATIO_TOL) -> float | None:
                 return None
             continue
         if abs(y / x - k) > tol * abs(k):
+            return None
+    # The changes must scale by k too: 900 -> 880 and 905 -> 870 stay within 1% of each
+    # other but don't move together. Float rounding gets a little slack.
+    for (x0, y0), (x1, y1) in itertools.pairwise(shared):
+        want, got = (x1 - x0) * k, y1 - y0
+        slack = tol * max(abs(want), abs(got)) + FLOAT_SLACK * (abs(y0) + abs(y1))
+        if abs(got - want) > slack:
             return None
     return k
 

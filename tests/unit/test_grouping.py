@@ -208,3 +208,11 @@ def test_kein_scan_12_on_the_fake_console_shows_few_rows():
     first = groups[0] if groups[0].copies else next(g for g in groups if g.copies)
     assert first.head.address in (0x12E0EA40B0, 0x12E0EA40A0) and first.head_likely
     assert sum(len(g.members) for g in groups) == 59
+
+
+def test_close_values_that_move_differently_are_not_linked():
+    a = Member(1, F, None, (900.0, 880.0, 860.0))
+    b = Member(2, F, None, (905.0, 870.0, 860.0))  # within 1% each scan, moves differently
+    assert link_ratio(a, b) is None
+    c = Member(3, F, None, (f32(0.9), f32(0.88), f32(0.86)))
+    assert link_ratio(a, c) is not None, "float rounding still links a real fraction"
