@@ -39,7 +39,7 @@ def test_explicit_type(session):
 
 def test_unknown_value_then_decreased(session, fake):  # AC-3.3
     sc = Scanner(session)
-    assert sc.first_scan(None) > 10 and sc.vtype is ValueType.FLOAT
+    assert sc.first_scan(None, ValueType.FLOAT) > 10 and sc.vtype is ValueType.FLOAT
     fake.poke(PID, BAR_ADDR, struct.pack("<f", 50.0))
     assert sc.next_scan(Compare.DECREASED) == 1
     assert sc.next_scan(Compare.UNCHANGED) == 1
@@ -273,3 +273,84 @@ def test_stand_still_cancel_stops_the_wait(session):  # review finding 7
     t0 = time.monotonic()
     sc.stand_still(interval_s=30, cancel=cancel, sleep=sleep)
     assert time.monotonic() - t0 < 5
+
+
+# -- "I don't know the number" over decimals and whole numbers at once ---------------
+
+
+def test_unknown_searches_decimals_and_whole_numbers_at_once(session, fake):
+    sc = Scanner(session)
+    total = sc.first_scan(None)
+    assert set(sc.types) == {ValueType.FLOAT, ValueType.INT32}
+    assert sc.mixed and sc.vtype is None and total == sum(sc.types.values())
+    fake.poke(PID, GOLD_ADDR, struct.pack("<i", 2000))  # whole-number gold spent
+    sc.next_scan(Compare.DECREASED)
+    assert ValueType.INT32 in sc.types
+    assert sc.next_scan(Compare.EXACT, 2000) == 1
+    assert sc.vtype is ValueType.INT32 and not sc.mixed, "only whole numbers left"
+    [m] = sc.matches()
+    assert (m.address, m.value) == (GOLD_ADDR, 2000)
+
+
+def test_unknown_finds_a_decimal_bar_too(session, fake):
+    sc = Scanner(session)
+    sc.first_scan(None)
+    fake.poke(PID, BAR_ADDR, struct.pack("<f", 50.5))
+    sc.next_scan(Compare.DECREASED)
+    assert sc.next_scan(Compare.EXACT, 50.5) >= 1
+    assert sc.vtype is ValueType.FLOAT
+    assert BAR_ADDR in {m.address for m in sc.matches(50)}
+
+
+def test_typed_decimal_drops_the_whole_number_search(session, fake):
+    sc = Scanner(session)
+    sc.first_scan(None)
+    sc.next_scan(Compare.BETWEEN, (87.3, 87.5))
+    assert sc.vtype is ValueType.FLOAT and BAR_ADDR in {m.address for m in sc.matches(50)}
+
+
+def test_mixed_matches_carry_their_type(session, fake):
+    sc = Scanner(session)
+    sc.show_limit = 500
+    sc.first_scan(None, value_range=(2000, 2500))
+    rows = sc.matches(500)
+    by_addr = {m.address: m for m in rows}
+    assert by_addr[GOLD_ADDR].vtype is ValueType.INT32 and by_addr[GOLD_ADDR].value == 2450
+
+
+def test_picked_type_still_searches_one_type(session):
+    sc = Scanner(session)
+    sc.first_scan(None, ValueType.INT32)
+    assert set(sc.types) == {ValueType.INT32} and sc.vtype is ValueType.INT32
+
+
+def test_mixed_search_that_ends_empty_keeps_its_types_and_file(session, fake):
+    from cheatmaker.paths import scans_dir
+
+    sc = Scanner(session)
+    sc.first_scan(None)
+    assert sc.next_scan(Compare.EXACT, 123456789.5) == 0
+    assert sc.types and sc.vtype is not None, "an empty search keeps a type"
+    files = sorted(scans_dir().rglob("scan-*.txt"))
+    assert [f.name for f in files] == ["scan-001.txt", "scan-002.txt"]
+
+
+@pytest.mark.parametrize(
+    ("vtype", "cmp", "value", "want"),
+    [
+        (ValueType.INT32, Compare.EXACT, 87.5, None),
+        (ValueType.INT32, Compare.EXACT, 87.0, 87),
+        (ValueType.INT32, Compare.EXACT, 2**40, None),
+        (ValueType.INT32, Compare.BETWEEN, (-3.5, -1.2), (-3, -2)),
+        (ValueType.INT32, Compare.BETWEEN, (0.5, 0.9), None),
+        (ValueType.INT32, Compare.BETWEEN, (-(2**40), 2**40), (-(2**31), 2**31 - 1)),
+        (ValueType.INT32, Compare.DECREASED_BY, (2.5, 0.1), None),
+        (ValueType.INT32, Compare.DECREASED_BY, (3.0, 1.0), (3, 1.0)),
+        (ValueType.FLOAT, Compare.EXACT, 87.5, 87.5),
+        (ValueType.INT32, Compare.INCREASED, None, None),
+    ],
+)
+def test_value_for_each_type(vtype, cmp, value, want):
+    from cheatmaker.core.values import value_for
+
+    assert value_for(vtype, cmp, value) == want

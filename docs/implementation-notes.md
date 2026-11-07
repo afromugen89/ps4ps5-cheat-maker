@@ -197,3 +197,16 @@ Read against PS5Debug-NG's own source (Pharaoh2k/ps5debug-NG, 1.3.2: `main.c`,
   that reads at ~40 MB/s; skipping it could cut first searches further, but it only
   lists 8,192 regions (Returnal has 38,108 maps), so it needs a console look first.
 - Console test C13.
+
+## Unknown search over several number types (2026-11-07)
+
+Kein asked for "I don't know the number" to cover whole numbers too. With no type
+picked, it now searches `UNKNOWN_TYPES` (4-byte decimal and 4-byte whole number) side by
+side. NG keeps one snapshot per connection, so each extra type gets its own connection
+(`_multi_start`), and the snapshots are made and narrowed at the same time. A typed
+number or range is adapted per type (`value_for`: 87.5 can't be a whole number, a range
+is rounded inward), a type with no matches left is dropped (its snapshot freed), and
+results carry their `vtype`. The Scanner's `vtype` is None while more than one type is
+left (`Scanner.mixed`); scan files then add a Type column. If no second connection can
+be opened, the search runs on the first type only. FakeConsole uses `MultiScan`.
+Console test C14.

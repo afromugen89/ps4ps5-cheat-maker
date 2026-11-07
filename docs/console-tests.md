@@ -144,3 +144,11 @@ search 101.7 s (2,842 requests), 8-byte search 152.9 s.
 | C13c | Next search with many matches | Search a common number (thousands of matches), change it in game, search the new number. Then press **Went down** on a list of a few thousand. | The next search takes seconds, not a full re-scan. Went down works on lists up to ~4,000 nearby groups instead of saying "too many". | The `action=scan_stats` / `action=scan_next` lines. |
 | C13d | Unknown search narrowing | **I don't know the number**, then **Went down** and **Same** a few times. | Each narrowing is faster than before (compare with an old log if you have one). Counts behave as in C11a. | The `action=resident_next` lines with times. |
 | C13e | No crash, no stuck connection | Do C13a twice in a row, cancel one search half way, then use Set and Freeze. | Nothing hangs; PS5Debug-NG doesn't need a restart. | Say if anything stopped answering. |
+
+## C14 Unknown search over decimals and whole numbers (added 2026-11-07)
+
+| # | Test | Steps | Pass when | Send back |
+|---|---|---|---|---|
+| C14a | Both kinds at once | Any game. **I don't know the number** with Advanced off. | The count shows decimals and whole numbers. Log `action=multi_type_snapshot counts={'FLOAT': ..., 'INT32': ...}`. Takes up to about twice an old unknown search. The whole-number snapshot is stored in full (no float filter), so it needs more room on the PS5; if it doesn't fit, the log says `action=multi_type_skip` and the search carries on with decimals only. | The `action=multi_type_snapshot` and `action=snapshot` lines. |
+| C14b | Narrow to a whole number | Spend some of a whole-number value (gold, ammo). **Went down**, then type the new number and Search. | Only whole numbers are left, the real value is in the list, and Set changes it in game. | The `action=scan_next ... types=` lines. |
+| C14c | Narrow to a bar | Start again; take damage on a health bar; **Went down**, **Same**, **Went down**. | The bar is still found (decimals), as before this change. | The `action=scan_next` lines. |

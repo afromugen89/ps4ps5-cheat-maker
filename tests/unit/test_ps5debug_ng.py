@@ -91,7 +91,8 @@ class FakeNgServer:
     ) -> None:
         self.aliasing = aliasing
         self.snapshot = snapshot
-        self.resident: dict | None = None  # {"pid","vt","fmt","size","vals": {addr: bytes}}
+        # Per connection, like NG: {conn: {"pid","fmt","size","vals": {addr: bytes}}}
+        self.residents: dict[int, dict] = {}
         self.parallel, self.refuse_flags = parallel, refuse_flags
         self.scan_flags: list[int] = []
         self.scan_compares: list[int] = []
@@ -107,7 +108,10 @@ class FakeNgServer:
         self.scan_conns: set[int] = set()  # connections that ran an exact/between scan
         self.slices: list[tuple[int, int]] = []
         self.connections = 0
-        self.fail_scan_on: set[int] = set()  # connection numbers that hang up mid-scan
+        self.fail_scan_on: set[int] = set()
+        self.snapshot_fail_on: set[int] = (
+            set()
+        )  # connections whose snapshot has no room  # connection numbers that hang up mid-scan
         self.sock = socket.socket()
         self.sock.bind(("127.0.0.1", 0))
         self.sock.listen(8)
@@ -115,6 +119,11 @@ class FakeNgServer:
         self._local = threading.local()
         self.thread = threading.Thread(target=self._serve, daemon=True)
         self.thread.start()
+
+    @property
+    def resident(self) -> dict | None:
+        """The first live console snapshot (tests with one search have one)."""
+        return next(iter(self.residents.values()), None)
 
     def _recv(self, c, n):
         buf = b""
@@ -246,12 +255,12 @@ class FakeNgServer:
             self._resident_count(c, body)
         elif cmd == Cmd.TURBOSCAN_GET:
             start, count, _flags = struct.unpack("<III", body)
-            r = self.resident or {"vals": {}}
+            r = self.residents.get(self._local.conn) or {"vals": {}}
             items = sorted(r["vals"].items())[start : start + count]
             recs = b"".join(struct.pack("<Q", a) + v + v for a, v in items)
             c.sendall(OK + struct.pack("<I", len(items)) + recs + OK)
         elif cmd == Cmd.TURBOSCAN_END:
-            self.resident = None
+            self.residents.pop(self._local.conn, None)
             c.sendall(OK)
         elif cmd in (Cmd.TURBOSCAN_START, Cmd.PROC_SCAN_START):
             assert self.authed
@@ -315,6 +324,13 @@ class FakeNgServer:
 
     def _snapshot_start(self, c, body):
         assert self.authed and len(body) == 27
+        if self._local.conn in self.snapshot_fail_on:  # no room on the PS5
+            c.sendall(OK + OK)
+            (nseg,) = struct.unpack("<I", self._recv(c, 4))
+            self._recv(c, 12 * nseg)
+            c.sendall(struct.pack("<QQ", 0, 0) + struct.pack("<Q", SENTINEL_U64))
+            c.sendall(struct.pack("<IQ", 0, 0) + OK)
+            return
         pid, _a, _n, vt, ct, align, lv, flags = struct.unpack("<IQIBBBII", body)
         assert ct == 11 and lv == 0 and flags & 0x10
         self.scan_flags.append(flags)
@@ -333,17 +349,17 @@ class FakeNgServer:
         total = sum(n for _, n in segs)
         c.sendall(struct.pack("<QQ", total // align, total))
         c.sendall(struct.pack("<Q", total) + struct.pack("<Q", SENTINEL_U64))
-        self.resident = {"pid": pid, "fmt": fmt, "size": size, "vals": vals}
+        self.residents[self._local.conn] = {"pid": pid, "fmt": fmt, "size": size, "vals": vals}
         c.sendall(struct.pack("<IQ", 1, len(vals)) + OK)
 
     def _resident_count(self, c, body):
         pid, _base, _vt, ct, lv, flags = struct.unpack("<IQBBII", body)
-        assert flags & 0x02 and self.resident is not None
+        assert flags & 0x02 and self._local.conn in self.residents
         self.count_flags.append(flags)
         self.scan_compares.append(ct)
         c.sendall(OK)
         needle = self._recv(c, lv) if lv else b""
-        r = self.resident
+        r = self.residents[self._local.conn]
         fmt = r["fmt"]
         keep = {}
         for a, old in r["vals"].items():
@@ -1024,4 +1040,86 @@ def test_speed_settings_default_and_fall_back(tmp_path):
 def test_client_clamps_scan_connections(server):
     cl = Ps5DebugNgClient.connect("127.0.0.1", server.port, timeout=3, scan_connections=50)
     assert cl.scan_connections == 8
+    cl.close()
+
+
+def test_unknown_over_two_types_uses_a_snapshot_per_connection():
+    server = FakeNgServer(snapshot=True)
+    cl = Ps5DebugNgClient.connect("127.0.0.1", server.port, timeout=3)
+    regions = [m for m in cl.maps(PID) if m.writable]
+    seen = []
+    types = (ValueType.FLOAT, ValueType.INT32)
+    total = cl.scan_start(PID, regions, types, Compare.UNKNOWN, None, seen.append)
+    counts = cl.scan_counts()
+    assert set(counts) == set(types) and total == sum(counts.values())
+    assert len(server.residents) == 2 and seen[-1] == 1.0
+    server.fake.poke(PID, GOLD_ADDR, struct.pack("<i", 2000))
+    cl.scan_next(Compare.DECREASED, None)
+    assert cl.scan_next(Compare.EXACT, 2000) == 1
+    assert cl.scan_counts() == {ValueType.INT32: 1}
+    [hit] = cl.scan_results(5)
+    assert hit.address == GOLD_ADDR and hit.vtype is ValueType.INT32
+    assert len(server.residents) == 1, "the decimal snapshot was freed"
+    cl.scan_cancel()
+    assert not server.residents
+    assert cl.version() == "1.3"
+    cl.close()
+
+
+def test_two_type_unknown_typed_decimal_skips_whole_numbers():
+    server = FakeNgServer(snapshot=True)
+    cl = Ps5DebugNgClient.connect("127.0.0.1", server.port, timeout=3)
+    regions = [m for m in cl.maps(PID) if m.writable]
+    cl.scan_start(PID, regions, (ValueType.FLOAT, ValueType.INT32), Compare.UNKNOWN, None)
+    n = cl.scan_next(Compare.BETWEEN, (87.3, 87.5))
+    assert n >= 1 and set(cl.scan_counts()) == {ValueType.FLOAT}
+    assert BAR_ADDR in {h.address for h in cl.scan_results(50)}
+    cl.close()
+
+
+def test_two_type_unknown_falls_back_when_no_second_connection():
+    server = FakeNgServer(snapshot=True)
+    cl = Ps5DebugNgClient.connect("127.0.0.1", server.port, timeout=3)
+    regions = [m for m in cl.maps(PID) if m.writable]
+    cl.port = 1  # no extra connection
+    cl.scan_start(PID, regions, (ValueType.FLOAT, ValueType.INT32), Compare.UNKNOWN, None)
+    assert set(cl.scan_counts()) == {ValueType.FLOAT}
+    cl.close()
+
+
+def test_two_type_unknown_keeps_the_type_that_fit():
+    """Review: a whole-number snapshot that doesn't fit on the PS5 must not fail the
+    decimal search that worked before."""
+    server = FakeNgServer(snapshot=True)
+    cl = Ps5DebugNgClient.connect("127.0.0.1", server.port, timeout=3)
+    regions = [m for m in cl.maps(PID) if m.writable]
+    server.snapshot_fail_on = {server.connections + 1}  # the next (extra) connection
+    n = cl.scan_start(PID, regions, (ValueType.FLOAT, ValueType.INT32), Compare.UNKNOWN, None)
+    assert n > 0 and set(cl.scan_counts()) == {ValueType.FLOAT}
+    assert len(server.residents) == 1
+    cl.close()
+
+
+def test_two_type_unknown_fails_when_no_type_fits():
+    server = FakeNgServer(snapshot=True)
+    cl = Ps5DebugNgClient.connect("127.0.0.1", server.port, timeout=3)
+    regions = [m for m in cl.maps(PID) if m.writable]
+    server.snapshot_fail_on = {1, 2}
+    with pytest.raises(ScanNotSupported):
+        cl.scan_start(PID, regions, (ValueType.FLOAT, ValueType.INT32), Compare.UNKNOWN, None)
+    assert cl.version() == "1.3"
+    cl.close()
+
+
+def test_whole_numbers_left_then_a_decimal_number_lists_nothing_stale():
+    server = FakeNgServer(snapshot=True)
+    cl = Ps5DebugNgClient.connect("127.0.0.1", server.port, timeout=3)
+    regions = [m for m in cl.maps(PID) if m.writable]
+    cl.scan_start(PID, regions, (ValueType.FLOAT, ValueType.INT32), Compare.UNKNOWN, None)
+    server.fake.poke(PID, GOLD_ADDR, struct.pack("<i", 2000))
+    cl.scan_next(Compare.EXACT, 2000)
+    assert set(cl.scan_counts()) == {ValueType.INT32}
+    assert cl.scan_next(Compare.EXACT, 87.5) == 0
+    assert cl.scan_counts() == {ValueType.INT32: 0} and cl.scan_results(10) == []
+    assert cl.scan_next(Compare.INCREASED, None) == 0, "an emptied type stays empty"
     cl.close()

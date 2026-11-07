@@ -12,6 +12,7 @@ from PySide6.QtWidgets import QMessageBox
 
 from cheatmaker.console.uploader import Uploader
 from cheatmaker.core.guide import Action, Shows
+from cheatmaker.core.values import ValueType
 from cheatmaker.settings import Settings
 from cheatmaker.ui import hints, messages
 from cheatmaker.ui.cheats_view import COL_KEEPS, COL_NAME, COL_ON, COL_VALUE
@@ -682,3 +683,15 @@ def test_scan_files_button_opens_this_searchs_folder(win, monkeypatch):
     assert "scan-001.txt" in f.count.toolTip()
     f.files_btn.click()
     assert [Path(u.toLocalFile()) for u in opened] == [folder]
+
+
+def test_unknown_search_shows_both_types_and_lists_whole_numbers(win, fake):
+    connect(win)
+    win.find.unknown_btn.click()
+    assert "decimal" in win.find.count.text() and "whole number" in win.find.count.text()
+    fake.poke(PID, GOLD_ADDR, struct.pack("<i", 2000))
+    win.find.number.setText("2000")
+    win.find.search_btn.click()
+    assert win.find.count.text() == "1 matches"
+    assert win.find.row_types == [ValueType.INT32]
+    win.find.test_btn.click()  # one match: nothing to test, no crash
