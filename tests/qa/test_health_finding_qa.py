@@ -621,10 +621,6 @@ def test_rt03_ng_one_percent_lists_each_address_once():
         s.disconnect()
 
 
-@pytest.mark.xfail(
-    reason="BUG-05: a 0% PC check ties every match to 'percent', so the next % drops it",
-    strict=True,
-)
 @pytest.mark.parametrize("about", [False, True])
 def test_bug05_zero_percent_on_the_pc_then_heal_keeps_the_value(fake, session, about):
     """Under the limit, 0% is checked on the PC (Full is known), then 30% / About 25%

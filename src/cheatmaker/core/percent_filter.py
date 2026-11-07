@@ -97,11 +97,40 @@ def matches_way(
     return lo <= cur <= hi
 
 
+def fitting(
+    vtype: ValueType, way: Scale | None, cur: float | int, full: Full | None, target: Target
+) -> list[Scale]:
+    """Every way ``cur`` holds the target percent (empty: it doesn't)."""
+    return [w for w in ways_to_try(vtype, way, target) if matches_way(cur, w, full, target, vtype)]
+
+
 def check(
     vtype: ValueType, way: Scale | None, cur: float | int, full: Full | None, target: Target
 ) -> Scale | None:
-    """The way ``cur`` holds the target percent, or None."""
-    return next(
-        (w for w in ways_to_try(vtype, way, target) if matches_way(cur, w, full, target, vtype)),
-        None,
-    )
+    """The first way ``cur`` holds the target percent, or None (a yes / no check; to
+    tie a match to a way use ``tie``)."""
+    ways = fitting(vtype, way, cur, full, target)
+    return ways[0] if ways else None
+
+
+def agrees(way: Scale, full: Full) -> bool:
+    """A fixed way (percent, fraction, x10) fits a match whose value when full is
+    ``full`` only if that is 100% that way (100, 1.0, 1000), give or take a point and
+    how far off the estimate may be."""
+    want = 100.0 * way.factor
+    return abs(full.value - want) <= want * (FULL_TOL / 100.0 + full.rel_err)
+
+
+def tie(ways: list[Scale], full: Full | None = None) -> Scale | None:
+    """The way to tie a match to, given every way it fits (not empty).
+
+    With a known value when full (a Full search), the first way that agrees with it:
+    0 at 0% fits every way, but a shield whose full is 1,700 is kept "of full", not as
+    a percent (whose full is 100). Otherwise, or when no way agrees: the only way it
+    fits, or None when it fits several (1.2 is 1% and 0.12% x10), so every way is
+    tried again next time until one is left."""
+    if full is not None and full.value and math.isfinite(full.value):
+        ok = [w for w in ways if w == OF_FULL or agrees(w, full)]
+        if ok:
+            return ok[0]
+    return ways[0] if len(ways) == 1 else None

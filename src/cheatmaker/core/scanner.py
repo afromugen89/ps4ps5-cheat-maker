@@ -339,13 +339,18 @@ class Scanner:
         if not self.active:
             return self._percent_first(value, unit, vtype, progress, cancel)
         text = f"{value:g}%"
-        if self.percent_search and not self.full_mode:
+        if self.percent_search and not self.full_mode and not self._untied():
             count = self._narrow(Compare.BETWEEN, window(value, unit), progress, cancel)
         else:
             count, text = self._percent_pc(percent_filter.Target(value, unit), progress, cancel)
         self.history.append(text)
         self._record()
         return count
+
+    def _untied(self) -> bool:
+        """Some matches fit several ways at the last PC check and aren't tied to one yet
+        (they are checked on the PC again, every way)."""
+        return any(w is None for _t, w in self.parts)
 
     def about_scan(
         self,
@@ -485,9 +490,10 @@ class Scanner:
             key = (h.address, vt)
             est = ests[key]
             now = raw[h.address][: vt.size]
-            way = percent_filter.check(vt, h.way, vt.decode(now), est, target)
-            if way is None:
+            ways = percent_filter.fitting(vt, h.way, vt.decode(now), est, target)
+            if not ways:
                 continue
+            way = percent_filter.tie(ways, est)
             kept.append(ScanHit(h.address, now, vt, way))
             if est is not None:
                 full[key] = est

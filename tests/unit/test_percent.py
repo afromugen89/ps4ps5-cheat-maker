@@ -591,3 +591,43 @@ def test_zero_percent_then_went_up_over_the_limit_compares(fake, session):
     sc.percent_scan(30, 1.0)
     assert sc.history[-1] == "30% (as went up)" and sc.note == TOO_MANY
     assert HEAP_BASE + 0x500 in {m.address for m in sc.matches(5000)}
+
+
+# -- QA BUG-05: a value that fits several ways at a low percent ---------------------------
+def test_tie_prefers_the_way_that_agrees_with_full():
+    every = [PERCENT, FRACTION, X10, OF_FULL]
+    assert pf.tie(every, pf.Full(1700.0)) == OF_FULL, "0 at 0%: a shield out of 1,700"
+    assert pf.tie([PERCENT, X10, OF_FULL], pf.Full(120.0)) == OF_FULL, "1.2 at 1% of 120"
+    assert pf.tie([PERCENT, OF_FULL], pf.Full(100.0)) is PERCENT, "full is 100: a percent"
+    assert pf.tie([FRACTION, OF_FULL], pf.Full(1.0)) is FRACTION
+    assert pf.tie([X10], pf.Full(250.0)) is X10, "the only way it fits"
+    assert pf.tie([PERCENT, X10]) is None, "no Full: left untied"
+    assert pf.tie([X10]) is X10
+
+
+def test_low_percent_fits_every_way_and_stays_untied_until_one_is_left(fake, session):
+    """0 at 0% (no Full known) fits percent, fraction and x10: the match isn't tied to
+    percent, so 300 at 30% (x10) is still found."""
+    edge = HEAP_BASE + 0x500
+    f32(fake, edge, 0.0)
+    sc = Scanner(session)
+    sc.first_scan(None, F)
+    sc.percent_scan(0, 1.0)
+    assert sc.note is None
+    [m] = [m for m in sc.matches(5000) if m.address == edge]
+    assert m.way is None
+    f32(fake, edge, 300.0)
+    sc.percent_scan(30, 1.0)
+    [m] = [m for m in sc.matches(5000) if m.address == edge]
+    assert m.way == X10
+
+
+def test_zero_percent_in_a_full_search_ties_of_full(fake, session):
+    edge = HEAP_BASE + 0x500
+    f32(fake, edge, 1700.0)
+    sc = Scanner(session)
+    sc.mark_full(F)
+    f32(fake, edge, 0.0)
+    sc.percent_scan(0, 1.0)
+    [m] = [m for m in sc.matches(5000) if m.address == edge]
+    assert m.way == OF_FULL

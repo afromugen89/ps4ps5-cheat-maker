@@ -57,6 +57,12 @@ PC. Grouping only uses value history the Scanner collects in `_record()`.
      only in the narrowest (smallest factor). A decimal whose values are all subnormal
      (a whole number's bytes) is never kept "of full" and is left out of groups; one
      address is never twice in a group.
+   - Tying a match to a way at a PC check (`percent_filter.tie`): with a value when full
+     known, the first fitting way that agrees with it (percent only if full ~100,
+     fraction ~1, x10 ~1000, else of full), so 0 at 0% of a 1,700 shield is "of full".
+     Without one, a value fitting several ways (0 at 0%, 1.2 at 1%) stays untied (way
+     None) and is checked every way again; a percent search with untied matches checks
+     on the PC instead of narrowing on the console.
    - `percent_pc_limit` setting, default 20,000, clamped 1,000..100,000.
    - Re-mark Full during a search: confirm ("Keep it full and don't touch the
      controller"), run a Same scan, `last_pct=100`, clear `full` (deviation from spec: it
