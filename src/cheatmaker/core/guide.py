@@ -29,6 +29,8 @@ class Action(Enum):
     MAKE_CHEAT = "make cheat"
     TRY_NEXT = "try next"  # run ``Suggestion.fallback``
     START_OVER = "start over"
+    FULL = "full"  # fill it up, It's full now
+    PERCENT = "percent"  # type the % the game shows, or About 75 / 50 / 25%
 
 
 class Scan(Enum):
@@ -39,6 +41,8 @@ class Scan(Enum):
     NEXT_EXACT = "next exact"
     COMPARE = "compare"  # Went up / down / Changed / Same, with or without "by"
     STAND_STILL = "stand still"
+    FULL = "full"  # It's full now (first scan, or full again)
+    PERCENT = "percent"  # a typed N% or About X%
 
 
 FALLBACKS: list[tuple[str, str]] = [  # (key, what the hint calls it), in the order tried
@@ -49,6 +53,13 @@ FALLBACKS: list[tuple[str, str]] = [  # (key, what the hint calls it), in the or
     ("unknown", "an unknown value (Went up / Went down)"),
 ]
 _LABEL = dict(FALLBACKS)
+
+
+FILL_UP = "Fill it up, then press It's full now."
+GO_DOWN = (
+    "Make it go down, then type the % if the game shows it anywhere (pause or stats "
+    "screen), or pick About 75 / 50 / 25%."
+)
 
 
 @dataclass(frozen=True)
@@ -65,12 +76,15 @@ class Guide:
         self.compares_in_row = 0
         self.show_limit = show_limit  # the Find view's "Show up to"
         self.last_count: int | None = None
+        self.full_mode = False  # the player pressed It's full now in this search
 
     def start(self, shows: Shows) -> Suggestion:
         self.shows = shows
         self.new_value()
         if shows is Shows.NUMBER:
             return Suggestion("Type the number you see, then press Search.", Action.SEARCH)
+        if shows is Shows.BAR:  # AC-P4
+            return Suggestion(FILL_UP, Action.FULL)
         return Suggestion(
             "Press I don't know the number. Then make it go up or down in the game.",
             Action.UNKNOWN,
@@ -81,6 +95,7 @@ class Guide:
         self.tried = []
         self.compares_in_row = 0
         self.last_count = None
+        self.full_mode = False
 
     def note_tried(self, key: str) -> None:
         if key in _LABEL and key not in self.tried:
@@ -90,11 +105,16 @@ class Guide:
         return next((k for k, _ in FALLBACKS if k not in self.tried), None)
 
     def after_scan(self, scan: Scan, count: int) -> Suggestion:
+        if scan is Scan.FULL:
+            self.full_mode = True
+        if scan is Scan.PERCENT:  # a percent search looks at these ways already
+            for key in ("shown", "fraction", "x10"):
+                self.note_tried(key)
         if scan in (Scan.COMPARE, Scan.STAND_STILL):
             self.compares_in_row += 1
         else:
             self.compares_in_row = 0
-        first = scan in (Scan.FIRST_EXACT, Scan.FIRST_UNKNOWN)
+        first = scan in (Scan.FIRST_EXACT, Scan.FIRST_UNKNOWN, Scan.FULL)
         stuck = not first and self.last_count == count  # narrowing dropped nothing
         self.last_count = count
         if count == 0:
@@ -136,6 +156,8 @@ class Guide:
         )
 
     def _narrow(self) -> Suggestion:
+        if self.full_mode and self.compares_in_row < 2:
+            return Suggestion(GO_DOWN, Action.PERCENT)
         if self.compares_in_row >= 2 and self.shows is not Shows.NUMBER:
             return Suggestion(
                 "Still too many. Press Stand still and leave the controller alone to drop "

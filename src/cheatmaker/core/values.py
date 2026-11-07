@@ -194,6 +194,109 @@ class Scale:
 
 SHOWN = Scale("the number shown", 1)
 
+# Ways a game keeps a percent it shows (spec-health-finding AC-P1). "of full" is only a
+# label: those values are checked on the PC against each match's value when full.
+PERCENT = Scale("percent", 1)
+FRACTION = Scale("fraction", 0.01, decimal=True)
+X10 = Scale("x10", 10)
+OF_FULL = Scale("of full", 1)
+PERCENT_WAYS = (PERCENT, FRACTION, X10)
+PERCENT_TYPES = (ValueType.FLOAT, ValueType.INT32)
+
+
+def _whole(x: float) -> bool:
+    return abs(x - round(x)) < 1e-9
+
+
+def percent_parts(
+    value: float | int, picked: ValueType | None = None
+) -> list[tuple[ValueType, Scale]]:
+    """(number type, way) pairs a percent search looks for: decimals as percent,
+    fraction and x10; whole numbers as percent and x10 when those are whole. A picked
+    type searches that type only."""
+    types = (picked,) if picked is not None else PERCENT_TYPES
+    out = []
+    for vt in types:
+        for way in PERCENT_WAYS:
+            if vt.is_float or (not way.decimal and _whole(value * way.factor)):
+                out.append((vt, way))
+    return out
+
+
+def scale_target(way: Scale | None, cmp: Compare, value):
+    """The search value ``value`` (as the game shows it) for matches stored ``way``."""
+    if way is None or way.factor == 1 or value is None:
+        return value
+    f = way.factor
+    if cmp is Compare.BETWEEN:
+        lo, hi = value
+        return (lo * f, hi * f)
+    if cmp.by_amount:
+        amount, tol = value
+        return (amount * f, tol * f)
+    if cmp is Compare.EXACT:
+        return way.apply(value)
+    return value
+
+
+def f32(x: float) -> float:
+    """``x`` as a 4-byte decimal holds it (nearest)."""
+    return struct.unpack("<f", struct.pack("<f", x))[0]
+
+
+def _f32_step(x: float, up: bool) -> float:
+    """The next 4-byte decimal after ``x`` (itself a 4-byte decimal), up or down."""
+    if x == 0:
+        tiny = struct.unpack("<f", struct.pack("<I", 1))[0]
+        return tiny if up else -tiny
+    (bits,) = struct.unpack("<i", struct.pack("<f", x))
+    bits += 1 if (x > 0) == up else -1
+    return struct.unpack("<f", struct.pack("<i", bits))[0]
+
+
+def open_window(vtype: ValueType, rng: tuple[float, float]) -> tuple[float, float]:
+    """An open-ended match window as ``vtype`` sees it. A 4-byte decimal can't hold
+    0.41 exactly (it reads 0.4099999964), so a bound one unit away must be compared in
+    4-byte decimals too, or "40%" would keep a stored 0.41."""
+    if vtype is not ValueType.FLOAT:
+        return rng
+    lo, hi = rng
+    if not (math.isfinite(lo) and math.isfinite(hi)):
+        return rng
+    return (_f32_step(f32(lo), True), _f32_step(f32(hi), False))
+
+
+def part_value(vtype: ValueType, way: Scale | None, cmp: Compare, value):
+    """The search value for one (type, way) part of a percent search, or None when no
+    number of that type can match. A BETWEEN window is open-ended (less than one unit
+    away), as ``window`` makes it."""
+    v = scale_target(way, cmp, value)
+    if way is not None and cmp is Compare.BETWEEN and v is not None:
+        v = open_window(vtype, v)
+        if v[0] > v[1]:
+            return None
+    return value_for(vtype, cmp, v) if value is not None else None
+
+
+def parse_percent(text: str) -> tuple[float | int, float] | None:
+    """A percent the player typed ("40%", "40.5 %") as (value, unit), or None when the
+    text has no %. Raises ValueError in plain English when it isn't 0 to 100."""
+    t = text.strip()
+    if not t.endswith("%"):
+        return None
+    num = t[:-1].strip()
+    if not num:
+        raise ValueError("Type a number before the %, e.g. 40%.")
+    value = parse_number(num)
+    if not 0 <= value <= 100:
+        raise ValueError(f'"{t}" isn\'t a percent. Type a number from 0 to 100, then %.')
+    return value, unit_of(num)
+
+
+def window(value: float | int, unit: float) -> tuple[float, float]:
+    """Values less than ``unit`` away from ``value`` (open ends), as an inclusive range."""
+    return (math.nextafter(value - unit, math.inf), math.nextafter(value + unit, -math.inf))
+
 
 def make_scale(kind: str, max_value: float | int = 100) -> Scale:
     """``kind``: "shown", "fraction", "x10", "x100" or "x1000". Raises ValueError."""
