@@ -19,7 +19,6 @@ from cheatmaker.core.session import Session
 from cheatmaker.core.values import FRACTION, OF_FULL, PERCENT, X10, Compare, ValueType
 from cheatmaker.settings import Settings
 from cheatmaker.ui.controller import Controller
-from cheatmaker.ui.find_wizard import ROW
 from cheatmaker.ui.main_window import MainWindow
 from cheatmaker.ui.tasks import TaskRunner
 from tests.conftest import HEAP_BASE, PID, build_fake
@@ -442,16 +441,31 @@ def _int_health_full_chain(sc: Scanner, fake: FakeConsole) -> None:
         sc.percent_scan(pct, 1.0)
 
 
-@pytest.mark.xfail(
-    reason="BUG-01: a whole number's 4-byte-decimal twin (denormal) heads its group",
-    strict=True,
-)
 def test_bug01_int_health_group_head_is_the_whole_number(fake, session):
+    """Retest of BUG-01: the decimal reading of the whole number's bytes (1e-43) is not
+    kept "of full", so only the whole number is left (no group: 1 match)."""
     sc = Scanner(session)
     _int_health_full_chain(sc, fake)
-    [g] = [g for g in sc.groups() if g.head.address == HP]
-    assert g.head.vtype is W, "the group row must act on the whole number, not 3.5e-44"
-    assert g.copies == 0 or all(m.address != HP for m in g.members[1:])
+    assert sc.count == 1 and sc.types == {W: 1}
+    [m] = sc.matches(10)
+    assert (m.address, m.vtype, m.value, m.way) == (HP, W, 25, OF_FULL)
+    assert sc.groups() == []
+
+
+def test_bug01_int_health_with_fraction_groups_without_the_twin(fake, session):
+    """With a real fraction next to it, the group is the whole number and the fraction;
+    the decimal reading of the whole number is in no group."""
+    sc = Scanner(session)
+    i32(fake, HP, 250)
+    f32(fake, HP_FRAC, 1.0)
+    sc.mark_full()
+    for hp, pct in ((100, 40), (50, 20), (25, 10)):
+        i32(fake, HP, hp)
+        f32(fake, HP_FRAC, hp / 250)
+        sc.percent_scan(pct, 1.0)
+    [g] = sc.groups()
+    assert {(m.address, m.vtype) for m in g.members} == {(HP, W), (HP_FRAC, F)}
+    assert g.label == LIKELY and g.copies == 1
 
 
 def test_bug01_plain_unknown_search_group_head_is_the_whole_number(fake, session):
@@ -465,27 +479,26 @@ def test_bug01_plain_unknown_search_group_head_is_the_whole_number(fake, session
     assert g.head.vtype is W
 
 
-@pytest.mark.xfail(
-    reason="BUG-01: Set / Make a cheat on the group row use the decimal twin's type",
-    strict=True,
-)
-def test_bug01_ui_set_on_group_row_writes_a_whole_number(hwin, fake):
+def test_bug01_ui_set_on_the_one_row_writes_a_whole_number(hwin, fake):
+    """Retest of BUG-01 in the Find view: one row, a whole number; Set and Make a cheat
+    use the whole-number type."""
     f = hwin.find
     i32(fake, HP, 250)
     f.full_btn.click()
     for hp, pct in ((100, 40), (50, 20), (25, 10)):
         i32(fake, HP, hp)
         search(hwin, f"{pct}%")
-    assert f.grouped
-    top = next(
-        f.tree.topLevelItem(t)
-        for t in range(f.tree.topLevelItemCount())
-        if f.rows[f.tree.topLevelItem(t).data(0, ROW)].address == HP
-    )
-    f.tree.setCurrentItem(top)
+    assert hwin.ctl.scanner.count == 1 and not f.grouped and f.table.isVisibleTo(f)
+    assert [(m.address, m.vtype) for m in f.rows] == [(HP, W)]
+    f.table.selectRow(0)
     f.set_value.setText("200")
     f.set_btn.click()
     assert struct.unpack("<i", fake.peek(PID, HP, 4))[0] == 200
+    f.set_value.clear()
+    f.template.setCurrentIndex(0)
+    f.make_btn.click()
+    assert hwin.ctl.cheat_file.cheats[-1].locations[0].offset == HP
+    assert hwin.ctl.cheat_file.cheats[-1].value_type in (W, None)
 
 
 def test_bug02_zero_percent_then_percent_keeps_the_real_value(fake, session):
@@ -533,3 +546,111 @@ def test_bug04_noted_scan_drops_nothing(fake, session):
     sc.percent_scan(100, 1.0)  # same as Full: can only be noted
     assert sc.note == NOTED
     assert sc.count == before, "Noted, nothing dropped"
+
+
+# -- Retest of the fixes (f9a10e7, 1c071b3) --------------------------------------------
+def _ng_session():
+    from cheatmaker.console.ps5debug_ng import Ps5DebugNgClient
+    from tests.unit.test_ps5debug_ng import FakeNgServer
+
+    server = FakeNgServer(snapshot=True)
+    s = Session(lambda ip, port: Ps5DebugNgClient.connect(ip, server.port, timeout=3))
+    s.connect("127.0.0.1")
+    s.refresh_game()
+    return server, s
+
+
+def test_rt01_ng_noted_on_the_console_snapshot_keeps_inf_and_huge():
+    server, s = _ng_session()
+    try:
+        fake = server.fake
+        f32(fake, EDGE, float("inf"))
+        f32(fake, EDGE + 8, 3e38)
+        f32(fake, EDGE + 16, -float("inf"))
+        sc = Scanner(s)
+        sc.pc_limit = 1
+        show_hp(fake, 250)
+        before = sc.mark_full()
+        sc.percent_scan(100, 1.0)  # same as Full: noted
+        assert sc.note == NOTED and sc.count == before
+        assert {EDGE, EDGE + 8, EDGE + 16} <= set(addrs(sc))
+        show_hp(fake, 100)
+        sc.percent_scan(40, 1.0)
+        assert sc.history[-1] == "40% (as went down)" and HP in addrs(sc)
+    finally:
+        s.disconnect()
+
+
+def test_rt02_ng_noted_on_the_pc_too_many_to_read_is_refused_and_search_kept(monkeypatch):
+    """Percent search on the PC (parts), then It's full now, then the same % over the
+    limit: noting would read too many spans, so it is refused before anything changes."""
+    from cheatmaker.console import ps5debug_ng
+
+    server, s = _ng_session()
+    try:
+        fake = server.fake
+        f32(fake, HP, 40.0)
+        f32(fake, HP_FRAC, 0.4)
+        sc = Scanner(s)
+        sc.percent_scan(40, 1.0)
+        n = sc.count
+        sc.mark_full()
+        assert sc.full_mode and sc.count == n
+        history = list(sc.history)
+        monkeypatch.setattr(ps5debug_ng, "MAX_READ_SPANS", 0)
+        sc.pc_limit = 1
+        with pytest.raises(ValueError, match="too many to note a percent"):
+            sc.percent_scan(100, 1.0)
+        assert sc.count == n and sc.history == history and sc.last_pct == 100
+        monkeypatch.setattr(ps5debug_ng, "MAX_READ_SPANS", 4000)
+        assert sc.percent_scan(100, 1.0) == n and sc.note == NOTED
+    finally:
+        s.disconnect()
+
+
+def test_rt03_ng_one_percent_lists_each_address_once():
+    server, s = _ng_session()
+    try:
+        f32(server.fake, EDGE, 1.5)
+        sc = Scanner(s)
+        sc.percent_scan(1, 1.0, F)
+        found = addrs(sc)
+        assert found.count(EDGE) == 1 and sc.count == len(set(found))
+        assert {m.address: m.way for m in sc.matches(5000)}[EDGE] == PERCENT, "narrowest way"
+    finally:
+        s.disconnect()
+
+
+@pytest.mark.xfail(
+    reason="BUG-05: a 0% PC check ties every match to 'percent', so the next % drops it",
+    strict=True,
+)
+@pytest.mark.parametrize("about", [False, True])
+def test_bug05_zero_percent_on_the_pc_then_heal_keeps_the_value(fake, session, about):
+    """Under the limit, 0% is checked on the PC (Full is known), then 30% / About 25%
+    must still find the shield out of 1,700 (AC-P2)."""
+    f32(fake, EDGE, 1700.0)
+    sc = Scanner(session)
+    sc.mark_full(F)
+    f32(fake, EDGE, 0.0)
+    sc.percent_scan(0, 1.0)
+    assert sc.note is None and EDGE in addrs(sc)
+    f32(fake, EDGE, 510.0)  # 30%
+    if about:
+        sc.about_scan(25)
+    else:
+        sc.percent_scan(30, 1.0)
+    assert EDGE in addrs(sc), f"count={sc.count} history={sc.history}"
+
+
+def test_rt05_plain_number_over_100_in_a_full_search_explains(hwin, fake):
+    show_hp(fake, 250)
+    hwin.find.full_btn.click()
+    sc = hwin.ctl.scanner
+    n = sc.count
+    search(hwin, "250")
+    assert "type the % the game shows" in hwin.status.text()
+    assert "Start over" in hwin.status.text()
+    assert sc.count == n and sc.history == ["full"]
+    search(hwin, "100")  # 0..100 still counts as a percent
+    assert sc.history[-1].startswith("100%")

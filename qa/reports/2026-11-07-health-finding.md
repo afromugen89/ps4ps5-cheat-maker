@@ -1,5 +1,36 @@
 # QA report: easy health finding (percent search, It's full now, About X%, grouped copies)
 
+## 0. Re-test of the fixes (`f9a10e7`, `1c071b3`), 2026-11-07
+
+**Verdict: ⚠️ Ready with known issues.** BUG-01 to BUG-04 are fixed and verified. The re-test found one new bug, **BUG-05 (High)**: after It's full now, a 0% check done on the PC ties every match to "percent", so the next % drops the real value. The over-the-limit path is fixed (BUG-02); this is the under-the-limit path of the same 0% scenario.
+
+Full suite on `1c071b3` plus the QA file: **729 passed, 1 skipped, 2 xfailed**. Both xfails are BUG-05. Ruff check and format are clean.
+
+| Item | Result | Evidence |
+|---|---|---|
+| BUG-01 subnormal decimal twin | **Fixed** | The twin is never kept "of full" and never grouped. For int health alone, 1 INT32 match is left and no group forms. I agree that is correct: the spec groups only 2 to 500 matches, and a twin is not a copy. I rewrote the two tests to assert this. `test_bug01_int_health_group_head_is_the_whole_number`: 1 match `(HP, INT32, 25, of full)`. `test_bug01_ui_set_on_the_one_row_writes_a_whole_number`: Set 200 writes 200, and Make a cheat uses the int address and type. New: `test_bug01_int_health_with_fraction_groups_without_the_twin`, where the group is {int health, fraction}, likely real, +1 copy. Plain unknown search: pass. |
+| BUG-02 0% as went down, then % / About | **Fixed** | The percent is noted, not wiped. `test_bug02_*` pass. |
+| BUG-03 1% / 0% duplicates | **Fixed** | `one_way_each` keeps the narrowest way. `test_bug03_*` pass on FakeConsole. New `test_rt03_ng_one_percent_lists_each_address_once` passes on the NG client: 1.5 is listed once, as "percent". |
+| BUG-04 noted scan drops inf / huge | **Fixed** | `scan_rebase`. `test_bug04_noted_scan_drops_nothing` passes on FakeConsole. New `test_rt01_ng_noted_on_the_console_snapshot_keeps_inf_and_huge` passes: the NG snapshot keeps +inf, -inf and 3e38, the count is unchanged, and the next % narrows. A decimal that is NaN now is still dropped on NG snapshots (documented, no NG "keep all" compare). |
+| NG PC-side noted with more than 4,000 spans is refused | **Pass** | New `test_rt02_...`: a percent search on the PC, then It's full now, then the same % over the limit with `MAX_READ_SPANS=0`. ValueError "...too many to note a percent...". Count, history and last_pct are unchanged, and the same % works once readable. |
+| last_pct == 0 handled | **Pass** over the limit (BUG-02 tests). **Fail** under the limit: BUG-05 | |
+| Minor B: a plain number not 0..100 in a Full search | **Pass** | New `test_rt05_...`: typing `250` shows "...type the % the game shows... press Start over", and the search is unchanged. `100` still counts as 100%. |
+| Minor C: Test the hits uses the head's way | **Pass** | I reviewed `_test_candidates`. The implementor's UI test `test_test_the_hits_uses_the_heads_way_over_the_most_common` passes. |
+| Tree pick by (address, type) | **Pass** | Covered by the existing UI tests and TC-23..25. |
+
+### BUG-05: a 0% check on the PC ties every match to "percent", so the next % drops the real value
+- Severity: High. Priority: P1
+- Automated tests: `tests/qa/test_health_finding_qa.py::test_bug05_zero_percent_on_the_pc_then_heal_keeps_the_value[False]` (30%) and `[True]` (About 25%), both strict xfail.
+- Environment: `1c071b3`, FakeConsole, default `percent_pc_limit` (the check runs on the PC).
+- Steps to reproduce: 1. Shield 1,700, then press It's full now (Decimal). 2. The shield breaks to 0 and the game shows 0%: type `0%`. This runs on the PC; the shield is kept. 3. It recharges to 510: type `30%`, or press About 25%.
+- Expected result: the shield is kept as 30% of its value when full (AC-P2). The Full value (1,700) was known at the 0% check.
+- Actual result: `count=0 history=['full', '0%', '30%']`, and the same for `about 25%`. After step 2, the shield's way is `percent`, not `of full`.
+- Suspected cause: `core/percent_filter.py` `check()` returns the first way that matches, in the order percent, fraction, x10, of full. A value of 0 at 0% fits every way, so it is tied to "percent" (0 ± 1). From then on `ways_to_try` only checks that way. The same happens at low percents whenever the value lands in the percent window: a value whose full is 120 reads 1.2 at 1%. Possible fixes: (a) leave the match untied (way None) when more than one way fits, so the next check tries every way again; or (b) in a Full search, prefer "of full" when its Full value is known.
+- Impact for the product owner: a player tracking a shield that breaks to 0% loses the whole search on the next percent when the list was already small.
+
+---
+
+
 - Date: 2026-11-07. QA: qa-engineer agent
 - Build under test: `d9b02ef` on `claude/project-thread-mqbzh2` (diff `origin/main...HEAD`: `4aab0ca`, `3e8d07e`, `1a143b9`, `53fb260`, `d9b02ef`).
 - Environment: Linux, Python 3.13.18, PySide6 6.12.0 offscreen. Scanner flows on FakeConsole; the real PS5Debug-NG client driven over the wire by `FakeNgServer` (tests/unit/test_ps5debug_ng.py); Find view via pytest-qt with `TaskRunner(sync=True)`.
