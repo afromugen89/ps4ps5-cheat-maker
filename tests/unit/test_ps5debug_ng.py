@@ -108,7 +108,10 @@ class FakeNgServer:
         self.scan_conns: set[int] = set()  # connections that ran an exact/between scan
         self.slices: list[tuple[int, int]] = []
         self.connections = 0
-        self.fail_scan_on: set[int] = set()  # connection numbers that hang up mid-scan
+        self.fail_scan_on: set[int] = set()
+        self.snapshot_fail_on: set[int] = (
+            set()
+        )  # connections whose snapshot has no room  # connection numbers that hang up mid-scan
         self.sock = socket.socket()
         self.sock.bind(("127.0.0.1", 0))
         self.sock.listen(8)
@@ -321,6 +324,13 @@ class FakeNgServer:
 
     def _snapshot_start(self, c, body):
         assert self.authed and len(body) == 27
+        if self._local.conn in self.snapshot_fail_on:  # no room on the PS5
+            c.sendall(OK + OK)
+            (nseg,) = struct.unpack("<I", self._recv(c, 4))
+            self._recv(c, 12 * nseg)
+            c.sendall(struct.pack("<QQ", 0, 0) + struct.pack("<Q", SENTINEL_U64))
+            c.sendall(struct.pack("<IQ", 0, 0) + OK)
+            return
         pid, _a, _n, vt, ct, align, lv, flags = struct.unpack("<IQIBBBII", body)
         assert ct == 11 and lv == 0 and flags & 0x10
         self.scan_flags.append(flags)
@@ -1074,4 +1084,42 @@ def test_two_type_unknown_falls_back_when_no_second_connection():
     cl.port = 1  # no extra connection
     cl.scan_start(PID, regions, (ValueType.FLOAT, ValueType.INT32), Compare.UNKNOWN, None)
     assert set(cl.scan_counts()) == {ValueType.FLOAT}
+    cl.close()
+
+
+def test_two_type_unknown_keeps_the_type_that_fit():
+    """Review: a whole-number snapshot that doesn't fit on the PS5 must not fail the
+    decimal search that worked before."""
+    server = FakeNgServer(snapshot=True)
+    cl = Ps5DebugNgClient.connect("127.0.0.1", server.port, timeout=3)
+    regions = [m for m in cl.maps(PID) if m.writable]
+    server.snapshot_fail_on = {server.connections + 1}  # the next (extra) connection
+    n = cl.scan_start(PID, regions, (ValueType.FLOAT, ValueType.INT32), Compare.UNKNOWN, None)
+    assert n > 0 and set(cl.scan_counts()) == {ValueType.FLOAT}
+    assert len(server.residents) == 1
+    cl.close()
+
+
+def test_two_type_unknown_fails_when_no_type_fits():
+    server = FakeNgServer(snapshot=True)
+    cl = Ps5DebugNgClient.connect("127.0.0.1", server.port, timeout=3)
+    regions = [m for m in cl.maps(PID) if m.writable]
+    server.snapshot_fail_on = {1, 2}
+    with pytest.raises(ScanNotSupported):
+        cl.scan_start(PID, regions, (ValueType.FLOAT, ValueType.INT32), Compare.UNKNOWN, None)
+    assert cl.version() == "1.3"
+    cl.close()
+
+
+def test_whole_numbers_left_then_a_decimal_number_lists_nothing_stale():
+    server = FakeNgServer(snapshot=True)
+    cl = Ps5DebugNgClient.connect("127.0.0.1", server.port, timeout=3)
+    regions = [m for m in cl.maps(PID) if m.writable]
+    cl.scan_start(PID, regions, (ValueType.FLOAT, ValueType.INT32), Compare.UNKNOWN, None)
+    server.fake.poke(PID, GOLD_ADDR, struct.pack("<i", 2000))
+    cl.scan_next(Compare.EXACT, 2000)
+    assert set(cl.scan_counts()) == {ValueType.INT32}
+    assert cl.scan_next(Compare.EXACT, 87.5) == 0
+    assert cl.scan_counts() == {ValueType.INT32: 0} and cl.scan_results(10) == []
+    assert cl.scan_next(Compare.INCREASED, None) == 0, "an emptied type stays empty"
     cl.close()

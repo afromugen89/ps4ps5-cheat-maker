@@ -107,8 +107,11 @@ class Scanner:
         """After a scan: which types still match. One left (or none) = a plain search."""
         counts_fn = getattr(self.session.require_client(), "scan_counts", None)
         counts = counts_fn() if counts_fn is not None else {}
-        self.types = {t: n for t, n in counts.items() if n} or (
-            {fallback: 0} if fallback is not None else {}
+        # A search that ends with no matches keeps its type(s), like a one-type search.
+        self.types = (
+            {t: n for t, n in counts.items() if n}
+            or dict(counts)
+            or ({fallback: 0} if fallback is not None else {})
         )
         if len(self.types) == 1:
             self.vtype = next(iter(self.types))

@@ -208,6 +208,8 @@ class FakeConsole:
             raise ScanNotSupported("unknown-value scan not available")
         self._scan_pid = pid
         if isinstance(vtype, tuple):
+            if cmp is not Compare.UNKNOWN or value is not None:
+                raise ValueError("several number types at once is for unknown searches only")
             sessions = []
             for i, vt in enumerate(vtype):
                 s = LocalScanSession(lambda a, n: self.read(pid, a, n))

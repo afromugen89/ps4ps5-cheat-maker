@@ -149,6 +149,6 @@ search 101.7 s (2,842 requests), 8-byte search 152.9 s.
 
 | # | Test | Steps | Pass when | Send back |
 |---|---|---|---|---|
-| C14a | Both kinds at once | Any game. **I don't know the number** with Advanced off. | The count shows decimals and whole numbers. Log `action=multi_type_snapshot counts={'FLOAT': ..., 'INT32': ...}`. Takes up to about twice an old unknown search; the PS5 has room for both snapshots. | The `action=multi_type_snapshot` and `action=snapshot` lines. |
+| C14a | Both kinds at once | Any game. **I don't know the number** with Advanced off. | The count shows decimals and whole numbers. Log `action=multi_type_snapshot counts={'FLOAT': ..., 'INT32': ...}`. Takes up to about twice an old unknown search. The whole-number snapshot is stored in full (no float filter), so it needs more room on the PS5; if it doesn't fit, the log says `action=multi_type_skip` and the search carries on with decimals only. | The `action=multi_type_snapshot` and `action=snapshot` lines. |
 | C14b | Narrow to a whole number | Spend some of a whole-number value (gold, ammo). **Went down**, then type the new number and Search. | Only whole numbers are left, the real value is in the list, and Set changes it in game. | The `action=scan_next ... types=` lines. |
 | C14c | Narrow to a bar | Start again; take damage on a health bar; **Went down**, **Same**, **Went down**. | The bar is still found (decimals), as before this change. | The `action=scan_next` lines. |

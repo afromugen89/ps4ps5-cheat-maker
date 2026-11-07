@@ -322,3 +322,35 @@ def test_picked_type_still_searches_one_type(session):
     sc = Scanner(session)
     sc.first_scan(None, ValueType.INT32)
     assert set(sc.types) == {ValueType.INT32} and sc.vtype is ValueType.INT32
+
+
+def test_mixed_search_that_ends_empty_keeps_its_types_and_file(session, fake):
+    from cheatmaker.paths import scans_dir
+
+    sc = Scanner(session)
+    sc.first_scan(None)
+    assert sc.next_scan(Compare.EXACT, 123456789.5) == 0
+    assert sc.types and sc.vtype is not None, "an empty search keeps a type"
+    files = sorted(scans_dir().rglob("scan-*.txt"))
+    assert [f.name for f in files] == ["scan-001.txt", "scan-002.txt"]
+
+
+@pytest.mark.parametrize(
+    ("vtype", "cmp", "value", "want"),
+    [
+        (ValueType.INT32, Compare.EXACT, 87.5, None),
+        (ValueType.INT32, Compare.EXACT, 87.0, 87),
+        (ValueType.INT32, Compare.EXACT, 2**40, None),
+        (ValueType.INT32, Compare.BETWEEN, (-3.5, -1.2), (-3, -2)),
+        (ValueType.INT32, Compare.BETWEEN, (0.5, 0.9), None),
+        (ValueType.INT32, Compare.BETWEEN, (-(2**40), 2**40), (-(2**31), 2**31 - 1)),
+        (ValueType.INT32, Compare.DECREASED_BY, (2.5, 0.1), None),
+        (ValueType.INT32, Compare.DECREASED_BY, (3.0, 1.0), (3, 1.0)),
+        (ValueType.FLOAT, Compare.EXACT, 87.5, 87.5),
+        (ValueType.INT32, Compare.INCREASED, None, None),
+    ],
+)
+def test_value_for_each_type(vtype, cmp, value, want):
+    from cheatmaker.core.values import value_for
+
+    assert value_for(vtype, cmp, value) == want

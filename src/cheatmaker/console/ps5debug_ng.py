@@ -384,6 +384,7 @@ class Ps5DebugNgClient:
         # Unknown search over several types: one console snapshot per type, each on its
         # own connection (NG keeps one per connection). This one first, then extras.
         self._multi: list[Ps5DebugNgClient] | None = None
+        self._multi_vtype: ValueType | None = None  # this connection's type in _multi
         self._scan: LocalScanSession | None = None
         self._scan_pid: int | None = None
         self._scan_ranges_list: list[tuple[int, int]] = []
@@ -1076,18 +1077,26 @@ class Ps5DebugNgClient:
         conns: list[Ps5DebugNgClient] = [self]
         for _ in vtypes[1:]:
             try:
+                # In-place rescans stay on the main connection only (NG: not on many
+                # connections at once).
                 c = Ps5DebugNgClient(
-                    self._open(self.host, self.port), self.host, self.port, 1, self.fast_scan
+                    self._open(self.host, self.port), self.host, self.port, 1, False
                 )
                 c._turbo, c._engines = self._turbo, self._engines
-                c._auth()
+                try:
+                    c._auth()
+                except Exception:
+                    c.close()
+                    raise
             except Exception as exc:  # no free connection: search the first types only
                 log.warning("action=multi_type_conn reason=%s; fewer types searched", exc)
                 break
             conns.append(c)
         types = vtypes[: len(conns)]
+        for c, vt in zip(conns, types, strict=True):
+            c._multi_vtype = vt
         done = [0.0] * len(conns)
-        failure: list[BaseException] = []
+        failure: list[BaseException | None] = [None] * len(conns)
 
         def run(i: int) -> None:
             def mine(p: float) -> None:
@@ -1096,13 +1105,23 @@ class Ps5DebugNgClient:
             try:
                 conns[i]._snapshot_start(pid, ranges, types[i], mine, cancel)
             except BaseException as exc:
-                failure.append(exc)
+                failure[i] = exc
 
         self._multi = conns
         self._wait_all([lambda i=i: run(i) for i in range(len(conns))], done, progress)
-        if failure:
+        ok = [c for c, f in zip(conns, failure, strict=True) if f is None]
+        hard = [f for f in failure if f is not None and not isinstance(f, ScanNotSupported)]
+        if hard or not ok:
+            # A cancel or lost link ends the search; so does every type failing.
             self._close_multi()
-            raise failure[0]
+            raise next(f for f in [*hard, *failure] if f is not None)
+        for c, f in zip(conns, failure, strict=True):
+            if f is not None:  # e.g. no room on the PS5 for this type's snapshot
+                log.warning("action=multi_type_skip reason=%s; searching the others", f)
+                c._end_resident()
+                if c is not self:
+                    c.close()
+        conns[:] = ok
         if progress:
             progress(1.0)
         counts = {c._resident[1].name: c._resident_count for c in conns if c._resident}
@@ -1135,11 +1154,14 @@ class Ps5DebugNgClient:
 
         def run(i: int) -> None:
             c = conns[i]
-            assert c._resident is not None
-            v = value_for(c._resident[1], cmp, value) if value is not None else None
             try:
+                if c._resident is None:
+                    done[i] = 1.0
+                    return  # this type was emptied earlier
+                v = value_for(c._resident[1], cmp, value) if value is not None else None
                 if value is not None and v is None:
-                    c._resident_count = 0  # no number of this type can match
+                    c._resident_count = 0  # no number of this type can match:
+                    c._end_resident()  # free it so nothing stale is listed later
                 else:
                     c._resident_next(cmp, v, lambda p: done.__setitem__(i, p), cancel)
             except BaseException as exc:
@@ -1150,11 +1172,11 @@ class Ps5DebugNgClient:
         if failure:
             self._close_multi()
             raise failure[0]
-        for c in drop_empty(conns, lambda c: c._resident_count):
+        for c in drop_empty(conns, lambda c: c._resident_count if c._resident else 0):
             c._end_resident()
             if c is not self:
                 c.close()
-        return sum(c._resident_count for c in conns)
+        return sum(c._resident_count for c in conns if c._resident)
 
     def _close_multi(self) -> None:
         conns, self._multi = self._multi, None
@@ -1167,7 +1189,11 @@ class Ps5DebugNgClient:
 
     def scan_counts(self) -> dict[ValueType, int]:
         if self._multi is not None:
-            return {c._resident[1]: c._resident_count for c in self._multi if c._resident}
+            return {
+                c._multi_vtype: c._resident_count if c._resident else 0
+                for c in self._multi
+                if c._multi_vtype is not None
+            }
         if self._resident is not None:
             return {self._resident[1]: self._resident_count}
         if self._scan is not None and self._scan.vtype is not None:
