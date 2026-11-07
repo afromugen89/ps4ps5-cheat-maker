@@ -290,7 +290,10 @@ def test_kein_scan_12_shows_as_a_few_rows(qtbot):  # measurable target, in tests
     health = next(t for t in tops if t.childCount() > 10)
     assert f.rows[health.data(0, ROW)].address in (0x12E0EA40B0, 0x12E0EA40A0)
     assert health.text(2).startswith("likely real")
-    assert f.tree.isColumnHidden(3) is False, "Advanced is on: addresses are shown"
+    assert f.tree.isColumnHidden(3) is False, "addresses are shown"
+    f.advanced.setChecked(False)
+    assert f.tree.isColumnHidden(3) is False, "addresses still shown without Advanced"
+    assert health.text(3).startswith("0x")
     ctl.shutdown()
 
 
