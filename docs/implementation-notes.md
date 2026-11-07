@@ -162,3 +162,38 @@ Spec: `docs/spec-hard-values.md` (AC-H1 to AC-H6).
   round are restored to what they were before the round. Limit 500 matches.
 - Strategy item "pointer scan keeps the first 20k nodes" was already fixed on main
   (`keep_nearest`), so it's not part of this work.
+
+## Faster scanner (2026-11-07)
+
+Read against PS5Debug-NG's own source (Pharaoh2k/ps5debug-NG, 1.3.2: `main.c`,
+`scan_turbo.c`, `PROTOCOL.md`). What made searches slow, and what changed:
+
+- **Round trips.** C3's 4-byte search sent 2,842 requests. NG serves each connection on
+  one thread that sleeps 10 ms whenever its socket is idle, so every request paid a
+  round trip plus up to 10 ms. Now (a) writable ranges less than 1 MiB apart share a
+  request (`plan_slices`; NG reads unmapped memory as zeros, and `inside` drops matches
+  that land in a gap), and (b) slices are shared out over `scan_connections` sockets
+  (default 4) that scan at the same time. NG documents several connections as the
+  better way to parallelize; with more than one, `TS_PARALLEL_COMPARE` is not sent.
+  A connection that breaks hands its slice back; if none can be opened the scan runs
+  on the main one.
+- **Copying memory.** In NG 1.3.2's source `TS_PARALLEL_COMPARE` only applies together
+  with `TS_USE_ALIASING`, which we never sent. Aliasing reads the game's memory in place instead of copying it
+  (NG falls back to copying on any page it can't map). Sent when the console advertises
+  `TSE_ALIASING` and `fast_scan` is on; `TS_RESCAN_ALIASING` likewise for narrowing an
+  unknown-value search on the console (NG: about 2-3x).
+- **Next search with many candidates** re-scanned every range that held a candidate
+  (ranges can be gigabytes). Now only windows around the candidates
+  (`candidate_windows`, candidates less than 4 MiB apart share one).
+- **Reads one at a time** (~36 ms each). `read_many` now pipelines plain `PROC_READ`s
+  (NG reads requests in order with exact lengths, so queued requests are safe), so
+  re-checking candidates and the live match list cost about one round trip per 128
+  reads. The read path now takes up to 4,000 read groups (was 400), so Went up / down
+  works on bigger lists of an exact search.
+- Not changed: INT64 on 4-byte alignment and float (fuzzy) searches can't use NG's SIMD
+  compare (it needs alignment = size and exact compare); they gain from the extra
+  connections only. Scan files cost about 0.3 s per 100,000 lines: left as they are.
+- Possible next step: NG's region classify (`0xBDAACC16`) reports uncached GPU memory
+  that reads at ~40 MB/s; skipping it could cut first searches further, but it only
+  lists 8,192 regions (Returnal has 38,108 maps), so it needs a console look first.
+- Console test C13.

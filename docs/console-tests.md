@@ -128,3 +128,19 @@ What is still unverified on the console (all behind fake-PS5 tests):
 |---|---|---|---|---|
 | C12a | Files after an exact search | Any game. Search a number you see, then **Search again** with the new number after it changes. Press **Scan files**. | The folder has `scan-001.txt` and `scan-002.txt`; each lists hex addresses with the number you searched for. | The two files (or their first lines). |
 | C12b | Files after an unknown search | **I don't know the number**, then **Went down**, then **Same**. Note the live list's values. | Three files. The first lists 100,000 addresses and says how many there were in all. In the last file the values match the live list (not the value before the change). The extra time per scan is small (log `action=scan_results n=... secs=...`). | The `action=scan_results` lines; say if any file shows the old value. |
+
+## C13 Faster scanner (added 2026-11-07)
+
+New speed settings in `settings.json` (app data folder): `scan_connections` (default 4:
+connections that scan at once; 1 = the old single connection) and `fast_scan` (default
+true: ask PS5Debug-NG to read the game's memory in place, `TS_USE_ALIASING` /
+`TS_RESCAN_ALIASING`). Reconnect after changing them. C3 baseline: Returnal exact 4-byte
+search 101.7 s (2,842 requests), 8-byte search 152.9 s.
+
+| # | Test | Steps | Pass when | Send back |
+|---|---|---|---|---|
+| C13a | First search speed | Returnal (or any big game), same spot as C3. Search a 4-byte number, then an 8-byte number. | Both finish with about the same match counts as C3, faster than 101.7 s and 152.9 s. The game keeps running smoothly while it scans. | The `action=scan_stats` lines (requests, seconds, flags, connections). |
+| C13b | Settings compared | Close the app, set `"fast_scan": false`, search the same 4-byte number. Then `"scan_connections": 1` (fast_scan back to true), search again. | All three runs find the same count. | The three `action=scan_stats` lines, so we keep the fastest default. |
+| C13c | Next search with many matches | Search a common number (thousands of matches), change it in game, search the new number. Then press **Went down** on a list of a few thousand. | The next search takes seconds, not a full re-scan. Went down works on lists up to ~4,000 nearby groups instead of saying "too many". | The `action=scan_stats` / `action=scan_next` lines. |
+| C13d | Unknown search narrowing | **I don't know the number**, then **Went down** and **Same** a few times. | Each narrowing is faster than before (compare with an old log if you have one). Counts behave as in C11a. | The `action=resident_next` lines with times. |
+| C13e | No crash, no stuck connection | Do C13a twice in a row, cancel one search half way, then use Set and Freeze. | Nothing hangs; PS5Debug-NG doesn't need a restart. | Say if anything stopped answering. |
