@@ -13,7 +13,14 @@ from decimal import Decimal
 from cheatmaker.console.client import ProgressFn
 from cheatmaker.core.scan_log import ScanLog
 from cheatmaker.core.session import Session
-from cheatmaker.core.values import SHOWN, Compare, Scale, ValueType, guess_types
+from cheatmaker.core.values import (
+    SHOWN,
+    UNKNOWN_TYPES,
+    Compare,
+    Scale,
+    ValueType,
+    guess_types,
+)
 from cheatmaker.errors import ConnectionLost
 
 log = logging.getLogger(__name__)
@@ -44,12 +51,14 @@ class Match:
     address: int
     value: float | int
     raw: bytes
+    vtype: ValueType | None = None  # set when the search covers several types
 
 
 class Scanner:
     def __init__(self, session: Session) -> None:
         self.session = session
-        self.vtype: ValueType | None = None
+        self.vtype: ValueType | None = None  # None while several types still match
+        self.types: dict[ValueType, int] = {}  # matches left per type
         self.count: int | None = None
         self.history: list[str] = []
         self.show_limit = FEW_MATCHES  # list the matches once this few are left
@@ -66,6 +75,7 @@ class Scanner:
             return
         log.info("action=scan_lost count=%s: the console's search was used for another", self.count)
         self.vtype, self.count, self.history = None, None, []
+        self.types = {}
         self.scale = SHOWN
         for cb in list(self.on_lost):
             cb()
@@ -85,7 +95,25 @@ class Scanner:
             except Exception:  # dropping a dead session must not raise
                 log.debug("scan_cancel failed during reset", exc_info=True)
         self.vtype, self.count, self.history = None, None, []
+        self.types = {}
         self.scale = SHOWN
+
+    @property
+    def mixed(self) -> bool:
+        """The search still has matches of more than one number type."""
+        return self.active and self.vtype is None and len(self.types) > 1
+
+    def _sync_types(self, fallback: ValueType | None) -> None:
+        """After a scan: which types still match. One left (or none) = a plain search."""
+        counts_fn = getattr(self.session.require_client(), "scan_counts", None)
+        counts = counts_fn() if counts_fn is not None else {}
+        self.types = {t: n for t, n in counts.items() if n} or (
+            {fallback: 0} if fallback is not None else {}
+        )
+        if len(self.types) == 1:
+            self.vtype = next(iter(self.types))
+        elif len(self.types) > 1:
+            self.vtype = None
 
     def first_scan(
         self,
@@ -108,7 +136,8 @@ class Scanner:
         to that window.
 
         With no ``vtype`` the scanner tries the likely types in order and keeps the
-        first that finds something (AC-3.6).
+        first that finds something (AC-3.6). An unknown search with no ``vtype`` looks
+        for every type in UNKNOWN_TYPES at once (decimals and whole numbers).
         """
         label = "unknown" if value is None else f"{value}"
         if scale is not SHOWN:
@@ -158,7 +187,7 @@ class Scanner:
         elif vtype is not None:
             candidates = [vtype]
         elif value is None:
-            candidates = [ValueType.FLOAT]  # health bars are almost always floats
+            candidates = [UNKNOWN_TYPES]  # type: ignore[list-item]  # all side by side
         else:
             candidates = guess_types(value)
         count = 0
@@ -171,12 +200,15 @@ class Scanner:
             count = client.scan_start(game.pid, regions, vt, cmp, value, scaled, cancel)
             log.info(
                 "action=scan_first type=%s cmp=%s value=%s count=%d",
-                vt.name,
+                "+".join(t.name for t in vt) if isinstance(vt, tuple) else vt.name,
                 cmp.value,
                 value,
                 count,
             )
-            self.vtype = vt
+            first = vt[0] if isinstance(vt, tuple) else vt
+            self.vtype = first
+            self.count = count
+            self._sync_types(first)
             if count:
                 break
         if progress:
@@ -207,7 +239,7 @@ class Scanner:
                 raise ValueError("Type how much it changed by, as a number more than 0.")
             u = (unit if unit is not None else default_unit(value)) * self.scale.factor
             amount = self.scale.apply(value)  # type: ignore[arg-type]
-            if self.vtype is not None and not self.vtype.is_float:
+            if self.vtype is not None and not self.vtype.is_float:  # mixed: per type
                 if not float(amount).is_integer():
                     raise ValueError(
                         f"{self.vtype.label} values change by whole numbers; {amount:g} isn't one."
@@ -237,8 +269,15 @@ class Scanner:
         cancel: threading.Event | None,
     ) -> int:
         count = self.session.require_client().scan_next(cmp, value, progress, cancel)
-        log.info("action=scan_next cmp=%s value=%s count=%d", cmp.value, value, count)
         self.count = count
+        self._sync_types(self.vtype)
+        log.info(
+            "action=scan_next cmp=%s value=%s count=%d types=%s",
+            cmp.value,
+            value,
+            count,
+            ",".join(f"{t.name}:{n}" for t, n in self.types.items()),
+        )
         return count
 
     def stand_still(
@@ -296,17 +335,19 @@ class Scanner:
         if 0 < count <= LOG_MATCHES:
             log.info("action=matches addrs=%s", " ".join(f"{h.address:#x}" for h in hits))
         shown = hits[: self.scan_log.limit]
-        self.scan_log.write(self.vtype, count, shown, self.history, self.scale)
+        self.scan_log.write(
+            self.vtype, count, shown, self.history, self.scale, types=list(self.types)
+        )
 
     def matches(self, limit: int | None = None) -> list[Match]:
         """Current values of up to ``limit`` matches, read fresh (AC-3.4 live list)."""
         limit = self.show_limit if limit is None else limit
-        if not self.active or self.vtype is None:
+        if not self.active or (self.vtype is None and not self.types):
             return []
         client = self.session.require_client()
         game = self.session.require_game()
-        size = self.vtype.size
         hits = client.scan_results(limit)
+        size = max(t.size for t in self._types_of(hits))
         # One read per cluster of nearby matches, not one per match (~36 ms each on PS5),
         # and all of them in one go when the client can pipeline reads.
         values: dict[int, bytes] = {}
@@ -327,6 +368,16 @@ class Scanner:
         for (start, _n, group), data in zip(spans, blobs, strict=True):
             for a in group:
                 values[a] = data[a - start : a - start + size]
-        return [
-            Match(h.address, self.vtype.decode(values[h.address]), values[h.address]) for h in hits
-        ]
+        out = []
+        for h in hits:
+            vt = h.vtype or self.vtype
+            assert vt is not None
+            raw = values[h.address][: vt.size]
+            out.append(Match(h.address, vt.decode(raw), raw, h.vtype))
+        return out
+
+    def _types_of(self, hits) -> list[ValueType]:
+        found = {h.vtype for h in hits if h.vtype is not None}
+        if self.vtype is not None:
+            found.add(self.vtype)
+        return list(found) or list(self.types)

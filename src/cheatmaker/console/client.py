@@ -67,6 +67,8 @@ class ForegroundApp:
 class ScanHit:
     address: int
     value: bytes
+    vtype: ValueType | None = field(default=None, compare=False)
+    """Set when a search covers several number types at once."""
 
 
 WatchKind = Literal["write", "access"]
@@ -112,13 +114,17 @@ class ConsoleClient(Protocol):
         self,
         pid: int,
         regions: list[MemMap],
-        vtype: ValueType,
+        vtype: ValueType | tuple[ValueType, ...],
         cmp: Compare,
         value: float | int | None,
         progress: ProgressFn | None = None,
         cancel: threading.Event | None = None,
     ) -> int:
-        """First scan over ``regions``; returns the match count."""
+        """First scan over ``regions``; returns the match count.
+
+        A tuple of types (unknown value only) runs one search per type side by side;
+        next scans narrow them all, results carry their ``vtype``, and a type left
+        with no matches is dropped."""
         ...
 
     def scan_next(
@@ -132,6 +138,10 @@ class ConsoleClient(Protocol):
         ...
 
     def scan_results(self, limit: int) -> list[ScanHit]: ...
+
+    def scan_counts(self) -> dict[ValueType, int]:
+        """Matches left per number type in the current search."""
+        ...
 
     def scan_cancel(self) -> None:
         """Drop the current scan session."""

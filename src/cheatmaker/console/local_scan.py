@@ -11,7 +11,7 @@ import threading
 from collections.abc import Callable, Iterable
 
 from cheatmaker.console.client import MemMap, ProgressFn, ScanHit
-from cheatmaker.core.values import Compare, ValueType, matches
+from cheatmaker.core.values import Compare, ValueType, matches, value_for
 from cheatmaker.errors import ScanCancelled
 
 ReadFn = Callable[[int, int], bytes]
@@ -158,6 +158,63 @@ class LocalScanSession:
 
     def results(self, limit: int) -> list[ScanHit]:
         return self.hits[:limit]
+
+
+class MultiScan:
+    """Several LocalScanSessions, one per number type, narrowed together (an
+    "I don't know the number" search over decimals and whole numbers)."""
+
+    def __init__(self, sessions: list[LocalScanSession]) -> None:
+        self.sessions = sessions
+
+    @property
+    def vtype(self) -> ValueType | None:
+        return self.sessions[0].vtype if len(self.sessions) == 1 else None
+
+    @property
+    def hits(self) -> list[ScanHit]:
+        return [h for s in self.sessions for h in s.hits]
+
+    def counts(self) -> dict[ValueType, int]:
+        return {s.vtype: len(s.hits) for s in self.sessions if s.vtype is not None}
+
+    def next(
+        self,
+        cmp: Compare,
+        value,
+        progress: ProgressFn | None = None,
+        cancel: threading.Event | None = None,
+    ) -> int:
+        for s in self.sessions:
+            assert s.vtype is not None
+            v = value_for(s.vtype, cmp, value) if value is not None else None
+            if value is not None and v is None:
+                s.hits = []  # no number of this type can match
+            else:
+                s.next(cmp, v, None, cancel)
+        if progress:
+            progress(1.0)
+        drop_empty(self.sessions, lambda s: len(s.hits))
+        return sum(len(s.hits) for s in self.sessions)
+
+    def results(self, limit: int) -> list[ScanHit]:
+        return merge_results([(s.vtype, s.results(limit)) for s in self.sessions], limit)
+
+
+def drop_empty(sessions: list, count: Callable) -> list:
+    """Remove the sessions with no matches, keeping at least one. Returns the removed."""
+    keep = [s for s in sessions if count(s)] or sessions[:1]
+    gone = [s for s in sessions if s not in keep]
+    sessions[:] = keep
+    return gone
+
+
+def merge_results(per_type: list, limit: int) -> list[ScanHit]:
+    """Matches of several types in address order (each tagged with its type), at most
+    ``limit``."""
+    tagged = [ScanHit(h.address, h.value, vt) for vt, hits in per_type for h in hits]
+    tagged.sort(key=lambda h: h.address)
+    return tagged[:limit]
 
 
 def unpack_all(vtype: ValueType, data: bytes) -> list[float | int]:

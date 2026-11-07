@@ -29,8 +29,13 @@ from cheatmaker.console.client import (
     WatchHit,
     WatchKind,
 )
-from cheatmaker.console.local_scan import LocalScanSession, alignment_for
-from cheatmaker.core.values import Compare, ValueType, matches
+from cheatmaker.console.local_scan import (
+    LocalScanSession,
+    alignment_for,
+    drop_empty,
+    merge_results,
+)
+from cheatmaker.core.values import Compare, ValueType, matches, value_for
 from cheatmaker.errors import (
     ConnectionLost,
     ConsoleUnreachable,
@@ -376,6 +381,9 @@ class Ps5DebugNgClient:
         self._engines = 0
         self._resident: tuple[int, ValueType, int] | None = None  # pid, type, float flags
         self._resident_count = 0
+        # Unknown search over several types: one console snapshot per type, each on its
+        # own connection (NG keeps one per connection). This one first, then extras.
+        self._multi: list[Ps5DebugNgClient] | None = None
         self._scan: LocalScanSession | None = None
         self._scan_pid: int | None = None
         self._scan_ranges_list: list[tuple[int, int]] = []
@@ -412,9 +420,11 @@ class Ps5DebugNgClient:
         self._authed = False
         self._scan = None
         self._resident = None  # the console frees it when the socket closes
+        self._close_multi()
 
     def close(self) -> None:
         self._close_pool()
+        self._close_multi()
         with contextlib.suppress(OSError):
             self._w.sock.close()
 
@@ -864,7 +874,7 @@ class Ps5DebugNgClient:
         self,
         pid: int,
         regions: list[MemMap],
-        vtype: ValueType,
+        vtype: ValueType | tuple[ValueType, ...],
         cmp: Compare,
         value: float | int | None,
         progress: ProgressFn | None = None,
@@ -872,6 +882,12 @@ class Ps5DebugNgClient:
     ) -> int:
         self.scan_cancel()
         ranges = merge_ranges(regions)
+        if isinstance(vtype, tuple):
+            if cmp is not Compare.UNKNOWN or value is not None:
+                raise ValueError("several number types at once is for unknown searches only")
+            if len(vtype) > 1:
+                return self._multi_start(pid, ranges, vtype, progress, cancel)
+            vtype = vtype[0]
         if cmp not in (Compare.EXACT, Compare.BETWEEN) or value is None:
             return self._snapshot_start(pid, ranges, vtype, progress, cancel)
         hits = self._scan_ranges(pid, ranges, vtype, value, progress, cancel)
@@ -1046,6 +1062,118 @@ class Ps5DebugNgClient:
             log.warning("couldn't cancel the scan on the PS5: %s", exc)
         return True
 
+    # -- unknown value over several number types --------------------------------
+    def _multi_start(
+        self,
+        pid: int,
+        ranges: list[tuple[int, int]],
+        vtypes: tuple[ValueType, ...],
+        progress: ProgressFn | None,
+        cancel: threading.Event | None,
+    ) -> int:
+        """One snapshot per type, created at the same time on separate connections."""
+        self._has_turbo()
+        conns: list[Ps5DebugNgClient] = [self]
+        for _ in vtypes[1:]:
+            try:
+                c = Ps5DebugNgClient(
+                    self._open(self.host, self.port), self.host, self.port, 1, self.fast_scan
+                )
+                c._turbo, c._engines = self._turbo, self._engines
+                c._auth()
+            except Exception as exc:  # no free connection: search the first types only
+                log.warning("action=multi_type_conn reason=%s; fewer types searched", exc)
+                break
+            conns.append(c)
+        types = vtypes[: len(conns)]
+        done = [0.0] * len(conns)
+        failure: list[BaseException] = []
+
+        def run(i: int) -> None:
+            def mine(p: float) -> None:
+                done[i] = p
+
+            try:
+                conns[i]._snapshot_start(pid, ranges, types[i], mine, cancel)
+            except BaseException as exc:
+                failure.append(exc)
+
+        self._multi = conns
+        self._wait_all([lambda i=i: run(i) for i in range(len(conns))], done, progress)
+        if failure:
+            self._close_multi()
+            raise failure[0]
+        if progress:
+            progress(1.0)
+        counts = {c._resident[1].name: c._resident_count for c in conns if c._resident}
+        log.info("action=multi_type_snapshot counts=%s", counts)
+        return sum(c._resident_count for c in conns)
+
+    @staticmethod
+    def _wait_all(jobs: list, done: list[float], progress: ProgressFn | None) -> None:
+        """Run ``jobs`` on their own threads; report the mean of ``done`` meanwhile."""
+        threads = [threading.Thread(target=j, daemon=True, name="scan-type") for j in jobs]
+        for t in threads:
+            t.start()
+        for t in threads:
+            while t.is_alive():
+                t.join(0.1)
+                if progress:
+                    progress(min(sum(done) / len(done), 1.0))
+
+    def _multi_next(
+        self,
+        cmp: Compare,
+        value,
+        progress: ProgressFn | None,
+        cancel: threading.Event | None,
+    ) -> int:
+        conns = self._multi
+        assert conns is not None
+        done = [0.0] * len(conns)
+        failure: list[BaseException] = []
+
+        def run(i: int) -> None:
+            c = conns[i]
+            assert c._resident is not None
+            v = value_for(c._resident[1], cmp, value) if value is not None else None
+            try:
+                if value is not None and v is None:
+                    c._resident_count = 0  # no number of this type can match
+                else:
+                    c._resident_next(cmp, v, lambda p: done.__setitem__(i, p), cancel)
+            except BaseException as exc:
+                failure.append(exc)
+            done[i] = 1.0
+
+        self._wait_all([lambda i=i: run(i) for i in range(len(conns))], done, progress)
+        if failure:
+            self._close_multi()
+            raise failure[0]
+        for c in drop_empty(conns, lambda c: c._resident_count):
+            c._end_resident()
+            if c is not self:
+                c.close()
+        return sum(c._resident_count for c in conns)
+
+    def _close_multi(self) -> None:
+        conns, self._multi = self._multi, None
+        for c in conns or []:
+            if c is not self:
+                c._end_resident()
+                c.close()
+        if conns:
+            self._end_resident()
+
+    def scan_counts(self) -> dict[ValueType, int]:
+        if self._multi is not None:
+            return {c._resident[1]: c._resident_count for c in self._multi if c._resident}
+        if self._resident is not None:
+            return {self._resident[1]: self._resident_count}
+        if self._scan is not None and self._scan.vtype is not None:
+            return {self._scan.vtype: len(self._scan.hits)}
+        return {}
+
     def _end_resident(self) -> None:
         if self._resident is None:
             return
@@ -1064,6 +1192,8 @@ class Ps5DebugNgClient:
         """Narrow down. Snapshot search: compare on the console. Few candidates: read
         them (pipelined). Many: for an exact number, scan again on the console over
         windows around the candidates and keep the overlap."""
+        if self._multi is not None:
+            return self._multi_next(cmp, value, progress, cancel)
         if self._resident is not None:
             return self._resident_next(cmp, value, progress, cancel)
         scan = self._scan
@@ -1085,11 +1215,17 @@ class Ps5DebugNgClient:
         return len(scan.hits)
 
     def scan_results(self, limit: int) -> list[ScanHit]:
+        if self._multi is not None:
+            return merge_results(
+                [(c._resident[1], c._resident_results(limit)) for c in self._multi if c._resident],
+                limit,
+            )
         if self._resident is not None:
             return self._resident_results(limit)
         return [] if self._scan is None else self._scan.results(limit)
 
     def scan_cancel(self) -> None:
+        self._close_multi()
         self._end_resident()
         self._scan = None
         self._scan_pid = None

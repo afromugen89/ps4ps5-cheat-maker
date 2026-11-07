@@ -39,7 +39,7 @@ def test_explicit_type(session):
 
 def test_unknown_value_then_decreased(session, fake):  # AC-3.3
     sc = Scanner(session)
-    assert sc.first_scan(None) > 10 and sc.vtype is ValueType.FLOAT
+    assert sc.first_scan(None, ValueType.FLOAT) > 10 and sc.vtype is ValueType.FLOAT
     fake.poke(PID, BAR_ADDR, struct.pack("<f", 50.0))
     assert sc.next_scan(Compare.DECREASED) == 1
     assert sc.next_scan(Compare.UNCHANGED) == 1
@@ -273,3 +273,52 @@ def test_stand_still_cancel_stops_the_wait(session):  # review finding 7
     t0 = time.monotonic()
     sc.stand_still(interval_s=30, cancel=cancel, sleep=sleep)
     assert time.monotonic() - t0 < 5
+
+
+# -- "I don't know the number" over decimals and whole numbers at once ---------------
+
+
+def test_unknown_searches_decimals_and_whole_numbers_at_once(session, fake):
+    sc = Scanner(session)
+    total = sc.first_scan(None)
+    assert set(sc.types) == {ValueType.FLOAT, ValueType.INT32}
+    assert sc.mixed and sc.vtype is None and total == sum(sc.types.values())
+    fake.poke(PID, GOLD_ADDR, struct.pack("<i", 2000))  # whole-number gold spent
+    sc.next_scan(Compare.DECREASED)
+    assert ValueType.INT32 in sc.types
+    assert sc.next_scan(Compare.EXACT, 2000) == 1
+    assert sc.vtype is ValueType.INT32 and not sc.mixed, "only whole numbers left"
+    [m] = sc.matches()
+    assert (m.address, m.value) == (GOLD_ADDR, 2000)
+
+
+def test_unknown_finds_a_decimal_bar_too(session, fake):
+    sc = Scanner(session)
+    sc.first_scan(None)
+    fake.poke(PID, BAR_ADDR, struct.pack("<f", 50.5))
+    sc.next_scan(Compare.DECREASED)
+    assert sc.next_scan(Compare.EXACT, 50.5) >= 1
+    assert sc.vtype is ValueType.FLOAT
+    assert BAR_ADDR in {m.address for m in sc.matches(50)}
+
+
+def test_typed_decimal_drops_the_whole_number_search(session, fake):
+    sc = Scanner(session)
+    sc.first_scan(None)
+    sc.next_scan(Compare.BETWEEN, (87.3, 87.5))
+    assert sc.vtype is ValueType.FLOAT and BAR_ADDR in {m.address for m in sc.matches(50)}
+
+
+def test_mixed_matches_carry_their_type(session, fake):
+    sc = Scanner(session)
+    sc.show_limit = 500
+    sc.first_scan(None, value_range=(2000, 2500))
+    rows = sc.matches(500)
+    by_addr = {m.address: m for m in rows}
+    assert by_addr[GOLD_ADDR].vtype is ValueType.INT32 and by_addr[GOLD_ADDR].value == 2450
+
+
+def test_picked_type_still_searches_one_type(session):
+    sc = Scanner(session)
+    sc.first_scan(None, ValueType.INT32)
+    assert set(sc.types) == {ValueType.INT32} and sc.vtype is ValueType.INT32

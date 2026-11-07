@@ -131,6 +131,34 @@ def matches(
     return current == previous  # UNCHANGED
 
 
+UNKNOWN_TYPES = (ValueType.FLOAT, ValueType.INT32)
+"""What "I don't know the number" looks for when no type is picked: bars and most
+values are 4-byte decimals, counters 4-byte whole numbers. Each type is its own search
+on the console, side by side."""
+
+
+def value_for(vtype: ValueType, cmp: Compare, value):
+    """``value`` as a search of ``vtype`` should use it, or None when no number of that
+    type can match (a whole-number search for 87.5). Decimals take any value."""
+    if vtype.is_float or value is None:
+        return value
+    lo_t, hi_t = vtype.int_range()
+    if cmp is Compare.EXACT:
+        if not float(value).is_integer() or not lo_t <= int(value) <= hi_t:
+            return None
+        return int(value)
+    if cmp is Compare.BETWEEN:
+        lo, hi = value
+        lo, hi = max(lo_t, math.ceil(lo)), min(hi_t, math.floor(hi))
+        return (lo, hi) if lo <= hi else None
+    if cmp.by_amount:
+        amount, tol = value
+        if not float(amount).is_integer() or not 0 < int(amount) <= hi_t:
+            return None
+        return (int(amount), tol)
+    return value
+
+
 def parse_number(text: str) -> float | int:
     """Parse what the player typed: "2,450", "99 999", "87.5". Raises ValueError."""
     cleaned = text.strip().replace(",", "").replace(" ", "").replace("_", "")

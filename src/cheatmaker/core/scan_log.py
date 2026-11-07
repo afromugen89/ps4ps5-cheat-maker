@@ -99,14 +99,22 @@ class ScanLog:
         hits: Sequence[ScanHit],
         history: Sequence[str],
         scale: Scale = SHOWN,
+        types: Sequence[ValueType] = (),
     ) -> Path | None:
         """Write the next scan file. ``hits`` are the matches fetched (at most
-        ``limit``), ``count`` how many the scan found in all."""
-        if not self.enabled or self._game is None or vtype is None:
+        ``limit``), ``count`` how many the scan found in all. ``vtype`` is None while a
+        search still matches several ``types``; each line then names its type."""
+        if vtype is None and len(types) > 1:
+            kinds: list[ValueType] = list(types)
+        elif vtype is not None:
+            kinds = [vtype]
+        else:
+            return None
+        if not self.enabled or self._game is None:
             return None
         try:
             path = self._next_path()
-            path.write_text(self._text(vtype, count, hits, history, scale), encoding="utf-8")
+            path.write_text(self._text(kinds, count, hits, history, scale), encoding="utf-8")
         except OSError as exc:
             log.warning("action=scan_file reason=%s; scan kept, file skipped", exc)
             return None
@@ -132,7 +140,7 @@ class ScanLog:
 
     def _text(
         self,
-        vtype: ValueType,
+        kinds: list[ValueType],
         count: int,
         hits: Sequence[ScanHit],
         history: Sequence[str],
@@ -151,7 +159,7 @@ class ScanLog:
             f"# Game: {g.title} ({g.title_id}, version {g.version})",
             f"# This scan: {history[-1] if history else ''}",
             f"# Search so far: {' > '.join(history)}",
-            f"# Number type: {vtype.label}",
+            f"# Number type: {' + '.join(k.label for k in kinds)}",
         ]
         if scale is not SHOWN:
             lines.append(f"# Game stores it as: {scale.label}")
@@ -161,10 +169,17 @@ class ScanLog:
             f"# Listed: {listed_text}",
             "# Value = what the game had when this scan ran.",
             "",
-            "Address\tValue",
+            "Address\tValue" + ("\tType" if len(kinds) > 1 else ""),
         ]
-        body = [
-            f"{fmt_address(h.address)}\t{fmt_scan_value(vtype, h.value)}"
-            for h in sorted(hits, key=lambda h: h.address)
-        ]
+        if len(kinds) > 1:
+            body = [
+                f"{fmt_address(h.address)}\t{fmt_scan_value(vt, h.value)}\t{vt.label}"
+                for h in sorted(hits, key=lambda h: h.address)
+                for vt in [h.vtype or kinds[0]]
+            ]
+        else:
+            body = [
+                f"{fmt_address(h.address)}\t{fmt_scan_value(kinds[0], h.value)}"
+                for h in sorted(hits, key=lambda h: h.address)
+            ]
         return "\n".join(lines + body) + "\n"

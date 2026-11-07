@@ -56,7 +56,7 @@ def test_address_is_hex():
 
 def test_compare_scans_write_a_file_each(session, fake):
     sc = Scanner(session)
-    sc.first_scan(None)
+    sc.first_scan(None, ValueType.FLOAT)
     fake.poke(PID, BAR_ADDR, struct.pack("<f", 50.0))
     sc.next_scan(Compare.DECREASED)
     sc.next_scan(Compare.UNCHANGED)
@@ -96,7 +96,7 @@ def test_zero_matches_still_writes_a_file(session):
 def test_big_scans_list_only_the_first_ones(session):
     sc = Scanner(session)
     sc.scan_log.max_lines = 5
-    count = sc.first_scan(None)
+    count = sc.first_scan(None, ValueType.FLOAT)
     assert count > 5
     [f] = scan_files(scans_dir())
     assert len(rows(f)) == 5
@@ -212,3 +212,14 @@ def test_bad_scan_settings_fall_back(tmp_path):
     assert s.scan_file_max == 100_000 and s.save_scan_files is True
     Settings.path().write_text(json.dumps({"scan_file_max": -3}))
     assert Settings.load().scan_file_max == 0
+
+
+def test_mixed_search_file_names_each_lines_type(session, fake):
+    sc = Scanner(session)
+    sc.first_scan(None, value_range=(80, 3000))
+    [f] = scan_files(scans_dir())
+    text = f.read_text(encoding="utf-8")
+    assert "# Number type: Decimal (4 bytes) + Whole number (4 bytes)" in text
+    assert "Address\tValue\tType" in text
+    assert f"{fmt_address(BAR_ADDR)}\t87.4\tDecimal (4 bytes)" in text
+    assert "\t2450\tWhole number (4 bytes)" in text

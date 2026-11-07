@@ -23,7 +23,7 @@ from cheatmaker.console.client import (
     WatchHit,
     WatchKind,
 )
-from cheatmaker.console.local_scan import LocalScanSession
+from cheatmaker.console.local_scan import LocalScanSession, MultiScan
 from cheatmaker.core.values import Compare, ValueType
 from cheatmaker.errors import ConnectionLost, ReadFailed, ScanNotSupported, WriteFailed
 
@@ -66,7 +66,7 @@ class FakeConsole:
         self.pointer_passes: list[tuple[int, int]] = []
         self.writes: list[tuple[int, int, bytes]] = []
         self._lock = threading.RLock()
-        self._scan: LocalScanSession | None = None
+        self._scan: LocalScanSession | MultiScan | None = None
         self._scan_pid: int | None = None
 
     # -- building ----------------------------------------------------------
@@ -206,8 +206,18 @@ class FakeConsole:
         self._alive()
         if cmp is Compare.UNKNOWN and not self.supports_unknown_scan:
             raise ScanNotSupported("unknown-value scan not available")
-        self._scan = LocalScanSession(lambda a, n: self.read(pid, a, n))
         self._scan_pid = pid
+        if isinstance(vtype, tuple):
+            sessions = []
+            for i, vt in enumerate(vtype):
+                s = LocalScanSession(lambda a, n: self.read(pid, a, n))
+                s.first(regions, vt, cmp, value, None, cancel)
+                sessions.append(s)
+                if progress:
+                    progress((i + 1) / len(vtype))
+            self._scan = MultiScan(sessions)
+            return len(self._scan.hits)
+        self._scan = LocalScanSession(lambda a, n: self.read(pid, a, n))
         return self._scan.first(regions, vtype, cmp, value, progress, cancel)
 
     def scan_next(
@@ -225,6 +235,13 @@ class FakeConsole:
     def scan_results(self, limit: int) -> list[ScanHit]:
         self._alive()
         return [] if self._scan is None else self._scan.results(limit)
+
+    def scan_counts(self) -> dict[ValueType, int]:
+        if self._scan is None:
+            return {}
+        if isinstance(self._scan, MultiScan):
+            return self._scan.counts()
+        return {} if self._scan.vtype is None else {self._scan.vtype: len(self._scan.hits)}
 
     def scan_cancel(self) -> None:
         self._scan = None

@@ -127,6 +127,11 @@ If you know roughly where the value sits (say, between 1 and 1000), put that in
 **Advanced > Don't know the number, but it's between ... and ...** to start with fewer
 matches.
 
+The search looks for decimals (4 bytes) and whole numbers (4 bytes) at the same time.
+The match count says how many of each are left; once only one kind is left, the search
+carries on with that kind alone. To search a single kind (faster, or 8-byte values),
+pick it in **Advanced > Number type** first. **Test the hits** needs a single kind.
+
 ### 5.4 When the search finds nothing
 
 Games don't always store the number you see. The app's hint will suggest the next thing

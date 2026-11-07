@@ -355,7 +355,14 @@ class FindWizard(QWidget):
         self.progress.setValue(100)
         self.progress.setFormat("%p%")
         sc = self.ctl.scanner
-        self.count.setText(f"{count:,} matches")
+        text = f"{count:,} matches"
+        if sc.mixed:  # e.g. "1,200 matches (900 decimal, 300 whole number)"
+            parts = ", ".join(
+                f"{n:,} {'decimal' if t.is_float else 'whole number'} ({t.size} bytes)"
+                for t, n in sc.types.items()
+            )
+            text += f" ({parts})"
+        self.count.setText(text)
         last = sc.scan_log.last_file
         self.count.setToolTip(f"Saved to {last}" if last is not None else "")
         kind, self._scan_kind = self._scan_kind, None
@@ -587,7 +594,7 @@ class FindWizard(QWidget):
             return
         try:
             rows = sc.matches() if show_matches else []
-            types = [self._vtype()] * len(rows) if rows else []
+            types = [m.vtype or self._vtype() for m in rows]
             seen = {m.address for m in rows}
             chains: list[Chain | None] = [None] * len(rows)
             for addr, vt in self.manual.items():
@@ -744,7 +751,13 @@ class FindWizard(QWidget):
     def do_test_hits(self) -> None:
         """AC-H6: narrow the current matches to the real one by asking the player."""
         sc = self.ctl.scanner
-        if not sc.active or sc.vtype is None:
+        if not sc.active:
+            return
+        if sc.vtype is None:
+            self.ctl.message.emit(
+                "Test the hits works on one number type. Search again until only "
+                "decimals or only whole numbers are left, or pick the type in Advanced."
+            )
             return
         try:
             addrs = [h.address for h in self.ctl.session.require_client().scan_results(TEST_LIMIT)]
