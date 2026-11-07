@@ -157,3 +157,16 @@ TEST_HITS_FOUND = (
 TEST_HITS_STOPPING = "Stopping: putting the values back first..."
 TEST_HITS_STOPPED = "Stopped. Every value was put back."
 FIND_TEST_HITS = "Not sure which row is real? Press Test the hits."
+
+# -- percent search and groups (spec-health-finding) ----------------------------------
+FIND_PERCENT_TOO_MANY = (
+    "Too many to check by percent yet. Take another hit or heal, then type the % again."
+)
+FIND_FULL_CONFIRM = (
+    "Mark it full again? Keep it full and don't touch the controller: Cheat Maker runs a "
+    "Same scan, which drops values that changed."
+)
+FIND_GROUPS = (
+    'Rows that change together are one group. "likely real" sits next to the same value '
+    "at another scale; press the arrow to see every copy."
+)
