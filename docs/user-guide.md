@@ -93,10 +93,11 @@ the IP for next time.
 
 The Find tab first asks what the game shows for this value:
 
-- **A number**: you can read it, like `2,450` gold. Use a number search (5.2).
-- **A bar or meter**: like a health bar with no number. Use "I don't know the number"
-  (5.3).
-- **Nothing**: a hidden value. Also use "I don't know the number" (5.3).
+- **A number**: you can read it, like `2,450` gold. Use a number search (5.2). If it's a
+  percent, like `40%`, type it with the % (5.3).
+- **A bar or meter**: like a health bar with no number. Fill it up and press **It's full
+  now** (5.4).
+- **Nothing**: a hidden value. Use "I don't know the number" (5.5).
 
 ### 5.2 When you can see the number
 
@@ -115,7 +116,39 @@ the game. The real one moves with it.
 **Know how much it changed but not the new total?** Type the amount in **Know how much it
 changed?** and press **Went up by** or **Went down by**.
 
-### 5.3 When you can't see the number
+### 5.3 When the game shows a percent
+
+Type the percent with a `%` sign, for example `40%`, and press **Search**. One search
+looks for it every way games keep a percent: 40, 0.4 and 400, as decimals and (when they
+are whole numbers) as whole numbers. A pause or stats screen that shows the exact
+percentage is perfect for this.
+
+Change it in the game, then type the new percent (`25%`) and **Search again**. Each match
+stays with the way it was found, so 0.4 is compared as a fraction next time. In this
+search a number typed without the % counts as a percent too. Scan files show how each
+match is stored in their **Stored as** column.
+
+### 5.4 When it's a bar (or not out of 100)
+
+For a bar, or a value whose most isn't 100 (health 250, 1,700 shield):
+
+1. Fill it up in the game, then press **It's full now**. The app takes a snapshot and
+   remembers it as "full".
+2. Make it go down (take a hit).
+3. If the game shows the percent anywhere, type it (`40%`) and press **Search**. If you
+   only see the bar, press **About 75%**, **About 50%** or **About 25%**, whichever it
+   looks like.
+4. Repeat 2 and 3 a couple of times.
+
+The app keeps values that are now that percent of what they were when full (40% keeps 39
+to 41% of full; About 50% keeps roughly 37 to 63%). While very many matches are left, the
+hint says *"Too many to check by percent yet"*: that scan counts as **Went down** (or
+**Went up**); take another hit or heal, then type the % again.
+
+Pressing **It's full now** again during a search marks full again: fill it up and don't
+touch the controller, because it runs a **Same** scan.
+
+### 5.5 When you can't see the number
 
 1. Press **I don't know the number**. The app takes a snapshot of the game.
 2. Make the value change in the game (take a hit, use some stamina).
@@ -132,7 +165,7 @@ The match count says how many of each are left; once only one kind is left, the 
 carries on with that kind alone. To search a single kind (faster, or 8-byte values),
 pick it in **Advanced > Number type** first. **Test the hits** needs a single kind.
 
-### 5.4 When the search finds nothing
+### 5.6 When the search finds nothing
 
 Games don't always store the number you see. The app's hint will suggest the next thing
 to try, and **Try it** does it for you. In order, it tries:
@@ -150,10 +183,20 @@ You can set these yourself under **Advanced**:
   health, stamina and anything that can be fractional.
 - **Game stores it as**: the number shown, a fraction (0 to 1) of max, x10, x100 or x1000.
 
-### 5.5 When several matches all move together
+### 5.7 When several matches all move together
 
 Many games keep a **copy** of a value just for the screen. The copy changes along with the
-real one, so searching can't tell them apart. Two ways to find the real one:
+real one, so searching can't tell them apart.
+
+From 500 matches down, the app notes every match's value after each scan. Matches that
+always change together (one is always the other times the same number, like health 40 and
+its fraction 0.4) are shown as **one row** with **+N copies**; press the arrow to see every
+address. A row marked **likely real** has something that changed with it right next to it
+in memory at another scale (health next to its fraction), which display copies don't. It's
+a hint: nothing is removed. Set, Freeze and Make a cheat on a group's row use its likely
+real address; on an expanded row, that address. Values that never changed come last.
+
+Two ways to find the real one:
 
 - **Set test**: pick a row, type a new value, press **Set**. If the number on screen
   jumps back the next time it changes, that row was a copy.
@@ -165,7 +208,7 @@ real one, so searching can't tell them apart. Two ways to find the real one:
 
 > Test the hits writes to the game's memory. Save your game first.
 
-### 5.6 Try it, then make a cheat
+### 5.8 Try it, then make a cheat
 
 Pick the row you think is right:
 
@@ -184,7 +227,7 @@ Pick the row you think is right:
 If you type a value in the **New value** box before pressing **Make a cheat**, the cheat
 uses that value instead.
 
-### 5.7 Other tools on the Find tab
+### 5.9 Other tools on the Find tab
 
 - **Filter list by value**: show only rows near a number (`100` or `90-110`).
 - **Add address**: type an address you got from somewhere else to watch it.
@@ -341,6 +384,12 @@ different place every time the game starts.
    rounding, so 79.6 on screen still matches 80.
 4. Repeat until only a few are left. If they all move together, press **Test the hits**
    and answer its questions.
+
+   Faster: Returnal's pause screen shows your health as an exact percentage. With full
+   health press **It's full now**, take a hit, open the pause screen and type the percent
+   it shows (`65%`). Take another hit and type the new percent. The list then shows health
+   as one row marked **likely real** (health and its fraction sit side by side) with the
+   screen copies folded under it.
 5. Select the real one, pick **Infinite Health**, and press **Make a cheat**.
 
 In **My cheats** the health cheat says **This session only**: it'll be lost when you
@@ -378,8 +427,8 @@ health cheat for CheatRunner.
 | Your PS5Debug-NG is too old. | Load version 1.3.2 or newer. |
 | No game running. | Start the game, get into gameplay, press **Refresh**. |
 | Lost connection to the PS5. | Check the PS5 is on, press **Connect**. |
-| Nothing found. | Check the number, then press **Try it** to search another way (section 5.4). |
-| The value keeps going back after Set or Freeze. | You found a copy. See section 5.5 and the Obolites example. |
+| Nothing found. | Check the number, then press **Try it** to search another way (section 5.6). |
+| The value keeps going back after Set or Freeze. | You found a copy. See section 5.7 and the Obolites example. |
 | Couldn't send the file to the PS5. | Load the ftpsrv payload, or copy the saved file yourself. |
 | The PS5 answered in a way we didn't expect. | Restart PS5Debug-NG and try again. |
 | Something went wrong. | Press **Copy log** and send it with your bug report. |
@@ -392,6 +441,10 @@ health cheat for CheatRunner.
 - **Match / hit**: a place in memory that holds the number you searched for.
 - **Copy**: a second place that just shows the number on screen. Changing it does nothing
   lasting.
+- **Likely real**: in a group of matches that change together, the one with a related value
+  right next to it in memory. Usually the one to use.
+- **Stored as**: how a match keeps a percent: the percent itself, a fraction (0 to 1), x10,
+  or a share of its value when full ("of full").
 - **Freeze**: keep writing the same value so it can't change.
 - **This session only**: the value is somewhere different each time the game starts.
 - **Lock it**: switch off the bit of game code that changes the value.
@@ -401,6 +454,6 @@ health cheat for CheatRunner.
 
 ## Good to know
 
-Some of the newer features (Lock it, Player only, Find it next time and Test the hits)
-are still being checked on a real PS5. If one of them doesn't behave as described, press
+Some of the newer features (Lock it, Player only, Find it next time, Test the hits and the
+percent search with It's full now) are still being checked on a real PS5. If one of them doesn't behave as described, press
 **Copy log** and report it.
