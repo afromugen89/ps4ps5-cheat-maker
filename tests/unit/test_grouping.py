@@ -84,7 +84,9 @@ def test_link_needs_same_factor_every_scan():
     assert abs(link_ratio(a, b) - 0.01) < 1e-9
     assert link_ratio(a, c) is None
     assert link_ratio(a, Member(4, F, None, (90.0, 64.0, 40.0))) is None, "1.5% off"
-    assert link_ratio(a, Member(5, F, None, (90.0, None, 40.0))) is not None, "unknown skipped"
+    a4 = Member(10, F, None, (90.0, 65.0, 40.0, 20.0))
+    assert link_ratio(a4, Member(5, F, None, (0.9, None, 0.4, 0.2))) is not None, "gap skipped"
+    assert link_ratio(a, Member(11, F, None, (0.9, None, 0.4))) is None, "one change only"
     assert link_ratio(a, Member(6, F, None, (90.0, 0.0, 40.0))) is None, "0 on one side only"
     assert link_ratio(a, Member(7, F, None, (90.0, None, None))) is None, "needs 2 scans"
     still = Member(8, F, None, (1.0, 1.0, 1.0))
@@ -146,7 +148,7 @@ def test_empty_and_single():
 
 # -- the same shape through the FakeConsole and the scanner -----------------------------
 def kein_scans() -> dict[int, list[float]]:
-    """Address -> value at each of 3 scans (all went down), shaped like Kein's scan 12."""
+    """Address -> value at each of 4 scans (all went down), shaped like Kein's scan 12."""
     rows = {
         0x12E0EA40A0: FRAC,
         0x12E0EA40B0: HEALTH,
@@ -161,7 +163,9 @@ def kein_scans() -> dict[int, list[float]]:
     }
     rows.update({0x1400000000 + k * 0x20000: FRAC for k in range(30)})
     rows.update({0x1500000000 + k * 0x20000: HEALTH for k in range(12)})
-    return rows
+    # A first scan before those three (everything 10% higher): with the whole game
+    # matching, values are only kept from the next scan on.
+    return {a: [v[0] * 1.1, *v] for a, v in rows.items()}
 
 
 def kein_fake():
@@ -199,7 +203,7 @@ def test_kein_scan_12_on_the_fake_console_shows_few_rows():
     sc = Scanner(s)
     poke_scan(fake, scans, 0)
     sc.first_scan(None, F)
-    for i in (1, 2):
+    for i in (1, 2, 3):
         poke_scan(fake, scans, i)
         sc.next_scan(Compare.DECREASED)
     assert sc.count == len(scans) == 59
@@ -216,3 +220,28 @@ def test_close_values_that_move_differently_are_not_linked():
     assert link_ratio(a, b) is None
     c = Member(3, F, None, (f32(0.9), f32(0.88), f32(0.86)))
     assert link_ratio(a, c) is not None, "float rounding still links a real fraction"
+
+
+def test_two_values_are_one_change_and_link_nothing():
+    """Review: with one change every two values that went down look linked."""
+    import random
+
+    random.seed(2)
+    h = {}
+    for i in range(500):
+        v0 = random.uniform(1, 1000)
+        h[(0x1000 + i * 0x100, F)] = [v0, v0 * random.uniform(0.5, 0.99)]
+    assert max(len(g.members) for g in group_matches(h)) == 1
+
+
+def test_no_chains_of_close_enough_links():
+    """a~b and b~c within 1% but a and c 1.2% apart: c doesn't join a's group."""
+    a = (100.0, 50.0, 25.0)
+    b = (100.0, 50.0 * 1.006, 25.0 * 1.006)
+    c = (100.0, 50.0 * 1.012, 25.0 * 1.012)
+    h = {(0x10_0000, F): list(a), (0x20_0000, F): list(b), (0x30_0000, F): list(c)}
+    assert link_ratio(Member(1, F, None, a), Member(2, F, None, b)) is not None
+    assert link_ratio(Member(2, F, None, b), Member(3, F, None, c)) is not None
+    assert link_ratio(Member(1, F, None, a), Member(3, F, None, c)) is None
+    sizes = sorted(len(g.members) for g in group_matches(h))
+    assert sizes == [1, 2]

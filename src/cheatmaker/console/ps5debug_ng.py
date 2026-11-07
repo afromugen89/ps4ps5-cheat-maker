@@ -39,7 +39,7 @@ from cheatmaker.console.local_scan import (
     restrict,
     way_parts,
 )
-from cheatmaker.core.values import Compare, Scale, ValueType, matches, scale_target, value_for
+from cheatmaker.core.values import Compare, Scale, ValueType, matches, part_value, value_for
 from cheatmaker.errors import (
     ConnectionLost,
     ConsoleUnreachable,
@@ -935,7 +935,7 @@ class Ps5DebugNgClient:
                 if progress:
                     progress((i + p) / len(parts))
 
-            v = value_for(vt, cmp, scale_target(way, cmp, value))
+            v = part_value(vt, way, cmp, value)
             if v is None:
                 continue
             hits = self._scan_ranges(pid, ranges, vt, v, mine, cancel)
@@ -1030,7 +1030,7 @@ class Ps5DebugNgClient:
         if cmp is Compare.EXACT and vtype.is_float:
             code = _NG_FUZZY
         if cmp is Compare.BETWEEN:
-            lo, hi = value  # type: ignore[misc]
+            lo, hi = value_for(vtype, cmp, value) or value  # whole numbers: clamp to the type
             val = vtype.encode(lo) + vtype.encode(hi)
         elif cmp.by_amount:
             amount, _tol = value  # type: ignore[misc]  # the server applies its own rule
@@ -1265,10 +1265,11 @@ class Ps5DebugNgClient:
             raise ValueError("no search to narrow down; start a new search")
         pid = self._scan_pid
         fallback = next(iter(self.scan_counts()), None)
+        scan = restrict(hits, lambda: self._session(pid), fallback)  # may raise: nothing freed
         self._close_multi()
         self._end_resident()
-        self._scan = restrict(hits, lambda: self._session(pid), fallback)
-        return len(self._scan.hits)
+        self._scan = scan
+        return len(scan.hits)
 
     def _end_resident(self) -> None:
         if self._resident is None:
@@ -1294,37 +1295,52 @@ class Ps5DebugNgClient:
             return self._resident_next(cmp, value, progress, cancel)
         scan = self._scan
         if isinstance(scan, MultiScan) and self._scan_pid is not None:
-            return scan.next(cmp, value, progress, cancel, narrow=self._narrow_session)
+            return scan.next(
+                cmp, value, progress, cancel, narrow=self._narrowed, check=self._check_narrow
+            )
         if scan is None or scan.vtype is None or self._scan_pid is None:
             raise ValueError("no scan to narrow down; start a new search")
-        return self._narrow_session(scan, cmp, value, cancel, progress)
+        self._check_narrow(scan, cmp, value)
+        hits = self._narrowed(scan, cmp, value, progress, cancel)
+        if self._rescans(scan):  # the next window search only needs these windows
+            self._scan_ranges_list = candidate_windows(
+                self._scan_ranges_list, sorted(h.address for h in scan.hits), scan.vtype.size
+            )
+        scan.hits = hits
+        return len(hits)
 
-    def _narrow_session(
-        self,
-        scan: LocalScanSession,
-        cmp: Compare,
-        value,
-        cancel: threading.Event | None,
-        progress: ProgressFn | None = None,
-    ) -> int:
-        """Narrow one PC-side session: read few candidates, or re-scan windows around
-        many on the console (exact number or range only)."""
-        assert scan.vtype is not None and self._scan_pid is not None
-        spans = read_spans([h.address for h in scan.hits], scan.vtype.size)
-        if len(spans) <= MAX_READ_SPANS:
-            return scan.next(cmp, value, progress, cancel)
-        if cmp not in (Compare.EXACT, Compare.BETWEEN) or value is None:
+    @staticmethod
+    def _rescans(scan: LocalScanSession) -> bool:
+        """Too many candidates to read: narrowing re-scans windows on the console."""
+        assert scan.vtype is not None
+        return len(read_spans([h.address for h in scan.hits], scan.vtype.size)) > MAX_READ_SPANS
+
+    def _check_narrow(self, scan: LocalScanSession, cmp: Compare, value) -> None:
+        """Raise before anything changes when ``scan`` can't be narrowed this way."""
+        if self._rescans(scan) and (cmp not in (Compare.EXACT, Compare.BETWEEN) or value is None):
             raise ValueError(
                 f"{len(scan.hits):,} matches is too many to compare. Type the number you "
                 "see now to narrow it down first."
             )
+
+    def _narrowed(
+        self,
+        scan: LocalScanSession,
+        cmp: Compare,
+        value,
+        progress: ProgressFn | None,
+        cancel: threading.Event | None,
+    ) -> list[ScanHit]:
+        """One PC-side session's matches after this compare, not kept yet: read few
+        candidates, or re-scan windows around many on the console (number or range)."""
+        assert scan.vtype is not None and self._scan_pid is not None
+        if not self._rescans(scan):
+            return scan.narrowed(cmp, value, progress, cancel)
+        self._check_narrow(scan, cmp, value)
         addrs = {h.address for h in scan.hits}
         windows = candidate_windows(self._scan_ranges_list, sorted(addrs), scan.vtype.size)
         new = self._scan_ranges(self._scan_pid, windows, scan.vtype, value, progress, cancel)
-        scan.set_results(scan.vtype, [h for h in new if h.address in addrs], scan.way)
-        if not isinstance(self._scan, MultiScan):  # parts share the ranges: keep them all
-            self._scan_ranges_list = windows
-        return len(scan.hits)
+        return [ScanHit(h.address, h.value) for h in new if h.address in addrs]
 
     def scan_results(self, limit: int) -> list[ScanHit]:
         if self._multi is not None:

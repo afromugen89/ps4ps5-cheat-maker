@@ -43,6 +43,12 @@ PERCENT_PC_LIMIT = 20_000
 (setting ``percent_pc_limit``); above it the scan runs as Went up / Went down."""
 ABOUT = (75, 50, 25)  # AC-P3 buttons
 TOO_MANY = "too many"  # Scanner.note after a percent scan that ran as a plain compare
+NOTED = "noted"  # Scanner.note after a percent scan that could only note the percent
+KEEP_ALL = (-1e37, 1e37)
+"""A range every real value is in: a scan with it drops nothing but makes now the
+baseline (x10 of it still fits a 4-byte decimal)."""
+GROUP_SCANS = 3  # grouping needs each match's value from this many scans (2 changes)
+READ_CHUNK = 512  # spans read between Cancel / progress checks
 
 
 def default_unit(value: float | int) -> float:
@@ -273,7 +279,9 @@ class Scanner:
             raise ValueError(
                 "Type how much it changed by." if cmp.by_amount else "Type the number you see now."
             )
-        if cmp is Compare.EXACT and self.percent_search and not self.full_mode:
+        if cmp is Compare.EXACT and (self.percent_search or self.full_mode):
+            # In a percent or Full search a plain number counts as a percent, so every
+            # match is checked the same way (AC-P1).
             return self.percent_scan(value, unit, None, progress, cancel)  # type: ignore[arg-type]
         given = label
         label = cmp.value if value is None else str(value)
@@ -418,16 +426,22 @@ class Scanner:
         cancel: threading.Event | None,
     ) -> tuple[int, str]:
         """A percent scan checked on the PC. In a Full search with more than
-        ``pc_limit`` matches it runs as a plain Went down / Went up / Same instead."""
+        ``pc_limit`` matches it runs as a plain Went down / Went up instead. When the
+        percent can't be used to narrow (the last scan's percent isn't known, or it is too
+        close to this one to say up or down), the scan only notes it: nothing is dropped
+        and now becomes the baseline for the next one."""
         text = f"about {target.value:g}%" if target.about else f"{target.value:g}%"
         self.note = None
         count = self.count or 0
+        last = self.last_pct
         if count > self.pc_limit:
             if not self.full_mode:
                 raise ValueError(
                     f"{count:,} matches is too many to check by percent. Make it go up or "
                     "down and press Went up or Went down first, then type the % again."
                 )
+            if last is None or abs(target.value - last) < self.last_unit + target.unit:
+                return self._note_percent(target, text, progress, cancel)
             cmp, word = self._compare_for(target.value)
             count = self._narrow(cmp, None, progress, cancel)
             self.note = TOO_MANY
@@ -437,7 +451,14 @@ class Scanner:
         hits = client.scan_results(count) if count else []
         if cancel is not None and cancel.is_set():
             raise ScanCancelled("scan cancelled by the player")
-        raw = self._read_values(hits)
+        if (
+            self.full_mode
+            and last is None
+            and any((h.address, h.vtype or self.vtype) not in self.full for h in hits)
+        ):
+            # A manual compare since the last percent: no value when full to check against.
+            return self._note_percent(target, text, progress, cancel)
+        raw = self._read_values(hits, progress, cancel)
         kept: list[ScanHit] = []
         full: dict[tuple[int, ValueType], percent_filter.Full] = {}
         for h in hits:
@@ -475,16 +496,25 @@ class Scanner:
             progress(1.0)
         return count, text
 
+    def _note_percent(
+        self,
+        target: percent_filter.Target,
+        text: str,
+        progress: ProgressFn | None,
+        cancel: threading.Event | None,
+    ) -> tuple[int, str]:
+        """Drop nothing, but make now the baseline at which the game shows ``target``."""
+        count = self._narrow(Compare.BETWEEN, KEEP_ALL, progress, cancel)
+        self.note = NOTED
+        self.last_pct, self.last_unit = target.value, target.unit
+        return count, f"{text} (noted)"
+
     def _compare_for(self, pct: float | int) -> tuple[Compare, str]:
-        """The plain compare that matches going from the last percent to ``pct``."""
-        last = self.last_pct
-        if last is None:
-            return Compare.CHANGED, "changed"
-        if pct < last:
+        """The plain compare from the last percent to ``pct`` (they differ clearly)."""
+        assert self.last_pct is not None
+        if pct < self.last_pct:
             return Compare.DECREASED, "went down"
-        if pct > last:
-            return Compare.INCREASED, "went up"
-        return Compare.UNCHANGED, "same"
+        return Compare.INCREASED, "went up"
 
     def _narrow(
         self,
@@ -593,12 +623,13 @@ class Scanner:
             values[key] = history
             tags[key] = h.way
         self.values, self.tags, self.recorded = values, tags, n + 1
+        self.groups()  # work it out now, on the scan's thread, not in the live list
 
     def groups(self) -> list[Group]:
         """Linked matches as groups, best first (AC-G1..G4); [] unless 2 to GROUP_LIMIT
-        matches are left and their values are known from at least 2 scans."""
+        matches are left and their values are known from at least GROUP_SCANS scans."""
         count = self.count or 0
-        if not (self.active and 2 <= count <= GROUP_LIMIT and self.recorded >= 2):
+        if not (self.active and 2 <= count <= GROUP_LIMIT and self.recorded >= GROUP_SCANS):
             return []
         if self._groups is None:
             started = time.monotonic()
@@ -626,7 +657,12 @@ class Scanner:
             out.append(Match(h.address, vt.decode(raw), raw, h.vtype, h.way))
         return out
 
-    def _read_values(self, hits: list[ScanHit]) -> dict[int, bytes]:
+    def _read_values(
+        self,
+        hits: list[ScanHit],
+        progress: ProgressFn | None = None,
+        cancel: threading.Event | None = None,
+    ) -> dict[int, bytes]:
         """The bytes at each hit's address now (as many as its widest type)."""
         if not hits:
             return {}
@@ -646,10 +682,17 @@ class Scanner:
             spans.append((addrs[i], addrs[j] + size - addrs[i], addrs[i : j + 1]))
             i = j + 1
         read_many = getattr(client, "read_many", None)
-        if read_many is not None and len(spans) > 1:
-            blobs = read_many(game.pid, [(a, n) for a, n, _ in spans])
-        else:
-            blobs = [client.read(game.pid, a, n) for a, n, _ in spans]
+        blobs: list[bytes] = []
+        for k in range(0, len(spans), READ_CHUNK):
+            if cancel is not None and cancel.is_set():
+                raise ScanCancelled("scan cancelled by the player")
+            part = spans[k : k + READ_CHUNK]
+            if read_many is not None and len(part) > 1:
+                blobs += read_many(game.pid, [(a, n) for a, n, _ in part])
+            else:
+                blobs += [client.read(game.pid, a, n) for a, n, _ in part]
+            if progress:
+                progress(min(1.0, (k + len(part)) / len(spans)))
         for (start, _n, group), data in zip(spans, blobs, strict=True):
             for a in group:
                 values[a] = data[a - start : a - start + size]

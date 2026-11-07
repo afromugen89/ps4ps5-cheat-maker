@@ -1219,3 +1219,47 @@ def test_snapshot_rows_give_the_value_at_the_last_scan():
     [hit] = cl.scan_results(5)
     assert struct.unpack("<f", hit.value)[0] == 50.0
     cl.close()
+
+
+def test_percent_parts_narrow_all_or_nothing_on_the_console(monkeypatch):
+    """Review: a later part that can't be narrowed must not leave earlier parts with a
+    new baseline."""
+    from cheatmaker.console import ps5debug_ng
+    from cheatmaker.core.values import FRACTION, PERCENT
+
+    server = FakeNgServer()
+    cl = Ps5DebugNgClient.connect("127.0.0.1", server.port, timeout=3)
+    _show_pct(server.fake, 40)
+    server.fake.poke(PID, HEAP_BASE + 0x800, struct.pack("<f", 0.4))  # a far-off fraction
+    regions = [m for m in cl.maps(PID) if m.writable]
+    types = (ValueType.FLOAT, ValueType.FLOAT)
+    cl.scan_start(PID, regions, types, Compare.BETWEEN, (39.5, 40.5), ways=(PERCENT, FRACTION))
+    assert cl.scan_way_counts() == {(ValueType.FLOAT, PERCENT): 1, (ValueType.FLOAT, FRACTION): 2}
+    monkeypatch.setattr(ps5debug_ng, "MAX_READ_SPANS", 1)  # the fraction part has 2 spans
+    _show_pct(server.fake, 20)
+    with pytest.raises(ValueError, match="too many to compare"):
+        cl.scan_next(Compare.DECREASED, None)
+    [pct] = [h for h in cl.scan_results(10) if h.way == PERCENT]
+    assert struct.unpack("<f", pct.value)[0] == 40.0, "the percent part kept its baseline"
+    monkeypatch.setattr(ps5debug_ng, "MAX_READ_SPANS", 4000)
+    assert cl.scan_next(Compare.DECREASED, None) == 2
+    cl.close()
+
+
+def test_scan_restrict_failing_keeps_the_console_search(monkeypatch):
+    from cheatmaker.console import ps5debug_ng
+
+    server = FakeNgServer(snapshot=True)
+    cl = Ps5DebugNgClient.connect("127.0.0.1", server.port, timeout=3)
+    regions = [m for m in cl.maps(PID) if m.writable]
+    cl.scan_start(PID, regions, ValueType.FLOAT, Compare.UNKNOWN, None)
+
+    def boom(*a, **k):
+        raise ValueError("no number type for a match")
+
+    monkeypatch.setattr(ps5debug_ng, "restrict", boom)
+    with pytest.raises(ValueError):
+        cl.scan_restrict([])
+    assert server.resident is not None, "the snapshot wasn't freed"
+    assert cl.scan_next(Compare.UNCHANGED, None) > 0
+    cl.close()

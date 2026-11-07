@@ -34,9 +34,10 @@ from cheatmaker.core.guide import Action, Guide, Scan, Shows, Suggestion
 from cheatmaker.core.hit_tester import TEST_LIMIT
 from cheatmaker.core.pointers import Chain
 from cheatmaker.core.scan_log import way_label
-from cheatmaker.core.scanner import ABOUT, MAX_SHOW, TOO_MANY, Match
+from cheatmaker.core.scanner import ABOUT, MAX_SHOW, NOTED, TOO_MANY, Match
 from cheatmaker.core.templates import TEMPLATES, make_cheat
 from cheatmaker.core.values import (
+    OF_FULL,
     SHOWN,
     Compare,
     Scale,
@@ -93,7 +94,8 @@ class FindWizard(QWidget):
         self.row_types: list[ValueType] = []
         self.groups: list[Group] = []  # shown as the tree when they fold copies together
         self._n_matches = 0  # rows[:_n_matches] are matches, the rest typed in / pointers
-        self._tree_pick: tuple[int, bool] | None = None  # selection kept over a rebuild
+        # (address, is an expanded member) selected before the tree was built again
+        self._tree_pick: tuple[int, bool] | None = None
         self.manual: dict[int, ValueType] = {}  # addresses the player typed in
         self.pointers: dict[Chain, ValueType] = {}  # chains followed on every refresh
         self.row_chains: list[Chain | None] = []
@@ -427,9 +429,11 @@ class FindWizard(QWidget):
         if self.guide.shows is None:  # the player skipped the question: guess it
             self.guide.shows = Shows.BAR if self.unknown_mode else Shows.NUMBER
         tip = self.guide.after_scan(kind, count) if kind is not None else None
-        if sc.note == TOO_MANY:  # a percent scan ran as Went up / Went down
+        if sc.note in (TOO_MANY, NOTED):  # a percent scan ran as Went up / down, or noted
             self._suggest(tip, show_text=False)
-            self.hint.setText(hints.FIND_PERCENT_TOO_MANY)
+            self.hint.setText(
+                hints.FIND_PERCENT_TOO_MANY if sc.note == TOO_MANY else hints.FIND_PERCENT_NOTED
+            )
         elif sc.few_left and count > 1:
             self.hint.setText(f"{hints.FIND_FEW} {hints.FIND_TEST_HITS}")
             self._suggest(tip, show_text=False)
@@ -789,6 +793,7 @@ class FindWizard(QWidget):
         for i, m in enumerate(self.rows):
             index.setdefault((m.address, self.row_types[i]), i)
         if self.tree.topLevelItemCount() != len(self.groups) + len(self.rows) - self._n_matches:
+            self._tree_pick = self._tree_pick or self._tree_selection()
             self.tree.clear()  # rows were added or removed: build it again
         if self.tree.topLevelItemCount() == 0:
             for g in self.groups:
@@ -807,8 +812,11 @@ class FindWizard(QWidget):
                 top.setData(0, ROW, i)
                 self.tree.addTopLevelItem(top)
             if self._tree_pick is not None:
-                self._select_row(*self._tree_pick)
+                addr, member = self._tree_pick
                 self._tree_pick = None
+                row = next((i for i, m in enumerate(self.rows) if m.address == addr), None)
+                if row is not None:
+                    self._select_row(row, member)
         for t in range(self.tree.topLevelItemCount()):
             top = self.tree.topLevelItem(t)
             g = self.groups[t] if t < len(self.groups) else None
@@ -820,7 +828,7 @@ class FindWizard(QWidget):
 
     def _item_text(self, item: QTreeWidgetItem, g: Group | None, member: int | None) -> None:
         i = item.data(0, ROW)
-        if not isinstance(i, int) or i >= len(self.rows):
+        if not isinstance(i, int) or not 0 <= i < len(self.rows):
             return
         m = self.rows[i]
         item.setText(0, self._row_text(i))
@@ -888,27 +896,27 @@ class FindWizard(QWidget):
             self.tree.clearSelection()
 
     def _tree_selection(self) -> tuple[int, bool] | None:
-        """The selected (row, is an expanded member) in the tree."""
+        """The selected (address, is an expanded member) in the tree."""
         items = self.tree.selectedItems()
-        if not items or not isinstance(items[0].data(0, ROW), int):
+        i = items[0].data(0, ROW) if items else None
+        if not isinstance(i, int) or not 0 <= i < len(self.rows):
             return None
-        return items[0].data(0, ROW), items[0].parent() is not None
+        return self.rows[i].address, items[0].parent() is not None
 
     def _select_row(self, i: int, member: bool = False) -> None:
-        """Select row ``i`` in whichever list is showing (a member in the tree when
-        ``member``: its group is expanded)."""
+        """Select row ``i`` in whichever list is showing. In the tree a group's row is
+        preferred, or an expanded member when ``member``; either is found."""
         if not self.grouped:
             self.table.selectRow(i)
             return
-        for t in range(self.tree.topLevelItemCount()):
-            top = self.tree.topLevelItem(t)
-            items = [top.child(c) for c in range(top.childCount())] if member else [top]
-            for it in items:
-                if it.data(0, ROW) == i:
-                    if member:
-                        top.setExpanded(True)
-                    self.tree.setCurrentItem(it)
-                    return
+        tops = [self.tree.topLevelItem(t) for t in range(self.tree.topLevelItemCount())]
+        kids = [top.child(c) for top in tops for c in range(top.childCount())]
+        for it in (kids + tops) if member else (tops + kids):
+            if it.data(0, ROW) == i:
+                if it.parent() is not None:
+                    it.parent().setExpanded(True)
+                self.tree.setCurrentItem(it)
+                return
 
     def _vtype(self) -> ValueType:
         assert self.ctl.scanner.vtype is not None
@@ -929,6 +937,8 @@ class FindWizard(QWidget):
         player typed stays, so Search starts again in one click)."""
         self.unknown_mode = False
         self.rows = []
+        self._show_groups([])
+        self.tree.clear()
         self.count.setText("")
         self.table.setRowCount(0)
         self.timer.stop()
@@ -995,7 +1005,8 @@ class FindWizard(QWidget):
             return
         try:
             addrs, scale = self._test_candidates()
-            dlg = HitTestDialog(self.ctl, addrs, sc.vtype, self.use_found, self, scale)
+            note = hints.TEST_HITS_RAW if scale == OF_FULL else ""
+            dlg = HitTestDialog(self.ctl, addrs, sc.vtype, self.use_found, self, scale, note)
         except Exception as exc:
             self.ctl.fail(exc, "test hits")
             return
@@ -1003,27 +1014,42 @@ class FindWizard(QWidget):
         dlg.exec()
 
     def _test_candidates(self) -> tuple[list[int], Scale]:
-        """Test the hits candidates. Grouped list: one per group, its likely real match
-        (or the expanded row picked in it); a single group tests its members (AC-G4).
-        A percent search asks in the way the candidates keep the number when they agree."""
+        """Test the hits candidates and the units to ask in. Grouped list: one per
+        group, its likely real match (or the expanded row picked in it); a single group
+        tests its members (AC-G4).
+
+        One test value has to mean the same to every candidate, so when they keep the
+        number different ways (percent, fraction, x10, ...) only the ones stored the most
+        common way are tested (the first group's way on a tie). Raises ValueError when
+        fewer than 2 are left that way."""
         sc = self.ctl.scanner
         hits = self.ctl.session.require_client().scan_results(TEST_LIMIT)
-        way_of = {h.address: h.way for h in hits}
+        # (address, way), in the order they are offered: first group first
         if not self.grouped:
-            addrs = [h.address for h in hits]
+            cands = [(h.address, h.way) for h in hits]
         elif len(self.groups) == 1:
-            addrs = [m.address for m in self.groups[0].members]
+            cands = [(m.address, m.way) for m in self.groups[0].members]
         else:
-            pick = self.selected() if self._tree_selection() else None
-            child = pick is not None and (self._tree_selection() or (0, False))[1]
-            addrs = []
+            pick = self._tree_selection()
+            cands = []
             for g in self.groups:
-                own = [m.address for m in g.members]
-                use = pick.address if child and pick is not None and pick.address in own else own[0]
-                addrs.append(use)
-        ways = {way_of.get(a) for a in addrs}
-        way = next(iter(ways)) if len(ways) == 1 else None
-        return addrs, way if way is not None and sc.scale is SHOWN else sc.scale
+                use = g.head
+                if pick is not None and pick[1]:  # an expanded row was picked
+                    use = next((m for m in g.members if m.address == pick[0]), g.head)
+                cands.append((use.address, use.way))
+        counts: dict[Scale | None, int] = {}
+        for _a, w in cands:
+            counts[w] = counts.get(w, 0) + 1
+        way = max(counts, key=lambda w: (counts[w], w == cands[0][1])) if cands else None
+        addrs = [a for a, w in cands if w == way]
+        if len(counts) > 1 and len(addrs) < 2:
+            raise ValueError(
+                "These matches keep the number different ways, so one test value can't "
+                "check them all. Expand a group and pick a row, or search again first."
+            )
+        if way is None or sc.scale is not SHOWN:
+            return addrs, sc.scale
+        return addrs, way
 
     def use_found(self, addr: int, vt: ValueType) -> None:
         """The winner of Test the hits goes in the list like a typed-in address."""

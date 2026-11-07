@@ -162,6 +162,14 @@ FIND_TEST_HITS = "Not sure which row is real? Press Test the hits."
 FIND_PERCENT_TOO_MANY = (
     "Too many to check by percent yet. Take another hit or heal, then type the % again."
 )
+FIND_PERCENT_NOTED = (
+    "Noted, nothing dropped: Cheat Maker needs to see the % change from the last one. "
+    "Take a hit or heal, then type the new % (or pick About 75 / 50 / 25%)."
+)
+TEST_HITS_RAW = (
+    "These keep the number as their own amount, not as a percent: type the test value "
+    "as that amount (the list shows it)."
+)
 FIND_FULL_CONFIRM = (
     "Mark it full again? Keep it full and don't touch the controller: Cheat Maker runs a "
     "Same scan, which drops values that changed."

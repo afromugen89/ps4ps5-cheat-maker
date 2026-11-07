@@ -11,7 +11,7 @@ import threading
 from collections.abc import Callable, Iterable
 
 from cheatmaker.console.client import MemMap, ProgressFn, ScanHit
-from cheatmaker.core.values import Compare, Scale, ValueType, matches, scale_target, value_for
+from cheatmaker.core.values import Compare, Scale, ValueType, matches, part_value
 from cheatmaker.errors import ScanCancelled
 
 ReadFn = Callable[[int, int], bytes]
@@ -114,7 +114,10 @@ class LocalScanSession:
         self.hits = hits
 
     def current_values(
-        self, hits: list[ScanHit], cancel: threading.Event | None = None
+        self,
+        hits: list[ScanHit],
+        cancel: threading.Event | None = None,
+        progress: ProgressFn | None = None,
     ) -> dict[int, bytes]:
         assert self.vtype is not None
         size = self.vtype.size
@@ -135,6 +138,8 @@ class LocalScanSession:
                     a = addrs[idx]
                     out[a] = blob[a - start : a - start + size]
                     idx += 1
+            if progress:
+                progress(min(1.0, (i + READ_BATCH) / len(spans)))
         return out
 
     def next(
@@ -144,20 +149,30 @@ class LocalScanSession:
         progress: ProgressFn | None = None,
         cancel: threading.Event | None = None,
     ) -> int:
+        self.hits = self.narrowed(cmp, value, progress, cancel)
+        return len(self.hits)
+
+    def narrowed(
+        self,
+        cmp: Compare,
+        value: float | int | None,
+        progress: ProgressFn | None = None,
+        cancel: threading.Event | None = None,
+    ) -> list[ScanHit]:
+        """The matches left after this compare, without keeping them (``next`` does)."""
         if self.vtype is None:
             raise ValueError("no scan to narrow down; start a new search")
         if cmp is Compare.UNKNOWN:
             raise ValueError('"Unknown value" is only for the first search')
-        current = self.current_values(self.hits, cancel)
+        current = self.current_values(self.hits, cancel, progress)
         if progress:
             progress(1.0)
         vt = self.vtype
-        self.hits = [
+        return [
             ScanHit(h.address, current[h.address])
             for h in self.hits
             if h.address in current and matches(vt, cmp, current[h.address], h.value, value)
         ]
-        return len(self.hits)
 
     def results(self, limit: int) -> list[ScanHit]:
         if self.way is None:
@@ -165,7 +180,10 @@ class LocalScanSession:
         return [ScanHit(h.address, h.value, h.vtype, self.way) for h in self.hits[:limit]]
 
 
-NarrowFn = Callable[..., int]  # (session, cmp, value, cancel) -> matches left
+NarrowFn = Callable[..., list[ScanHit]]
+"""(session, cmp, value, progress, cancel) -> the session's matches left, not kept yet."""
+CheckFn = Callable[..., None]
+"""(session, cmp, value): raise when this part can't be narrowed this way."""
 
 
 class MultiScan:
@@ -201,19 +219,38 @@ class MultiScan:
         progress: ProgressFn | None = None,
         cancel: threading.Event | None = None,
         narrow: NarrowFn | None = None,
+        check: CheckFn | None = None,
     ) -> int:
-        """``narrow(session, cmp, value, cancel)`` narrows one part (default: read the
-        candidates on the PC); it gets the value already scaled for the part's way."""
+        """Narrow every part, all or nothing: ``check(session, cmp, value)`` first runs on
+        every part, then ``narrow(session, cmp, value, progress, cancel)`` works out each
+        part's new matches (default: read the candidates on the PC), and only when all
+        succeeded are they kept. An error or Cancel leaves the search as it was. Each part
+        gets the value already scaled for its way."""
+        plans = []
         for s in self.sessions:
             assert s.vtype is not None
-            v = scale_target(s.way, cmp, value)
-            v = value_for(s.vtype, cmp, v) if value is not None else None
-            if value is not None and v is None:
-                s.hits = []  # no number of this type can match
+            v = part_value(s.vtype, s.way, cmp, value)
+            plans.append((s, v, value is not None and v is None))  # True: none can match
+        if check is not None:
+            for s, v, none in plans:
+                if not none:
+                    check(s, cmp, v)
+        new: list[list[ScanHit]] = []
+        n = len(plans)
+        for i, (s, v, none) in enumerate(plans):
+
+            def mine(p: float, i: int = i) -> None:
+                if progress:
+                    progress((i + p) / n)
+
+            if none:
+                new.append([])
             elif narrow is not None:
-                narrow(s, cmp, v, cancel)
+                new.append(narrow(s, cmp, v, mine, cancel))
             else:
-                s.next(cmp, v, None, cancel)
+                new.append(s.narrowed(cmp, v, mine, cancel))
+        for (s, _v, _none), hits in zip(plans, new, strict=True):
+            s.hits = hits
         if progress:
             progress(1.0)
         drop_empty(self.sessions, lambda s: len(s.hits))

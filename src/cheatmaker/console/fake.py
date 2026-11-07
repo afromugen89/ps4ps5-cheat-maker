@@ -31,7 +31,7 @@ from cheatmaker.console.local_scan import (
     restrict,
     way_parts,
 )
-from cheatmaker.core.values import Compare, Scale, ValueType, scale_target, value_for
+from cheatmaker.core.values import Compare, Scale, ValueType, part_value
 from cheatmaker.errors import ConnectionLost, ReadFailed, ScanNotSupported, WriteFailed
 
 PROT_R, PROT_W, PROT_X = 1, 2, 4
@@ -220,7 +220,7 @@ class FakeConsole:
             parts = way_parts(vtype, ways)
             sessions = []
             for i, (vt, way) in enumerate(parts):
-                v = value_for(vt, cmp, scale_target(way, cmp, value))
+                v = part_value(vt, way, cmp, value)
                 if v is not None:
                     s = self._session(pid)
                     s.first(regions, vt, cmp, v, None, cancel)

@@ -145,6 +145,11 @@ to 41% of full; About 50% keeps roughly 37 to 63%). While very many matches are 
 hint says *"Too many to check by percent yet"*: that scan counts as **Went down** (or
 **Went up**); take another hit or heal, then type the % again.
 
+Sometimes a percent can only be noted, and nothing is dropped: when it's the same as (or
+very close to) the last one, or when you pressed **Went up** / **Went down** yourself since
+the last percent. Change it in the game again and type the new %. In this search a number
+typed without the % also counts as a percent.
+
 Pressing **It's full now** again during a search marks full again: fill it up and don't
 touch the controller, because it runs a **Same** scan.
 
@@ -195,6 +200,11 @@ address. A row marked **likely real** has something that changed with it right n
 in memory at another scale (health next to its fraction), which display copies don't. It's
 a hint: nothing is removed. Set, Freeze and Make a cheat on a group's row use its likely
 real address; on an expanded row, that address. Values that never changed come last.
+Grouping needs each value from at least three scans, and it works for every search, not
+just percent ones: a plain number or Went up / Went down search shows the grouped list too.
+**Test the hits** then tests one address per group. If the matches keep the number
+different ways (say a fraction and a whole number), it tests only those stored the most
+common way, so one test value means the same to all of them.
 
 Two ways to find the real one:
 

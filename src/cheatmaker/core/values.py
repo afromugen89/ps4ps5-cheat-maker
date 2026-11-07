@@ -239,6 +239,45 @@ def scale_target(way: Scale | None, cmp: Compare, value):
     return value
 
 
+def f32(x: float) -> float:
+    """``x`` as a 4-byte decimal holds it (nearest)."""
+    return struct.unpack("<f", struct.pack("<f", x))[0]
+
+
+def _f32_step(x: float, up: bool) -> float:
+    """The next 4-byte decimal after ``x`` (itself a 4-byte decimal), up or down."""
+    if x == 0:
+        tiny = struct.unpack("<f", struct.pack("<I", 1))[0]
+        return tiny if up else -tiny
+    (bits,) = struct.unpack("<i", struct.pack("<f", x))
+    bits += 1 if (x > 0) == up else -1
+    return struct.unpack("<f", struct.pack("<i", bits))[0]
+
+
+def open_window(vtype: ValueType, rng: tuple[float, float]) -> tuple[float, float]:
+    """An open-ended match window as ``vtype`` sees it. A 4-byte decimal can't hold
+    0.41 exactly (it reads 0.4099999964), so a bound one unit away must be compared in
+    4-byte decimals too, or "40%" would keep a stored 0.41."""
+    if vtype is not ValueType.FLOAT:
+        return rng
+    lo, hi = rng
+    if not (math.isfinite(lo) and math.isfinite(hi)):
+        return rng
+    return (_f32_step(f32(lo), True), _f32_step(f32(hi), False))
+
+
+def part_value(vtype: ValueType, way: Scale | None, cmp: Compare, value):
+    """The search value for one (type, way) part of a percent search, or None when no
+    number of that type can match. A BETWEEN window is open-ended (less than one unit
+    away), as ``window`` makes it."""
+    v = scale_target(way, cmp, value)
+    if way is not None and cmp is Compare.BETWEEN and v is not None:
+        v = open_window(vtype, v)
+        if v[0] > v[1]:
+            return None
+    return value_for(vtype, cmp, v) if value is not None else None
+
+
 def parse_percent(text: str) -> tuple[float | int, float] | None:
     """A percent the player typed ("40%", "40.5 %") as (value, unit), or None when the
     text has no %. Raises ValueError in plain English when it isn't 0 to 100."""

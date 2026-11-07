@@ -18,7 +18,16 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
-from cheatmaker.core.values import FRACTION, OF_FULL, PERCENT, X10, Scale, ValueType, window
+from cheatmaker.core.values import (
+    FRACTION,
+    OF_FULL,
+    PERCENT,
+    X10,
+    Scale,
+    ValueType,
+    open_window,
+    window,
+)
 
 FULL_TOL = 1.0
 """A typed percent keeps 39-41% of full for 40% (percentage points)."""
@@ -62,7 +71,15 @@ def ways_to_try(vtype: ValueType, way: Scale | None, target: Target) -> list[Sca
     return ways if vtype.is_float else [w for w in ways if not w.decimal]
 
 
-def matches_way(cur: float | int, way: Scale, full: Full | None, target: Target) -> bool:
+def matches_way(
+    cur: float | int,
+    way: Scale,
+    full: Full | None,
+    target: Target,
+    vtype: ValueType = ValueType.DOUBLE,
+) -> bool:
+    """``cur`` (a ``vtype`` value) holds the target ``way``. Windows one unit wide are
+    compared as ``vtype`` stores numbers (see ``values.open_window``)."""
     if isinstance(cur, float) and not math.isfinite(cur):
         return False
     if way == OF_FULL:
@@ -73,7 +90,7 @@ def matches_way(cur: float | int, way: Scale, full: Full | None, target: Target)
     if target.about:
         lo, hi = target.value - ABOUT_TOL, target.value + ABOUT_TOL
         return lo * way.factor <= cur <= hi * way.factor
-    lo, hi = window(target.value * way.factor, target.unit * way.factor)
+    lo, hi = open_window(vtype, window(target.value * way.factor, target.unit * way.factor))
     return lo <= cur <= hi
 
 
@@ -82,5 +99,6 @@ def check(
 ) -> Scale | None:
     """The way ``cur`` holds the target percent, or None."""
     return next(
-        (w for w in ways_to_try(vtype, way, target) if matches_way(cur, w, full, target)), None
+        (w for w in ways_to_try(vtype, way, target) if matches_way(cur, w, full, target, vtype)),
+        None,
     )

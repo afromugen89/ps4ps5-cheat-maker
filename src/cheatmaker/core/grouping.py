@@ -80,13 +80,18 @@ def first_ratio(a: Member, b: Member) -> float | None:
     return next((y / x for x, y in _shared(a, b) if x != 0 and y != 0), None)
 
 
+MIN_CHANGES = 2
+"""Scans in which both must have changed to be linked. With one change any two values
+that went down are "x the same number" of each other."""
+
+
 def link_ratio(a: Member, b: Member, tol: float = RATIO_TOL) -> float | None:
-    """k when b is always a x k (within ``tol``) over at least 2 shared scans and both
-    changed; else None. A 0 on one side only breaks the link."""
+    """k when b is always a x k (within ``tol``) and they changed together at least
+    MIN_CHANGES times; else None. A 0 on one side only breaks the link."""
     if not (a.changed and b.changed):
         return None
     shared = _shared(a, b)
-    if len(shared) < 2:
+    if sum(1 for p, q in itertools.pairwise(shared) if p[0] != q[0] and p[1] != q[1]) < MIN_CHANGES:
         return None
     k = first_ratio(a, b)
     if k is None:
@@ -131,20 +136,6 @@ def _overlap(a: Member, b: Member) -> bool:
     return hi.address < lo.address + lo.vtype.size
 
 
-class _Union:
-    def __init__(self, n: int) -> None:
-        self.parent = list(range(n))
-
-    def find(self, i: int) -> int:
-        while self.parent[i] != i:
-            self.parent[i] = self.parent[self.parent[i]]
-            i = self.parent[i]
-        return i
-
-    def join(self, i: int, j: int) -> None:
-        self.parent[self.find(i)] = self.find(j)
-
-
 def group_matches(
     history: Mapping[Key, Values],
     tags: Mapping[Key, Scale | None] | None = None,
@@ -165,17 +156,21 @@ def group_matches(
     moving = [m for m in every if m.changed]
     still = [m for m in every if not m.changed]
     n = len(moving)
-    uf = _Union(n)
-    # Linked values change in the same scans, so only those need comparing.
+    # Linked values change in the same scans, so only those need comparing. A match
+    # joins a group only when it links to that group's first member: no chains of
+    # "close enough" links that end far from where they started.
+    roots = list(range(n))
     buckets: dict[tuple, list[int]] = {}
     for i, m in enumerate(moving):
         buckets.setdefault(_moves(m), []).append(i)
     for idx in buckets.values():
-        for x, i in enumerate(idx):
-            for j in idx[x + 1 :]:
-                if uf.find(i) != uf.find(j) and link_ratio(moving[i], moving[j], ratio_tol):
-                    uf.join(i, j)
-    roots = [uf.find(i) for i in range(n)]
+        firsts: list[int] = []
+        for i in idx:
+            j = next((f for f in firsts if link_ratio(moving[f], moving[i], ratio_tol)), None)
+            if j is None:
+                firsts.append(i)
+            else:
+                roots[i] = j
 
     # Likely real: something that changed with it sits close by at another scale.
     likely = [False] * n

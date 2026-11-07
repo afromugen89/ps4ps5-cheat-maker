@@ -10,7 +10,7 @@ import pytest
 from cheatmaker.console.fake import FakeConsole
 from cheatmaker.console.local_scan import way_parts
 from cheatmaker.core import percent_filter as pf
-from cheatmaker.core.scanner import TOO_MANY, Scanner
+from cheatmaker.core.scanner import NOTED, TOO_MANY, Scanner
 from cheatmaker.core.session import Session
 from cheatmaker.core.values import (
     FRACTION,
@@ -279,7 +279,38 @@ def test_full_with_too_many_runs_plain_compares_first(fake, session):
     assert {m.address for m in sc.matches(10)} == {MAX_HP, HP_FRAC}
 
 
-def test_full_over_limit_after_a_manual_compare_uses_changed(fake, session):
+def test_full_then_manual_compare_then_percent_keeps_the_value(fake, session):
+    """Review blocker: a Went down between Full and the first % leaves no value when
+    full to check against; the % is noted (nothing dropped) and the next one narrows."""
+    show_hp(fake, 250)
+    sc = Scanner(session)
+    sc.mark_full()
+    show_hp(fake, 100)
+    sc.next_scan(Compare.DECREASED)
+    assert sc.last_pct is None
+    before = sc.count
+    assert sc.percent_scan(40, 1.0) == before and sc.note == NOTED
+    assert sc.history[-1] == "40% (noted)" and sc.last_pct == 40
+    assert MAX_HP in {m.address for m in sc.matches(500)}
+    show_hp(fake, 50)
+    assert sc.percent_scan(20, 1.0) == 2
+    assert {m.address for m in sc.matches(10)} == {MAX_HP, HP_FRAC}
+
+
+def test_full_then_manual_compare_then_about_keeps_the_value(fake, session):
+    show_hp(fake, 250)
+    sc = Scanner(session)
+    sc.mark_full()
+    show_hp(fake, 140)
+    sc.next_scan(Compare.DECREASED)
+    sc.about_scan(50)
+    assert sc.note == NOTED and MAX_HP in {m.address for m in sc.matches(500)}
+    show_hp(fake, 60)
+    sc.about_scan(25)
+    assert MAX_HP in {m.address for m in sc.matches(500)}
+
+
+def test_full_over_limit_after_a_manual_compare_notes_the_percent(fake, session):
     show_hp(fake, 250)
     sc = Scanner(session)
     sc.pc_limit = 1
@@ -289,7 +320,54 @@ def test_full_over_limit_after_a_manual_compare_uses_changed(fake, session):
     sc.count = 5  # pretend still more than the limit
     show_hp(fake, 100)
     sc.percent_scan(40, 1.0)
-    assert sc.history[-1] == "40% (as changed)"
+    assert sc.history[-1] == "40% (noted)" and sc.note == NOTED
+
+
+@pytest.mark.parametrize(
+    ("first", "second", "about"),
+    [(190, 170, True), (100, 99, False)],  # About 75% twice; 40% twice while 100 -> 99
+)
+def test_same_percent_again_never_runs_same(fake, session, first, second, about):
+    """Review: an unchanged percent mustn't drop a value that moved a little."""
+    show_hp(fake, 250)
+    sc = Scanner(session)
+    sc.pc_limit = 1
+    sc.mark_full()
+    pct = 75 if about else 40
+    run = (lambda: sc.about_scan(pct)) if about else (lambda: sc.percent_scan(pct, 1.0))
+    show_hp(fake, first)
+    run()
+    assert "(as went down)" in sc.history[-1]
+    show_hp(fake, second)
+    run()
+    assert sc.history[-1].endswith("(noted)") and sc.note == NOTED
+    kept = {h.address for h in session.client.scan_results(10**6)}
+    assert MAX_HP in kept
+
+
+def test_close_percent_runs_no_compare(fake, session):
+    show_hp(fake, 250)
+    sc = Scanner(session)
+    sc.pc_limit = 1
+    sc.mark_full()
+    show_hp(fake, 100)
+    sc.percent_scan(40, 1.0)
+    show_hp(fake, 102)
+    sc.percent_scan(41, 1.0)  # 40 -> 41 typed to whole numbers: could be either way
+    assert sc.history[-1] == "41% (noted)"
+    show_hp(fake, 50)
+    sc.percent_scan(20, 1.0)
+    assert sc.history[-1] in ("20% (as went down)", "20%")
+
+
+def test_plain_number_in_a_full_search_counts_as_a_percent(fake, session):
+    show_hp(fake, 250)
+    sc = Scanner(session)
+    sc.mark_full()
+    show_hp(fake, 100)
+    assert sc.next_scan(Compare.EXACT, 40) == 2 and sc.history[-1] == "40%"
+    with pytest.raises(ValueError, match="0 to 100"):
+        sc.next_scan(Compare.EXACT, 250)
 
 
 def test_about_buttons_keep_a_wide_range(fake, session):
@@ -337,9 +415,12 @@ def test_scanner_keeps_values_and_groups_linked_matches(fake, session):
     assert sc.recorded == 1 and sc.groups() == [], "one scan isn't enough"
     show_hp(fake, 50)
     sc.percent_scan(20, 1.0)
+    assert sc.recorded == 2 and sc.groups() == [], "two values are one change: not enough"
+    show_hp(fake, 25)
+    sc.percent_scan(10, 1.0)
     [g] = sc.groups()
     assert {m.address for m in g.members} == {MAX_HP, HP_FRAC} and g.head_likely
-    assert sc.values[(MAX_HP, F)] == [100.0, 50.0]
+    assert sc.values[(MAX_HP, F)] == [100.0, 50.0, 25.0]
     assert sc.tags[(HP_FRAC, F)] == FRACTION
 
 
@@ -368,3 +449,94 @@ def test_percent_pc_limit_setting_is_clamped(tmp_path):
 
 def test_new_session_helper_is_usable():
     assert new_session(build_fake()).game is not None
+
+
+# -- review: 4-byte decimal bounds, all-or-nothing narrowing ---------------------------
+def test_fraction_one_unit_away_is_out_in_four_byte_decimals(fake, session):
+    """0.41 stored as a 4-byte decimal reads 0.4099999964: still one unit from 40%."""
+    from cheatmaker.core.values import f32 as to32
+
+    edge = HEAP_BASE + 0x500
+    for stored, kept in ((0.41, False), (0.39, False), (0.405, True), (0.3951, True)):
+        f32(fake, edge, stored)
+        sc = Scanner(session)
+        sc.percent_scan(40, 1.0, F)
+        assert (edge in {m.address for m in sc.matches(500)}) is kept, stored
+        assert (pf.check(F, None, to32(stored), None, pf.Target(40, 1.0)) is not None) is kept
+    assert pf.check(ValueType.DOUBLE, None, 0.4099999, None, pf.Target(40, 1.0)) is FRACTION
+
+
+def _two_parts():
+    from cheatmaker.console.client import ScanHit
+    from cheatmaker.console.local_scan import LocalScanSession, MultiScan
+
+    mem = {0x100: struct.pack("<f", 30.0), 0x200: struct.pack("<f", 0.3)}
+    a = LocalScanSession(lambda ad, n: mem.get(ad, bytes(n)))
+    a.set_results(F, [ScanHit(0x100, struct.pack("<f", 40.0))], PERCENT)
+    b = LocalScanSession(lambda ad, n: mem.get(ad, bytes(n)))
+    b.set_results(F, [ScanHit(0x200, struct.pack("<f", 0.4))], FRACTION)
+    return a, b, MultiScan([a, b])
+
+
+@pytest.mark.parametrize("error", [ValueError("too many to compare"), "cancel"])
+def test_multiscan_narrows_all_parts_or_none(error):
+    import threading
+
+    from cheatmaker.errors import ScanCancelled
+
+    a, b, ms = _two_parts()
+    cancel = threading.Event()
+
+    def narrow(s, cmp, v, progress, c):
+        if s is b:
+            if error == "cancel":
+                c.set()
+                raise ScanCancelled("cancelled")
+            raise error
+        return s.narrowed(cmp, v, progress, c)
+
+    with pytest.raises((ValueError, ScanCancelled)):
+        ms.next(Compare.DECREASED, None, None, cancel, narrow=narrow)
+    assert struct.unpack("<f", a.hits[0].value)[0] == 40.0, "part a kept its baseline"
+    assert ms.next(Compare.DECREASED, None) == 2, "a retry still sees both go down"
+
+
+def test_multiscan_check_runs_on_every_part_first():
+    _a, b, ms = _two_parts()
+    narrowed = []
+
+    def check(s, cmp, v):
+        if s is b:
+            raise ValueError("too many to compare")
+
+    def narrow(s, cmp, v, progress, c):
+        narrowed.append(s)
+        return s.narrowed(cmp, v, progress, c)
+
+    with pytest.raises(ValueError):
+        ms.next(Compare.DECREASED, None, narrow=narrow, check=check)
+    assert narrowed == [], "nothing narrowed when one part can't be"
+
+
+def test_multiscan_reports_progress_per_part():
+    _a, _b, ms = _two_parts()
+    seen = []
+    ms.next(Compare.DECREASED, None, seen.append)
+    assert seen[-1] == 1.0 and seen == sorted(seen) and any(0 < p < 1 for p in seen)
+
+
+def test_percent_check_can_be_cancelled_while_reading(fake, session):
+    import threading
+
+    from cheatmaker.errors import ScanCancelled
+
+    show_hp(fake, 250)
+    sc = Scanner(session)
+    sc.mark_full()
+    before = sc.count
+    ev = threading.Event()
+    ev.set()
+    show_hp(fake, 100)
+    with pytest.raises(ScanCancelled):
+        sc.percent_scan(40, 1.0, cancel=ev)
+    assert sc.count == before and sc.full_mode

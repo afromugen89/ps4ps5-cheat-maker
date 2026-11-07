@@ -35,6 +35,7 @@ class HitTestDialog(QDialog):
         on_found: Callable[[int, ValueType], None],
         parent=None,
         scale: Scale = SHOWN,
+        note: str = "",
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Test the hits")
@@ -50,6 +51,9 @@ class HitTestDialog(QDialog):
         self.warning.setWordWrap(True)
         self.warning.setVisible(not ctl.hit_test_warned)
         ctl.hit_test_warned = True
+        self.note = QLabel(note)  # e.g. which units the test value is in
+        self.note.setWordWrap(True)
+        self.note.setVisible(bool(note))
         self.status = QLabel("")
         self.hint = QLabel(hints.TEST_HITS_START)
         self.hint.setWordWrap(True)
@@ -72,7 +76,7 @@ class HitTestDialog(QDialog):
         bottom.addStretch(1)
         bottom.addWidget(self.close_btn)
         lay = QVBoxLayout(self)
-        for w in (self.warning, self.status, self.hint):
+        for w in (self.warning, self.note, self.status, self.hint):
             lay.addWidget(w)
         lay.addLayout(row)
         lay.addLayout(ask)
