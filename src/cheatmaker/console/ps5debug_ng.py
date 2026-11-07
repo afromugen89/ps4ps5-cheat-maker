@@ -58,6 +58,7 @@ SCAN_CONNECTIONS = 4
 thread, so this hides the per-request delay and compares on several cores. NG allows
 12 clients; the app also needs one for itself and one for Cancel."""
 MAX_SCAN_CONNECTIONS = 8
+POOL_RETRY_S = 60.0  # after an extra connection fails, scan without it this long
 PIPELINE_DEPTH = 128
 """Plain reads sent before waiting for the answers. NG reads requests in order with
 exact lengths, so they queue on the socket; this skips one round trip plus the
@@ -363,7 +364,7 @@ class Ps5DebugNgClient:
         self.fast_scan = bool(fast_scan)
         self._pool: list[Ps5DebugNgClient] = []  # extra scan connections, opened on demand
         self._pool_lock = threading.Lock()
-        self._pool_failed = False  # the PS5 refused an extra connection: stop asking
+        self._pool_failed_at: float | None = None  # last time an extra connection failed
         self._flags_refused = False  # the PS5 refused turbo request flags: send none
         self._lock = threading.RLock()  # freezer thread and UI share the socket
         # The PS5 dials back here for watchpoint hits. Tests set 0 (any free port) and
@@ -405,7 +406,8 @@ class Ps5DebugNgClient:
     def _reconnect(self) -> None:
         """Open a fresh socket after the server dropped us (scan auth is per socket)."""
         self.close()
-        self._pool_failed = False
+        self._pool_failed_at = None
+        self._flags_refused = False  # a refusal was probably not about the flags
         self._w = _Wire(self._open(self.host, self.port))
         self._authed = False
         self._scan = None
@@ -526,7 +528,9 @@ class Ps5DebugNgClient:
         answers are read, so a batch costs about one round trip, not one per read.
 
         (PROC_SCAN_GET, NG's own bulk read, timed out on NG 1.3 in console test C3.)
-        Raises ReadFailed after reading every answer, so the connection stays in step."""
+        NG only refuses a read when it is out of memory, and then hangs up (proc.c
+        returns 1), so the answers still queued can't be trusted: a refusal opens a
+        fresh connection and raises ReadFailed."""
         out: list[bytes] = []
         bad: int | None = None
         with self._lock:
@@ -541,13 +545,14 @@ class Ps5DebugNgClient:
                     )
                 )
                 for a, n in batch:
-                    if self._w.status() != Status.SUCCESS:  # no data follows a refusal
-                        bad = a if bad is None else bad
-                        out.append(b"")
-                        continue
+                    if self._w.status() != Status.SUCCESS:
+                        bad = a
+                        break
                     out.append(self._w.recv(n))
-        if bad is not None:
-            raise ReadFailed(f"read {bad:#x}: console refused")
+                if bad is not None:
+                    log.warning("action=read_many refused=%#x; reconnecting", bad)
+                    self._reconnect()
+                    raise ReadFailed(f"read {bad:#x}: console refused")
         return out
 
     # -- scanning ------------------------------------------------------------
@@ -598,7 +603,10 @@ class Ps5DebugNgClient:
         """This connection plus the extra scan connections (opened and authed once)."""
         want = self.scan_connections - 1
         with self._pool_lock:
-            while len(self._pool) < want and not self._pool_failed:
+            failed = self._pool_failed_at
+            if failed is not None and time.monotonic() - failed < POOL_RETRY_S:
+                want = len(self._pool)  # an extra connection failed lately: don't ask yet
+            while len(self._pool) < want:
                 try:
                     w = Ps5DebugNgClient(
                         self._open(self.host, self.port), self.host, self.port, 1, self.fast_scan
@@ -610,7 +618,7 @@ class Ps5DebugNgClient:
                         raise
                 except Exception as exc:  # e.g. the PS5's 12 client slots are full
                     log.warning("action=scan_pool reason=%s; scanning on fewer connections", exc)
-                    self._pool_failed = True
+                    self._pool_failed_at = time.monotonic()
                     break
                 w._turbo, w._engines = self._turbo, self._engines
                 self._pool.append(w)
@@ -763,7 +771,18 @@ class Ps5DebugNgClient:
         self._auth()
         self._has_turbo()
         size, align = vtype.size, alignment_for(vtype)
-        slices = plan_slices(ranges, size, align)
+        # NG reads unmapped gaps as zeros: a search that zeros match must not bridge
+        # them, or every gap streams back a flood of matches that are thrown away.
+        zero = bytes(size)
+        if isinstance(value, tuple):
+            zero_matches = matches(vtype, Compare.BETWEEN, zero, target=value)
+        else:
+            zero_matches = (
+                abs(value) < 1
+                if vtype.is_float
+                else matches(vtype, Compare.EXACT, zero, target=value)
+            )
+        slices = plan_slices(ranges, size, align, bridge=0 if zero_matches else None)
         total = sum(n for _, n in slices) or 1
         conns = self._scan_pool() if len(slices) > 1 else [self]
         flags = self._start_flags(len(conns))
@@ -807,7 +826,10 @@ class Ps5DebugNgClient:
         for t in threads:
             t.start()
         while any(t.is_alive() for t in threads):
-            threads[0].join(0.1)
+            for t in threads:
+                if t.is_alive():
+                    t.join(0.1)  # waits even when the first worker has already finished
+                    break
             if progress:
                 progress(min(done[0] / total, 1.0))
         if failure:
@@ -816,8 +838,13 @@ class Ps5DebugNgClient:
             raise ScanCancelled("scan cancelled by the player")
         if todo:  # every extra connection broke; finish here
             for i in sorted(todo):
+                if cancel is not None and cancel.is_set():
+                    raise ScanCancelled("scan cancelled by the player")
                 s, n = slices[i]
                 results[i] = inside(self._scan_slice(pid, s, n, vtype, value, flags), ranges, size)
+                done[0] += n
+                if progress:
+                    progress(min(done[0] / total, 1.0))
         if progress:
             progress(1.0)
         log.info(

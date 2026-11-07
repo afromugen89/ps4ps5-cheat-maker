@@ -707,18 +707,22 @@ def test_inside_drops_matches_outside_the_ranges():
 
 
 def test_bridged_gap_matches_are_dropped():
-    """Two ranges 0x1000 apart share one request; the zeros NG reads in the gap
-    between them must not become matches."""
+    """Two ranges 0x1000 apart share one request; anything NG finds in the gap
+    between them (it reads the gap as zeros) must not become a match."""
+    from cheatmaker.console.ps5debug_ng import plan_slices
+
     server = FakeNgServer()
     server.fake.add_region(PID, "[anon]", HEAP_BASE + 0x2000, bytes(0x100), 3)
     cl = Ps5DebugNgClient.connect("127.0.0.1", server.port, timeout=3, scan_connections=1)
     regions = [m for m in cl.maps(PID) if m.writable]
-    n = cl.scan_start(PID, regions, ValueType.INT32, Compare.EXACT, 0)
-    hits = [h.address for h in cl.scan_results(n)]
-    assert (HEAP_BASE, 0x2100) in server.slices, "one request over both ranges"
-    assert hits == sorted(hits)
-    assert not [a for a in hits if HEAP_BASE + 0x1000 <= a < HEAP_BASE + 0x2000]
-    assert HEAP_BASE + 0x2000 in hits and HEAP_BASE + 0x20FC in hits
+    ranges = [(HEAP_BASE, HEAP_BASE + 0x1000), (HEAP_BASE + 0x2000, HEAP_BASE + 0x2100)]
+    assert plan_slices(ranges, 4, 4) == [(HEAP_BASE, 0x2100)]
+    hits = cl._scan_ranges(PID, ranges, ValueType.INT32, (-1, 1), None, None)
+    addrs = [h.address for h in hits]
+    assert addrs == sorted(addrs)
+    assert not [a for a in addrs if HEAP_BASE + 0x1000 <= a < HEAP_BASE + 0x2000]
+    assert HEAP_BASE + 0x2000 in addrs and HEAP_BASE + 0x20FC in addrs
+    del regions
     cl.close()
 
 
@@ -786,7 +790,57 @@ def test_extra_connections_refused_scans_on_one(monkeypatch):
     regions = [m for m in cl.maps(PID) if m.writable]
     cl.port = 1  # extra connections can't be opened
     assert cl.scan_start(PID, regions, ValueType.INT32, Compare.EXACT, 100) == 2
-    assert server.scan_conns == {1} and cl._pool_failed
+    assert server.scan_conns == {1} and cl._pool_failed_at is not None
+    cl.port = server.port
+    cl.scan_start(PID, regions, ValueType.INT32, Compare.EXACT, 100)
+    assert server.scan_conns == {1}, "no new tries right after a failure"
+    cl._pool_failed_at -= 3600
+    cl.scan_start(PID, regions, ValueType.INT32, Compare.EXACT, 100)
+    assert len(server.scan_conns) > 1, "tries again later"
+    cl.close()
+
+
+def test_progress_waits_while_extra_connections_finish(monkeypatch):
+    """Review blocker: once the main connection's worker is done, waiting must not
+    spin (it flooded the UI with progress signals)."""
+    import time as _time
+
+    _many_slices(monkeypatch)
+    server = FakeNgServer()
+    cl = Ps5DebugNgClient.connect("127.0.0.1", server.port, timeout=3, scan_connections=2)
+    regions = [m for m in cl.maps(PID) if m.writable]
+    real = Ps5DebugNgClient._scan_slice
+
+    def slow(self, *a, **k):
+        if self is not cl:
+            _time.sleep(0.5)
+        return real(self, *a, **k)
+
+    monkeypatch.setattr(Ps5DebugNgClient, "_scan_slice", slow)
+    calls = []
+    cl.scan_start(PID, regions, ValueType.INT32, Compare.EXACT, 100, calls.append)
+    assert len(calls) < 100
+    cl.close()
+
+
+def test_zero_search_does_not_bridge_gaps():
+    server = FakeNgServer()
+    server.fake.add_region(PID, "[anon]", HEAP_BASE + 0x2000, bytes(0x100), 3)
+    cl = Ps5DebugNgClient.connect("127.0.0.1", server.port, timeout=3, scan_connections=1)
+    regions = [m for m in cl.maps(PID) if m.writable]
+    cl.scan_start(PID, regions, ValueType.INT32, Compare.EXACT, 0)
+    assert (HEAP_BASE, 0x2100) not in server.slices
+    server.slices.clear()
+    cl.scan_start(PID, regions, ValueType.INT32, Compare.EXACT, 100)
+    assert (HEAP_BASE, 0x2100) in server.slices
+    cl.close()
+
+
+def test_reconnect_forgets_refused_flags(server):
+    cl = Ps5DebugNgClient.connect("127.0.0.1", server.port, timeout=3)
+    cl._flags_refused = True
+    cl._reconnect()
+    assert not cl._flags_refused
     cl.close()
 
 
@@ -812,9 +866,11 @@ def test_read_many_pipelines_and_stays_in_step(client, server, monkeypatch):
     spans = [(HEALTH_ADDR, 4), (GOLD_ADDR, 4), (BAR_ADDR, 4), (HEAP_BASE, 0x10), (GOLD_ADDR, 8)]
     got = client.read_many(PID, spans)
     assert got == [server.fake.read(PID, a, n) for a, n in spans]
+    conns = server.connections
     with pytest.raises(ReadFailed, match="0x10"):
         client.read_many(PID, [(HEALTH_ADDR, 4), (0x10, 4), (GOLD_ADDR, 4)])
-    assert client.version() == "1.3", "every answer was read"
+    assert client.version() == "1.3"
+    assert server.connections == conns + 1, "NG hangs up after a refusal: fresh connection"
     assert Cmd.PROC_SCAN_GET not in server.commands
 
 

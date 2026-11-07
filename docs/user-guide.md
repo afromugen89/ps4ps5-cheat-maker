@@ -196,6 +196,10 @@ uses that value instead.
   of matches lists the first 100,000 and says how many there were in all. To turn the
   files off or change that number, set `save_scan_files` or `scan_file_max` in
   `%APPDATA%\CheatMaker\settings.json`.
+- **Search speed**: a search runs on 4 connections to the PS5 at once and asks
+  PS5Debug-NG to read the game's memory in place. If a search ever hangs or the game
+  stutters, set `"scan_connections": 1` and/or `"fast_scan": false` in the same
+  `settings.json` and reconnect.
 
 ---
 
