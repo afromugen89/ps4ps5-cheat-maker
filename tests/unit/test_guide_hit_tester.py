@@ -14,7 +14,8 @@ from tests.conftest import GOLD_ADDR, HEALTH_ADDR, HEAP_BASE, PID
 # -- guide --------------------------------------------------------------------
 def test_guide_first_question():
     assert Guide().start(Shows.NUMBER).action is Action.SEARCH
-    assert Guide().start(Shows.BAR).action is Action.UNKNOWN
+    bar = Guide().start(Shows.BAR)  # AC-P4: a bar starts from full
+    assert bar.action is Action.FULL and bar.text == "Fill it up, then press It's full now."
     assert Guide().start(Shows.NOTHING).action is Action.UNKNOWN
 
 
@@ -174,3 +175,24 @@ def test_hit_tester_failed_put_back_can_be_retried(fake, monkeypatch):
     monkeypatch.setattr(fake, "write", real_write)
     t.restore()
     assert struct.unpack("<i", fake.peek(PID, HEALTH_ADDR, 4))[0] == 100
+
+
+def test_guide_full_mode_suggests_percent_after_narrowing():  # AC-P4
+    g = Guide()
+    g.start(Shows.BAR)
+    s = g.after_scan(Scan.FULL, 50_000)
+    assert s.action is Action.PERCENT and s.text.startswith("Make it go down, then type the %")
+    assert "About 75 / 50 / 25%" in s.text
+    assert g.after_scan(Scan.PERCENT, 20_000).action is Action.PERCENT
+    g.after_scan(Scan.COMPARE, 15_000)
+    assert g.after_scan(Scan.COMPARE, 12_000).action is Action.STAND_STILL
+    g.new_value()
+    assert not g.full_mode
+
+
+def test_guide_percent_search_counts_its_ways_as_tried():
+    g = Guide()
+    g.start(Shows.NUMBER)
+    s = g.after_scan(Scan.PERCENT, 0)
+    assert {"shown", "fraction", "x10"} <= set(g.tried)
+    assert s.fallback == "x100"

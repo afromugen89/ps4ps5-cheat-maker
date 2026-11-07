@@ -14,7 +14,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Literal, Protocol, runtime_checkable
 
-from cheatmaker.core.values import Compare, ValueType
+from cheatmaker.core.values import Compare, Scale, ValueType
 
 ProgressFn = Callable[[float], None]
 """Called with 0.0..1.0 while a long operation runs."""
@@ -69,6 +69,8 @@ class ScanHit:
     value: bytes
     vtype: ValueType | None = field(default=None, compare=False)
     """Set when a search covers several number types at once."""
+    way: Scale | None = field(default=None, compare=False)
+    """How the match keeps the number (percent, fraction, x10, of full), when known."""
 
 
 WatchKind = Literal["write", "access"]
@@ -119,12 +121,18 @@ class ConsoleClient(Protocol):
         value: float | int | None,
         progress: ProgressFn | None = None,
         cancel: threading.Event | None = None,
+        ways: tuple[Scale, ...] = (),
     ) -> int:
         """First scan over ``regions``; returns the match count.
 
         A tuple of types (unknown value only) runs one search per type side by side;
         next scans narrow them all, results carry their ``vtype``, and a type left
-        with no matches is dropped."""
+        with no matches is dropped.
+
+        ``ways`` (percent search): ``cmp`` is BETWEEN and ``value`` the range as the game
+        shows it. Part i searches type ``vtype[i]`` (or ``vtype`` for all) for
+        ``value`` x ``ways[i].factor``. Next scans scale their value per part the same
+        way, results carry ``way``, and parts left empty are dropped."""
         ...
 
     def scan_next(
@@ -141,6 +149,25 @@ class ConsoleClient(Protocol):
 
     def scan_counts(self) -> dict[ValueType, int]:
         """Matches left per number type in the current search."""
+        ...
+
+    def scan_way_counts(self) -> dict[tuple[ValueType, Scale | None], int]:
+        """Matches left per (number type, way) in the current search."""
+        ...
+
+    def scan_restrict(self, hits: list[ScanHit]) -> int:
+        """Replace the search with just ``hits`` (checked on the PC), kept on the PC.
+        Each hit's ``value`` is its baseline for the next compare; its ``vtype`` and
+        ``way`` say how it is narrowed. Returns the match count."""
+        ...
+
+    def scan_rebase(
+        self,
+        progress: ProgressFn | None = None,
+        cancel: threading.Event | None = None,
+    ) -> int:
+        """Keep every match, but make its value now the baseline for the next compare
+        (a percent that can only be noted). Returns the match count."""
         ...
 
     def scan_cancel(self) -> None:

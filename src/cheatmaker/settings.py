@@ -26,6 +26,7 @@ class Settings:
     scan_file_max: int = 100_000  # at most this many matches per scan file
     scan_connections: int = 4  # connections that scan at once (1 = one, like before)
     fast_scan: bool = True  # ask PS5Debug-NG to read game memory in place (faster)
+    percent_pc_limit: int = 20_000  # a Full search checks % on the PC from this many down
 
     @classmethod
     def path(cls) -> Path:
@@ -58,6 +59,9 @@ class Settings:
         s.scan_connections = max(1, min(8, s.scan_connections))
         if not isinstance(s.fast_scan, bool):
             s.fast_scan = True
+        if not isinstance(s.percent_pc_limit, int) or isinstance(s.percent_pc_limit, bool):
+            s.percent_pc_limit = 20_000
+        s.percent_pc_limit = max(1_000, min(100_000, s.percent_pc_limit))
         return s
 
     def save(self) -> None:

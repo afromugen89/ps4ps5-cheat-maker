@@ -13,11 +13,13 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import math
 import queue
 import socket
 import struct
 import threading
 import time
+from collections.abc import Callable
 from enum import IntEnum
 
 from cheatmaker.console.client import (
@@ -31,11 +33,16 @@ from cheatmaker.console.client import (
 )
 from cheatmaker.console.local_scan import (
     LocalScanSession,
+    MultiScan,
     alignment_for,
+    check_ways,
     drop_empty,
     merge_results,
+    one_way_each,
+    restrict,
+    way_parts,
 )
-from cheatmaker.core.values import Compare, ValueType, matches, value_for
+from cheatmaker.core.values import Compare, Scale, ValueType, matches, part_value, value_for
 from cheatmaker.errors import (
     ConnectionLost,
     ConsoleUnreachable,
@@ -238,6 +245,14 @@ def plan_slices(
     return out
 
 
+KEEP_EVERY = (-math.inf, math.inf)
+
+
+def _every(vtype: ValueType) -> tuple[float, float] | tuple[int, int]:
+    """A range compare that keeps every value of ``vtype`` (but a decimal's NaN)."""
+    return KEEP_EVERY if vtype.is_float else vtype.int_range()
+
+
 def inside(hits: list[ScanHit], ranges: list[tuple[int, int]], size: int) -> list[ScanHit]:
     """Only the matches that lie wholly inside one of the (sorted, disjoint) ranges.
     Drops what a bridged request found in the gap between two ranges."""
@@ -385,7 +400,8 @@ class Ps5DebugNgClient:
         # own connection (NG keeps one per connection). This one first, then extras.
         self._multi: list[Ps5DebugNgClient] | None = None
         self._multi_vtype: ValueType | None = None  # this connection's type in _multi
-        self._scan: LocalScanSession | None = None
+        # PC-side candidates: one session, or one per (type, way) of a percent search
+        self._scan: LocalScanSession | MultiScan | None = None
         self._scan_pid: int | None = None
         self._scan_ranges_list: list[tuple[int, int]] = []
         self._fg_supported = True
@@ -880,9 +896,14 @@ class Ps5DebugNgClient:
         value: float | int | None,
         progress: ProgressFn | None = None,
         cancel: threading.Event | None = None,
+        ways: tuple[Scale, ...] = (),
     ) -> int:
         self.scan_cancel()
         ranges = merge_ranges(regions)
+        self._scan_pid = pid
+        self._scan_ranges_list = ranges
+        if ways:
+            return self._parts_start(pid, ranges, vtype, cmp, value, ways, progress, cancel)
         if isinstance(vtype, tuple):
             if cmp is not Compare.UNKNOWN or value is not None:
                 raise ValueError("several number types at once is for unknown searches only")
@@ -892,15 +913,55 @@ class Ps5DebugNgClient:
         if cmp not in (Compare.EXACT, Compare.BETWEEN) or value is None:
             return self._snapshot_start(pid, ranges, vtype, progress, cancel)
         hits = self._scan_ranges(pid, ranges, vtype, value, progress, cancel)
+        self._scan = self._session(pid)
+        self._scan.set_results(vtype, hits)
+        return len(hits)
+
+    def _session(self, pid: int) -> LocalScanSession:
         # PROC_SCAN_GET (bulk read) timed out on PS5Debug-NG 1.3 (console test C3), so
         # candidates are re-checked with plain reads, pipelined (read_many).
-        self._scan = LocalScanSession(
+        return LocalScanSession(
             lambda a, n: self.read(pid, a, n), lambda spans: self.read_many(pid, spans)
         )
-        self._scan.set_results(vtype, hits)
-        self._scan_pid = pid
-        self._scan_ranges_list = ranges
-        return len(hits)
+
+    def _parts_start(
+        self,
+        pid: int,
+        ranges: list[tuple[int, int]],
+        vtype: ValueType | tuple[ValueType, ...],
+        cmp: Compare,
+        value,
+        ways: tuple[Scale, ...],
+        progress: ProgressFn | None,
+        cancel: threading.Event | None,
+    ) -> int:
+        """Percent search: one console ValueBetween pass per (type, way) part (NG has
+        one range per compare); the candidates then live on the PC."""
+        check_ways(cmp, value)
+        parts = way_parts(vtype, ways)
+        sessions: list[LocalScanSession] = []
+        for i, (vt, way) in enumerate(parts):
+
+            def mine(p: float, i: int = i) -> None:
+                if progress:
+                    progress((i + p) / len(parts))
+
+            v = part_value(vt, way, cmp, value)
+            if v is None:
+                continue
+            hits = self._scan_ranges(pid, ranges, vt, v, mine, cancel)
+            s = self._session(pid)
+            s.set_results(vt, hits, way)
+            sessions.append(s)
+            log.info("action=scan_part type=%s way=%s count=%d", vt.name, way.label, len(hits))
+        if not sessions:
+            raise ValueError("no number type can hold that percent")
+        one_way_each(sessions)
+        drop_empty(sessions, lambda s: len(s.hits))
+        self._scan = MultiScan(sessions)
+        if progress:
+            progress(1.0)
+        return len(self._scan.hits)
 
     # -- unknown value: snapshot kept on the console ---------------------------
     def _snapshot_start(
@@ -981,7 +1042,7 @@ class Ps5DebugNgClient:
         if cmp is Compare.EXACT and vtype.is_float:
             code = _NG_FUZZY
         if cmp is Compare.BETWEEN:
-            lo, hi = value  # type: ignore[misc]
+            lo, hi = value_for(vtype, cmp, value) or value  # whole numbers: clamp to the type
             val = vtype.encode(lo) + vtype.encode(hi)
         elif cmp.by_amount:
             amount, _tol = value  # type: ignore[misc]  # the server applies its own rule
@@ -1146,7 +1207,10 @@ class Ps5DebugNgClient:
         value,
         progress: ProgressFn | None,
         cancel: threading.Event | None,
+        per_type: Callable[[ValueType], object] | None = None,
     ) -> int:
+        """Narrow every type's snapshot at once. ``per_type(vtype)``: the value for that
+        type, when it isn't ``value`` made to fit it."""
         conns = self._multi
         assert conns is not None
         done = [0.0] * len(conns)
@@ -1158,7 +1222,11 @@ class Ps5DebugNgClient:
                 if c._resident is None:
                     done[i] = 1.0
                     return  # this type was emptied earlier
-                v = value_for(c._resident[1], cmp, value) if value is not None else None
+                vt = c._resident[1]
+                if per_type is not None:
+                    v = per_type(vt)
+                else:
+                    v = value_for(vt, cmp, value) if value is not None else None
                 if value is not None and v is None:
                     c._resident_count = 0  # no number of this type can match:
                     c._end_resident()  # free it so nothing stale is listed later
@@ -1196,9 +1264,31 @@ class Ps5DebugNgClient:
             }
         if self._resident is not None:
             return {self._resident[1]: self._resident_count}
+        if isinstance(self._scan, MultiScan):
+            return self._scan.counts()
         if self._scan is not None and self._scan.vtype is not None:
             return {self._scan.vtype: len(self._scan.hits)}
         return {}
+
+    def scan_way_counts(self) -> dict[tuple[ValueType, Scale | None], int]:
+        if isinstance(self._scan, MultiScan):
+            return self._scan.way_counts()
+        if isinstance(self._scan, LocalScanSession) and self._scan.vtype is not None:
+            return {(self._scan.vtype, self._scan.way): len(self._scan.hits)}
+        return {(t, None): n for t, n in self.scan_counts().items()}
+
+    def scan_restrict(self, hits: list[ScanHit]) -> int:
+        """Keep just ``hits`` on the PC: frees the console's snapshots; next scans read
+        the candidates (pipelined)."""
+        if self._scan_pid is None:
+            raise ValueError("no search to narrow down; start a new search")
+        pid = self._scan_pid
+        fallback = next(iter(self.scan_counts()), None)
+        scan = restrict(hits, lambda: self._session(pid), fallback)  # may raise: nothing freed
+        self._close_multi()
+        self._end_resident()
+        self._scan = scan
+        return len(scan.hits)
 
     def _end_resident(self) -> None:
         if self._resident is None:
@@ -1223,22 +1313,82 @@ class Ps5DebugNgClient:
         if self._resident is not None:
             return self._resident_next(cmp, value, progress, cancel)
         scan = self._scan
+        if isinstance(scan, MultiScan) and self._scan_pid is not None:
+            return scan.next(
+                cmp, value, progress, cancel, narrow=self._narrowed, check=self._check_narrow
+            )
         if scan is None or scan.vtype is None or self._scan_pid is None:
             raise ValueError("no scan to narrow down; start a new search")
-        spans = read_spans([h.address for h in scan.hits], scan.vtype.size)
-        if len(spans) <= MAX_READ_SPANS:
-            return scan.next(cmp, value, progress, cancel)
-        if cmp not in (Compare.EXACT, Compare.BETWEEN) or value is None:
+        self._check_narrow(scan, cmp, value)
+        hits = self._narrowed(scan, cmp, value, progress, cancel)
+        if self._rescans(scan):  # the next window search only needs these windows
+            self._scan_ranges_list = candidate_windows(
+                self._scan_ranges_list, sorted(h.address for h in scan.hits), scan.vtype.size
+            )
+        scan.hits = hits
+        return len(hits)
+
+    def scan_rebase(
+        self,
+        progress: ProgressFn | None = None,
+        cancel: threading.Event | None = None,
+    ) -> int:
+        """Keep every match with its value now as the baseline. Snapshots: a range
+        compare over every number the type holds (decimals from -inf to inf; NG has no
+        "keep all" compare, so a decimal that is NaN now is dropped). Candidates on the
+        PC: read them. Too many to read: refused, before anything changes (re-scanning
+        windows for every value would send back every address in them)."""
+        if self._multi is not None:
+            return self._multi_next(Compare.BETWEEN, KEEP_EVERY, progress, cancel, _every)
+        if self._resident is not None:
+            return self._resident_next(Compare.BETWEEN, _every(self._resident[1]), progress, cancel)
+        scan = self._scan
+        if scan is None or self._scan_pid is None:
+            raise ValueError("no scan to narrow down; start a new search")
+        parts = scan.sessions if isinstance(scan, MultiScan) else [scan]
+        n = sum(len(s.hits) for s in parts)
+        if any(self._rescans(s) for s in parts):
+            raise ValueError(
+                f"{n:,} matches is too many to note a percent. Make it go up or down, "
+                "then type the % again."
+            )
+        if isinstance(scan, MultiScan):
+            return scan.rebase(progress, cancel)
+        scan.hits = scan.rebased(progress, cancel)
+        return len(scan.hits)
+
+    @staticmethod
+    def _rescans(scan: LocalScanSession) -> bool:
+        """Too many candidates to read: narrowing re-scans windows on the console."""
+        assert scan.vtype is not None
+        return len(read_spans([h.address for h in scan.hits], scan.vtype.size)) > MAX_READ_SPANS
+
+    def _check_narrow(self, scan: LocalScanSession, cmp: Compare, value) -> None:
+        """Raise before anything changes when ``scan`` can't be narrowed this way."""
+        if self._rescans(scan) and (cmp not in (Compare.EXACT, Compare.BETWEEN) or value is None):
             raise ValueError(
                 f"{len(scan.hits):,} matches is too many to compare. Type the number you "
                 "see now to narrow it down first."
             )
+
+    def _narrowed(
+        self,
+        scan: LocalScanSession,
+        cmp: Compare,
+        value,
+        progress: ProgressFn | None,
+        cancel: threading.Event | None,
+    ) -> list[ScanHit]:
+        """One PC-side session's matches after this compare, not kept yet: read few
+        candidates, or re-scan windows around many on the console (number or range)."""
+        assert scan.vtype is not None and self._scan_pid is not None
+        if not self._rescans(scan):
+            return scan.narrowed(cmp, value, progress, cancel)
+        self._check_narrow(scan, cmp, value)
         addrs = {h.address for h in scan.hits}
         windows = candidate_windows(self._scan_ranges_list, sorted(addrs), scan.vtype.size)
         new = self._scan_ranges(self._scan_pid, windows, scan.vtype, value, progress, cancel)
-        scan.set_results(scan.vtype, [h for h in new if h.address in addrs])
-        self._scan_ranges_list = windows
-        return len(scan.hits)
+        return [ScanHit(h.address, h.value) for h in new if h.address in addrs]
 
     def scan_results(self, limit: int) -> list[ScanHit]:
         if self._multi is not None:
@@ -1255,6 +1405,7 @@ class Ps5DebugNgClient:
         self._end_resident()
         self._scan = None
         self._scan_pid = None
+        self._scan_ranges_list = []
 
     # -- watchpoints ("Lock it", "Find it next time") -------------------------
     def watch_writes(self, pid: int, addr: int, size: int, timeout_s: float) -> list[int]:

@@ -7,7 +7,7 @@ import threading
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QTimer, QUrl
+from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QComboBox,
@@ -16,22 +16,28 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QProgressBar,
     QPushButton,
     QSpinBox,
     QTableWidget,
     QTableWidgetItem,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
 from cheatmaker.core import pointers as ptr
+from cheatmaker.core.grouping import Group
 from cheatmaker.core.guide import Action, Guide, Scan, Shows, Suggestion
 from cheatmaker.core.hit_tester import TEST_LIMIT
 from cheatmaker.core.pointers import Chain
-from cheatmaker.core.scanner import MAX_SHOW, Match
+from cheatmaker.core.scan_log import way_label
+from cheatmaker.core.scanner import ABOUT, MAX_SHOW, NOTED, TOO_MANY, Match
 from cheatmaker.core.templates import TEMPLATES, make_cheat
 from cheatmaker.core.values import (
+    OF_FULL,
     SHOWN,
     Compare,
     Scale,
@@ -41,6 +47,7 @@ from cheatmaker.core.values import (
     parse_amount,
     parse_filter,
     parse_number,
+    parse_percent,
 )
 from cheatmaker.errors import ReadFailed
 from cheatmaker.ui import hints
@@ -75,6 +82,9 @@ def fmt_value(v: float | int) -> str:
     return f"{v:,.2f}" if isinstance(v, float) else f"{v:,}"
 
 
+ROW = Qt.ItemDataRole.UserRole  # tree items keep their index into FindWizard.rows
+
+
 class FindWizard(QWidget):
     def __init__(self, ctl: Controller) -> None:
         super().__init__()
@@ -82,6 +92,10 @@ class FindWizard(QWidget):
         self.unknown_mode = False
         self.rows: list[Match] = []
         self.row_types: list[ValueType] = []
+        self.groups: list[Group] = []  # shown as the tree when they fold copies together
+        self._n_matches = 0  # rows[:_n_matches] are matches, the rest typed in / pointers
+        # (address, is an expanded member) selected before the tree was built again
+        self._tree_pick: tuple[int, ValueType, bool] | None = None
         self.manual: dict[int, ValueType] = {}  # addresses the player typed in
         self.pointers: dict[Chain, ValueType] = {}  # chains followed on every refresh
         self.row_chains: list[Chain | None] = []
@@ -109,9 +123,21 @@ class FindWizard(QWidget):
             "whether the game showed it, until one is left"
         )
         self.number = QLineEdit()
-        self.number.setPlaceholderText("The number you see, e.g. 2450")
+        self.number.setPlaceholderText("The number you see, e.g. 2450 or 40%")
+        self.number.setToolTip(
+            "Type a number, or a percent like 40% when the game shows one (health 40%)"
+        )
         self.search_btn = QPushButton("Search")
         self.unknown_btn = QPushButton("I don't know the number")
+        self.full_btn = QPushButton("It's full now")
+        self.full_btn.setToolTip(
+            "For a bar or a value that isn't out of 100: fill it up, then press this. "
+            "Later, type the % it shows or pick About 75 / 50 / 25%."
+        )
+        self.about_btns = {pct: QPushButton(f"About {pct}%") for pct in ABOUT}
+        for pct, b in self.about_btns.items():
+            b.setToolTip(f"The bar looks about {pct}% full now")
+            b.clicked.connect(lambda _c=False, p=pct: self.do_about(p))
         self.new_btn = QPushButton("Start over")
         self.files_btn = QPushButton("Scan files")
         self.files_btn.setToolTip(
@@ -199,6 +225,14 @@ class FindWizard(QWidget):
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        # Groups of linked copies (AC-G4): one row per group, expand to see every address.
+        self.tree = QTreeWidget()
+        self.tree.setColumnCount(4)
+        self.tree.setHeaderLabels(["Value now", "Stored as", "Notes", "Address"])
+        self.tree.header().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.tree.setSelectionMode(QTreeWidget.SelectionMode.SingleSelection)
+        self.tree.setVisible(False)
+        self.tree.setToolTip(hints.FIND_GROUPS)
 
         self.set_value = QLineEdit()
         self.set_value.setPlaceholderText("New value")
@@ -210,7 +244,14 @@ class FindWizard(QWidget):
         self.make_btn = QPushButton("Make a cheat")
 
         top = QHBoxLayout()
-        for w in (self.number, self.search_btn, self.unknown_btn, self.new_btn, self.files_btn):
+        for w in (
+            self.number,
+            self.search_btn,
+            self.unknown_btn,
+            self.full_btn,
+            self.new_btn,
+            self.files_btn,
+        ):
             top.addWidget(w)
         cmp_row = QHBoxLayout()
         cmp_row.addWidget(self.count, 1)
@@ -223,6 +264,8 @@ class FindWizard(QWidget):
         for w in (self.by_amount, self.up_by_btn, self.down_by_btn):
             by_row.addWidget(w)
         by_row.addStretch(1)
+        for b in self.about_btns.values():
+            by_row.addWidget(b)
         by_row.addWidget(self.still_btn)
         prog = QHBoxLayout()
         prog.addWidget(self.progress, 1)
@@ -256,12 +299,14 @@ class FindWizard(QWidget):
         filt.addWidget(self.filter_count)
         lay.addLayout(filt)
         lay.addWidget(self.table, 1)
+        lay.addWidget(self.tree, 1)
         lay.addLayout(act)
         lay.addWidget(self.advanced)
 
         self.search_btn.clicked.connect(self.do_search)
         self.number.returnPressed.connect(self.do_search)
         self.unknown_btn.clicked.connect(self.do_unknown)
+        self.full_btn.clicked.connect(self.do_full)
         self.new_btn.clicked.connect(self.do_reset)
         self.files_btn.clicked.connect(self.open_scan_files)
         self.up_btn.clicked.connect(lambda: self.do_compare(Compare.INCREASED))
@@ -282,6 +327,7 @@ class FindWizard(QWidget):
         self.remove_btn.clicked.connect(self.do_remove_address)
         self.pointer_btn.clicked.connect(self.do_pointer_scan)
         self.table.itemSelectionChanged.connect(self._update_buttons)
+        self.tree.itemSelectionChanged.connect(self._update_buttons)
         self.show_n.valueChanged.connect(self._set_show_limit)
         self.filter.textChanged.connect(lambda _t: self._fill_table())
 
@@ -305,6 +351,11 @@ class FindWizard(QWidget):
         self.search_btn.setEnabled(ready)
         self.search_btn.setText("Search again" if active else "Search")
         self.unknown_btn.setEnabled(ready and not active)
+        self.full_btn.setEnabled(ready)
+        full = active and self.ctl.scanner.full_mode
+        for b in self.about_btns.values():
+            b.setVisible(full)
+            b.setEnabled(ready and full)
         self.new_btn.setEnabled(ready and active)
         self.files_btn.setVisible(self.ctl.scanner.scan_log.enabled)
         for b in (
@@ -336,7 +387,16 @@ class FindWizard(QWidget):
             "Unfreeze" if m and m.address in self.ctl.frozen_addresses else "Freeze"
         )
 
+    @property
+    def grouped(self) -> bool:
+        """The list shows groups (the tree) instead of one row per match."""
+        return bool(self.groups)
+
     def _selected_row(self) -> int | None:
+        if self.grouped:
+            items = self.tree.selectedItems()
+            i = items[0].data(0, ROW) if items else None
+            return i if isinstance(i, int) and 0 <= i < len(self.rows) else None
         rows = self.table.selectionModel().selectedRows()
         if not rows or rows[0].row() >= len(self.rows):
             return None
@@ -369,7 +429,12 @@ class FindWizard(QWidget):
         if self.guide.shows is None:  # the player skipped the question: guess it
             self.guide.shows = Shows.BAR if self.unknown_mode else Shows.NUMBER
         tip = self.guide.after_scan(kind, count) if kind is not None else None
-        if sc.few_left and count > 1:
+        if sc.note in (TOO_MANY, NOTED):  # a percent scan ran as Went up / down, or noted
+            self._suggest(tip, show_text=False)
+            self.hint.setText(
+                hints.FIND_PERCENT_TOO_MANY if sc.note == TOO_MANY else hints.FIND_PERCENT_NOTED
+            )
+        elif sc.few_left and count > 1:
             self.hint.setText(f"{hints.FIND_FEW} {hints.FIND_TEST_HITS}")
             self._suggest(tip, show_text=False)
         elif tip is not None:
@@ -395,6 +460,8 @@ class FindWizard(QWidget):
             Action.MAKE_CHEAT: self.make_btn,
             Action.TRY_NEXT: self.try_btn,
             Action.START_OVER: self.try_btn,
+            Action.FULL: self.full_btn,
+            Action.PERCENT: self.search_btn,
         }[action]
 
     def _suggest(self, tip: Suggestion | None, show_text: bool = True) -> None:
@@ -416,8 +483,11 @@ class FindWizard(QWidget):
             self._action_widget(tip.action).setStyleSheet("font-weight: bold")
 
     def do_shows(self, shows: Shows) -> None:
-        self._suggest(self.guide.start(shows))
-        (self.number if shows is Shows.NUMBER else self.unknown_btn).setFocus()
+        tip = self.guide.start(shows)
+        self._suggest(tip)
+        self._action_widget(tip.action).setFocus()
+        if shows is Shows.NUMBER:
+            self.number.setFocus()
 
     def do_try_next(self) -> None:
         """Run the guide's next way of storing the value (fraction, x10, ..., unknown)."""
@@ -437,6 +507,7 @@ class FindWizard(QWidget):
             self.do_unknown()
             return
         self.scale.setCurrentIndex(next(i for i, (_l, k) in enumerate(SCALES) if k == key))
+        self.number.setText(self.number.text().strip().rstrip("%").strip())  # not a % search
         if not self.number.text().strip():
             self.hint.setText("Type the number you see, then press Try it.")
             self._update_buttons()
@@ -463,12 +534,21 @@ class FindWizard(QWidget):
     # -- actions --------------------------------------------------------------
     def do_search(self) -> None:
         try:
-            value, unit = parse_amount(self.number.text())
-            scale = self._scale()
+            pct = parse_percent(self.number.text())
+            if pct is None:
+                value, unit = parse_amount(self.number.text())
+                scale = self._scale()
         except ValueError as exc:
             self.ctl.fail(exc, "scan")
             return
         sc = self.ctl.scanner
+        if pct is not None:  # AC-P1 / AC-P2: "40%"
+            if not sc.active:
+                self.unknown_mode = False
+            vt = self.vtype.currentData() if self.advanced.isChecked() else None
+            self._scan_kind = Scan.PERCENT
+            self._run_scan(lambda p, c: sc.percent_scan(pct[0], pct[1], vt, p, c))
+            return
         if sc.active:
             self._scan_kind = Scan.NEXT_EXACT
             self._run_scan(lambda p, c: sc.next_scan(Compare.EXACT, value, p, c, unit=unit))
@@ -535,6 +615,26 @@ class FindWizard(QWidget):
             lambda p, c: self.ctl.scanner.first_scan(None, vt, p, c, value_range=rng, scale=scale)
         )
 
+    def do_full(self) -> None:
+        """AC-P2 "It's full now": remember this moment as the Full point."""
+        sc = self.ctl.scanner
+        if sc.active and not self._confirm("Full again?", hints.FIND_FULL_CONFIRM):
+            return
+        if not sc.active:
+            self.unknown_mode = True
+            self.guide.note_tried("unknown")
+        vt = self.vtype.currentData() if self.advanced.isChecked() else None
+        self._scan_kind = Scan.FULL
+        self._run_scan(lambda p, c: sc.mark_full(vt, p, c))
+
+    def do_about(self, pct: int) -> None:
+        """AC-P3: only a bar, and it looks about ``pct`` percent full."""
+        self._scan_kind = Scan.PERCENT
+        self._run_scan(lambda p, c: self.ctl.scanner.about_scan(pct, p, c))
+
+    def _confirm(self, title: str, text: str) -> bool:
+        return QMessageBox.question(self, title, text) == QMessageBox.StandardButton.Yes
+
     def do_compare(self, cmp: Compare) -> None:
         self._scan_kind = Scan.COMPARE
         self._run_scan(lambda p, c: self.ctl.scanner.next_scan(cmp, None, p, c))
@@ -575,6 +675,7 @@ class FindWizard(QWidget):
             self.advanced.setChecked(False)
             self._guide_set_advanced = False
         self.rows = []
+        self._show_groups([])
         self.count.setText("")
         self.number.clear()
         self.table.setRowCount(0)
@@ -586,14 +687,17 @@ class FindWizard(QWidget):
         """AC-3.4: with 10 or fewer matches, show them with live values. Typed-in
         addresses are listed under the matches."""
         sc = self.ctl.scanner
-        show_matches = sc.few_left and self._ready()
+        groups = self._groups_to_show() if self._ready() else []
+        show_matches = (sc.few_left or bool(groups)) and self._ready()
         if not (show_matches or ((self.manual or self.pointers) and self._ready())):
             self.timer.stop()
             self.rows, self.row_types, self.row_chains = [], [], []
+            self._show_groups([])
             self._fill_table()
             return
         try:
-            rows = sc.matches() if show_matches else []
+            rows = (sc.matches(sc.count) if groups else sc.matches()) if show_matches else []
+            self._n_matches = len(rows)
             types = [m.vtype or self._vtype() for m in rows]
             seen = {m.address for m in rows}
             chains: list[Chain | None] = [None] * len(rows)
@@ -616,6 +720,7 @@ class FindWizard(QWidget):
             self.ctl.fail(exc, "read")
             return
         self.rows, self.row_types, self.row_chains = rows, types, chains
+        self._show_groups(groups)
         self._fill_table()
         # Big lists refresh less often (each separate read costs ~36 ms on the PS5).
         self.timer.setInterval(max(LIVE_MS, 40 * len(self.rows)))
@@ -633,21 +738,45 @@ class FindWizard(QWidget):
         if self.ctl.scanner.active:
             self._after_scan(self.ctl.scanner.count or 0)
 
+    def _groups_to_show(self) -> list[Group]:
+        """Groups, when they fold copies together and fit the "Show up to" (AC-G1)."""
+        sc = self.ctl.scanner
+        groups = sc.groups()
+        if len(groups) > sc.show_limit or all(len(g.members) == 1 for g in groups):
+            return []
+        return groups
+
+    def _show_groups(self, groups: list[Group]) -> None:
+        if [g.members for g in groups] != [g.members for g in self.groups]:
+            self._tree_pick = self._tree_selection()
+            self.tree.clear()  # a new grouping: build the tree again in _fill_table
+        self.groups = groups
+        self.table.setVisible(not groups)
+        self.tree.setVisible(bool(groups))
+
+    def _row_text(self, i: int) -> str:
+        m = self.rows[i]
+        frozen = " (frozen)" if m.address in self.ctl.frozen_addresses else ""
+        if m.address in self.manual:
+            frozen += f" (added, {self.manual[m.address].label})"
+        chain = self.row_chains[i] if i < len(self.row_chains) else None
+        if chain is not None:
+            frozen += f" (pointer {chain.label()})"
+            if m.address == 0:
+                frozen = f" (pointer {chain.label()} leads nowhere right now)"
+        return fmt_value(m.value) + frozen
+
     def _fill_table(self) -> None:
+        if self.grouped:
+            self._fill_tree()
+            self._update_buttons()
+            return
         keep = self.table.selectionModel().selectedRows()
         keep_row = keep[0].row() if keep else None
         self.table.setColumnHidden(1, not self.advanced.isChecked())
         self.table.setRowCount(len(self.rows))
         for i, m in enumerate(self.rows):
-            frozen = " (frozen)" if m.address in self.ctl.frozen_addresses else ""
-            if m.address in self.manual:
-                frozen += f" (added, {self.manual[m.address].label})"
-            chain = self.row_chains[i] if i < len(self.row_chains) else None
-            if chain is not None:
-                frozen += f" (pointer {chain.label()})"
-                if m.address == 0:
-                    frozen = f" (pointer {chain.label()} leads nowhere right now)"
-            self.table.setItem(i, 0, QTableWidgetItem(fmt_value(m.value) + frozen))
+            self.table.setItem(i, 0, QTableWidgetItem(self._row_text(i)))
             self.table.setItem(i, 1, QTableWidgetItem(f"{m.address:#x}"))
         self._apply_filter()
         if keep_row is not None and keep_row < len(self.rows):
@@ -656,6 +785,64 @@ class FindWizard(QWidget):
             else:
                 self.table.selectRow(keep_row)
         self._update_buttons()
+
+    def _fill_tree(self) -> None:
+        """One top row per group (its likely real match first), its members under it;
+        typed-in addresses and pointers after them (AC-G4)."""
+        index: dict[tuple[int, ValueType], int] = {}
+        for i, m in enumerate(self.rows):
+            index.setdefault((m.address, self.row_types[i]), i)
+        if self.tree.topLevelItemCount() != len(self.groups) + len(self.rows) - self._n_matches:
+            self._tree_pick = self._tree_pick or self._tree_selection()
+            self.tree.clear()  # rows were added or removed: build it again
+        if self.tree.topLevelItemCount() == 0:
+            for g in self.groups:
+                head = index.get((g.head.address, g.head.vtype), -1)
+                top = QTreeWidgetItem()
+                top.setData(0, ROW, head)
+                if len(g.members) > 1:
+                    for k, m in enumerate(g.members):
+                        child = QTreeWidgetItem()
+                        child.setData(0, ROW, index.get((m.address, m.vtype), head))
+                        child.setData(1, ROW, k)
+                        top.addChild(child)
+                self.tree.addTopLevelItem(top)
+            for i in range(self._n_matches, len(self.rows)):
+                top = QTreeWidgetItem()
+                top.setData(0, ROW, i)
+                self.tree.addTopLevelItem(top)
+            if self._tree_pick is not None:
+                addr, vt, member = self._tree_pick
+                self._tree_pick = None
+                row = index.get((addr, vt))
+                if row is not None:
+                    self._select_row(row, member)
+        for t in range(self.tree.topLevelItemCount()):
+            top = self.tree.topLevelItem(t)
+            g = self.groups[t] if t < len(self.groups) else None
+            self._item_text(top, g, None)
+            for c in range(top.childCount()):
+                self._item_text(top.child(c), g, top.child(c).data(1, ROW))
+        self.tree.setColumnHidden(3, not self.advanced.isChecked())
+        self._apply_filter()
+
+    def _item_text(self, item: QTreeWidgetItem, g: Group | None, member: int | None) -> None:
+        i = item.data(0, ROW)
+        if not isinstance(i, int) or not 0 <= i < len(self.rows):
+            return
+        m = self.rows[i]
+        item.setText(0, self._row_text(i))
+        item.setText(1, way_label(m.way) if self.ctl.scanner.has_ways else "")
+        item.setText(3, f"{m.address:#x}")
+        if g is None:
+            item.setText(2, "")
+        elif member is None:  # the group's row
+            notes = [g.label] if g.label else []
+            if g.copies:
+                notes.append(f"+{g.copies} {'copy' if g.copies == 1 else 'copies'}")
+            item.setText(2, ", ".join(notes))
+        else:
+            item.setText(2, "likely real" if member in g.likely else "")
 
     def _apply_filter(self) -> None:
         """Hide rows whose live value doesn't match the filter box. Rows are hidden,
@@ -666,6 +853,9 @@ class FindWizard(QWidget):
         except ValueError:
             keep = None  # half-typed, e.g. "90-": show everything until it parses
             self.filter.setStyleSheet("color: #c0392b;")
+        if self.grouped:
+            self._filter_tree(keep)
+            return
         shown = 0
         for i, m in enumerate(self.rows):
             hide = keep is not None and (m.raw == b"" or not in_filter(m.value, keep))
@@ -675,6 +865,58 @@ class FindWizard(QWidget):
             self.filter_count.setText("")
         else:
             self.filter_count.setText(f"{shown} of {len(self.rows)} shown")
+
+    def _filter_tree(self, keep: tuple[float, float] | None) -> None:
+        """Hide a group when none of its matches fits the filter (AC-G4)."""
+
+        def fits(item: QTreeWidgetItem) -> bool:
+            i = item.data(0, ROW)
+            if keep is None:
+                return True
+            if not isinstance(i, int) or not 0 <= i < len(self.rows):
+                return False
+            m = self.rows[i]
+            return m.raw != b"" and in_filter(m.value, keep)
+
+        shown = total = 0
+        for t in range(self.tree.topLevelItemCount()):
+            top = self.tree.topLevelItem(t)
+            kids = [top.child(c) for c in range(top.childCount())]
+            hide = not any(fits(it) for it in [top, *kids])
+            top.setHidden(hide)
+            for kid in kids:
+                kid.setHidden(not fits(kid))
+            total += 1
+            shown += not hide
+        if keep is None or not total:
+            self.filter_count.setText("")
+        else:
+            self.filter_count.setText(f"{shown} of {total} shown")
+        if self.tree.selectedItems() and self.tree.selectedItems()[0].isHidden():
+            self.tree.clearSelection()
+
+    def _tree_selection(self) -> tuple[int, ValueType, bool] | None:
+        """The selected (address, number type, is an expanded member) in the tree."""
+        items = self.tree.selectedItems()
+        i = items[0].data(0, ROW) if items else None
+        if not isinstance(i, int) or not 0 <= i < len(self.rows):
+            return None
+        return self.rows[i].address, self.row_types[i], items[0].parent() is not None
+
+    def _select_row(self, i: int, member: bool = False) -> None:
+        """Select row ``i`` in whichever list is showing. In the tree a group's row is
+        preferred, or an expanded member when ``member``; either is found."""
+        if not self.grouped:
+            self.table.selectRow(i)
+            return
+        tops = [self.tree.topLevelItem(t) for t in range(self.tree.topLevelItemCount())]
+        kids = [top.child(c) for top in tops for c in range(top.childCount())]
+        for it in (kids + tops) if member else (tops + kids):
+            if it.data(0, ROW) == i:
+                if it.parent() is not None:
+                    it.parent().setExpanded(True)
+                self.tree.setCurrentItem(it)
+                return
 
     def _vtype(self) -> ValueType:
         assert self.ctl.scanner.vtype is not None
@@ -695,6 +937,8 @@ class FindWizard(QWidget):
         player typed stays, so Search starts again in one click)."""
         self.unknown_mode = False
         self.rows = []
+        self._show_groups([])
+        self.tree.clear()
         self.count.setText("")
         self.table.setRowCount(0)
         self.timer.stop()
@@ -746,7 +990,7 @@ class FindWizard(QWidget):
         self.manual[addr] = vt
         self.add_addr.clear()
         self.refresh_live()
-        self.table.selectRow(next(i for i, m in enumerate(self.rows) if m.address == addr))
+        self._select_row(next(i for i, m in enumerate(self.rows) if m.address == addr))
 
     def do_test_hits(self) -> None:
         """AC-H6: narrow the current matches to the real one by asking the player."""
@@ -760,13 +1004,56 @@ class FindWizard(QWidget):
             )
             return
         try:
-            addrs = [h.address for h in self.ctl.session.require_client().scan_results(TEST_LIMIT)]
-            dlg = HitTestDialog(self.ctl, addrs, sc.vtype, self.use_found, self, sc.scale)
+            addrs, scale = self._test_candidates()
+            note = hints.TEST_HITS_RAW if scale == OF_FULL else ""
+            dlg = HitTestDialog(self.ctl, addrs, sc.vtype, self.use_found, self, scale, note)
         except Exception as exc:
             self.ctl.fail(exc, "test hits")
             return
         self.hit_dialog = dlg
         dlg.exec()
+
+    def _test_candidates(self) -> tuple[list[int], Scale]:
+        """Test the hits candidates and the units to ask in. Grouped list: one per
+        group, its likely real match (or the expanded row picked in it); a single group
+        tests its members (AC-G4).
+
+        One test value has to mean the same to every candidate, so when they keep the
+        number different ways (percent, fraction, x10, ...) only the ones stored the way
+        the first candidate is are tested: the first group's head (or the row picked in
+        it). Without groups there is no head, and when the head's way would leave just
+        the head there is nothing to test it against: then the most common way is used
+        (the first candidate's on a tie). Raises ValueError when fewer than 2 are left."""
+        sc = self.ctl.scanner
+        hits = self.ctl.session.require_client().scan_results(TEST_LIMIT)
+        # (address, way), in the order they are offered: first group first
+        if not self.grouped:
+            cands = [(h.address, h.way) for h in hits]
+        elif len(self.groups) == 1:
+            cands = [(m.address, m.way) for m in self.groups[0].members]
+        else:
+            pick = self._tree_selection()
+            cands = []
+            for g in self.groups:
+                use = g.head
+                if pick is not None and pick[2]:  # an expanded row was picked
+                    use = next((m for m in g.members if (m.address, m.vtype) == pick[:2]), g.head)
+                cands.append((use.address, use.way))
+        counts: dict[Scale | None, int] = {}
+        for _a, w in cands:
+            counts[w] = counts.get(w, 0) + 1
+        way = cands[0][1] if cands else None  # the head's way
+        if not self.grouped or counts.get(way, 0) < 2:
+            way = max(counts, key=lambda w: (counts[w], w == cands[0][1])) if cands else None
+        addrs = [a for a, w in cands if w == way]
+        if len(counts) > 1 and len(addrs) < 2:
+            raise ValueError(
+                "These matches keep the number different ways, so one test value can't "
+                "check them all. Expand a group and pick a row, or search again first."
+            )
+        if way is None or sc.scale is not SHOWN:
+            return addrs, sc.scale
+        return addrs, way
 
     def use_found(self, addr: int, vt: ValueType) -> None:
         """The winner of Test the hits goes in the list like a typed-in address."""
@@ -775,7 +1062,7 @@ class FindWizard(QWidget):
         self.refresh_live()
         rows = [i for i, m in enumerate(self.rows) if m.address == addr]
         if rows:
-            self.table.selectRow(rows[-1])
+            self._select_row(rows[-1])
 
     def do_pointer_scan(self) -> None:
         i = self._selected_row()
@@ -789,7 +1076,7 @@ class FindWizard(QWidget):
         log.info("action=use_pointer chain=%s type=%s", chain.label(), vt.name)
         self.pointers[chain] = vt
         self.refresh_live()
-        self.table.selectRow(len(self.rows) - 1)
+        self._select_row(len(self.rows) - 1)
 
     def do_remove_address(self) -> None:
         i = self._selected_row()
