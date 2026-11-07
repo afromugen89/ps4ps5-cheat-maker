@@ -146,9 +146,17 @@ hint says *"Too many to check by percent yet"*: that scan counts as **Went down*
 **Went up**); take another hit or heal, then type the % again.
 
 Sometimes a percent can only be noted, and nothing is dropped: when it's the same as (or
-very close to) the last one, or when you pressed **Went up** / **Went down** yourself since
-the last percent. Change it in the game again and type the new %. In this search a number
-typed without the % also counts as a percent.
+very close to) the last one, when the last one was 0%, or when you pressed **Went up** /
+**Went down** yourself since the last percent. Change it in the game again and type the new %. In this search a number
+typed without the % also counts as a percent, so it must be 0 to 100; to search for a
+plain number such as 180, press **Start over**.
+
+**Went down by** / **Went up by** in this search: the amount is applied to each match as
+it is stored. For a match kept as the percent, a fraction or x10, type percentage points
+(40% to 30% is **Went down by** 10). For a match kept as a share of its full value ("of
+full" under **Stored as**), or not tied to a way yet (while very many are left), the
+amount is the raw number the game uses, which you usually can't see (health 250 to 200 is
+50); typing the % again is easier.
 
 Pressing **It's full now** again during a search marks full again: fill it up and don't
 touch the controller, because it runs a **Same** scan.

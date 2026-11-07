@@ -46,6 +46,17 @@ PC. Grouping only uses value history the Scanner collects in `_record()`.
      with a PC-side MultiScan grouped by (type, way), each hit's value = baseline. NG: closes
      multi snapshots / resident search, sets `_scan`, `_scan_pid`, `_scan_ranges_list`;
      later scans use pipelined reads.
+   - Noted percent (nothing dropped, now = baseline): when some match has no value-when-
+     full estimate (last_pct None or 0) or the % is too close to the last one. Under the
+     limit: the values just read go to `scan_restrict` (keeps everything, NaN too). Over
+     the limit: `scan_rebase()` on ConsoleClient. Fake / PC sessions read every match;
+     NG snapshots run a range compare over the whole type (decimals -inf..inf, so NaN is
+     the one value NG drops: it has no keep-all compare); NG PC candidates too many to
+     read are refused rather than re-scanned over windows for every value.
+   - Percent first scan: an address fitting several ways of one type (0%, 1%) is kept
+     only in the narrowest (smallest factor). A decimal whose values are all subnormal
+     (a whole number's bytes) is never kept "of full" and is left out of groups; one
+     address is never twice in a group.
    - `percent_pc_limit` setting, default 20,000, clamped 1,000..100,000.
    - Re-mark Full during a search: confirm ("Keep it full and don't touch the
      controller"), run a Same scan, `last_pct=100`, clear `full` (deviation from spec: it
@@ -55,12 +66,12 @@ PC. Grouping only uses value history the Scanner collects in `_record()`.
    prune dropped addresses; reset on Start over / new first scan. `core/grouping.py`:
    `Member(address, vtype, way, values)`, `Group(members, heads, factors, label)`,
    `group_matches(history, tags, ratio_tol=0.01, near=64, far=65536) -> list[Group]`.
-   Link: >=2 shared scans, both changed, ratio from first shared non-zero scan, all shared
+   Link: >=2 shared changes (so >=3 recorded scans), both changed, ratio from first shared non-zero scan, all shared
    scans within 1%; zero on one side only breaks it; union-find. Likely real: another member
    or another changed match changing in the same scans within 64 bytes at a factor not ~1.
    "copies (probably display)": all same value and all >64 KiB apart. Order: likely real
    first then most in-group neighbours; groups with likely real first, then smaller; never-
-   changed matches alone, last. `scanner.groups()` -> [] unless 2..500 matches and >=2 scans.
+   changed matches alone, last. `scanner.groups()` -> [] unless 2..500 matches and >=3 recorded scans (GROUP_SCANS).
    UI: QTreeWidget, one top item per group (head value, way, "+N copies", tag), children
    members; each item stores its index into rows; Freeze/Make a cheat/Test the hits act on
    head for a group row, member for a child. Grouped list shown when <=500 matches and

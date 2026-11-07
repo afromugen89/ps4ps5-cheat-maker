@@ -83,7 +83,8 @@ For values that aren't out of 100 (max health 250, 1,700 shield and so on).
 
 ### AC-G1 When groups appear
 - Grouping runs when 2 to 500 matches are left (same limit as Test the hits) and the
-  app has the value of every match from at least 2 scans. It needs no extra console
+  app has the value of every match from at least 3 recorded scans (with 2, any two values
+  that both went down look "linked"). It needs no extra console
   work beyond the live read the list already does; from 500 matches down, the app keeps
   each match's value after every scan.
 
