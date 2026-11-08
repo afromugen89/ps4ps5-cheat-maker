@@ -137,3 +137,12 @@ def test_make_lock_cheat_refuses_unsafe_writer(session):
     w = Writer(MODULE_BASE + 0x100, bytes.fromhex("f00fb10b"), "lock cmpxchg", 1, "atomic")
     with pytest.raises(LockFailed, match="freeze"):
         make_lock_cheat(session, w, "x")
+
+
+def test_bare_pointer_writers_are_flagged_shared():
+    from cheatmaker.core.locker import bare_pointer, decode_one
+
+    assert bare_pointer(decode_one(bytes.fromhex("890b"), 0))  # mov [rbx],ecx
+    assert bare_pointer(decode_one(bytes.fromhex("c4c17a1106"), 0))  # vmovss [r14],xmm0
+    assert not bare_pointer(decode_one(bytes.fromhex("c5fa118f28070000"), 0))  # [rdi+728h]
+    assert not bare_pointer(decode_one(bytes.fromhex("890c88"), 0))  # [rax+rcx*4]

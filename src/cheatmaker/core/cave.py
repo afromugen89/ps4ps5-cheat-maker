@@ -87,6 +87,15 @@ def writer_target(writer: Writer) -> Target:
             "can't tell characters apart. Try another option."
         )
     disp = insn.memory_displacement
+    if disp == 0:
+        # [r14] points at the value itself, not a character: comparing [r14+field]
+        # reads whatever sits after the value, and the routine is usually shared by
+        # many values. This crashed Returnal on Kein's PS5 (2026-11-08).
+        raise LockFailed(
+            "This instruction writes through a pointer to the value itself, so it's "
+            "probably shared by many values and 'player only' could crash the game. "
+            "Try another option."
+        )
     if disp >= 1 << 63:
         disp -= 1 << 64
     return Target(base, disp)
