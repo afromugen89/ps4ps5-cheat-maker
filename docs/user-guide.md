@@ -281,6 +281,11 @@ Each cheat has:
     can't be saved for CheatRunner yet.
   - **Found again each run**: the app has learned how to find it after a restart (6.3).
 
+**Combine**: some games need two values kept at once (Returnal's health needs two). Make
+a cheat for each, Ctrl-click both in **My cheats**, and press **Combine**. You get one
+cheat that turns both on with a single tick. A combined cheat's value can't be edited,
+and Lock it works on one address at a time, so run Lock it before combining.
+
 ### 6.1 Lock it
 
 For a "This session only" cheat, **Lock it** finds the game code that changes the value

@@ -76,6 +76,26 @@ class Cheat:
             loc.on = data
 
 
+def combine(cheats: list[Cheat], name: str | None = None) -> Cheat:
+    """One cheat that writes all of ``cheats``' lines (e.g. two health values that must
+    both be kept). It keeps writing if any of them did. Its value can't be edited, since
+    the parts usually hold different numbers. Raises ValueError if it can't combine them."""
+    if len(cheats) < 2:
+        raise ValueError("pick at least two cheats to combine")
+    if any(c.anchor is not None for c in cheats):
+        raise ValueError("cheats found again after a restart can't be combined")
+    return Cheat(
+        name=name or " + ".join(c.name for c in cheats),
+        locations=[
+            Location(loc.kind, loc.offset, loc.on, loc.off, loc.module, loc.section)
+            for c in cheats
+            for loc in c.locations
+        ],
+        freeze=any(c.freeze for c in cheats),
+        hint="Combined: " + ", ".join(c.name for c in cheats),
+    )
+
+
 @dataclass
 class CheatFile:
     """One game + version's cheats: what a .json/.shn file holds."""

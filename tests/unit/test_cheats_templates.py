@@ -105,3 +105,18 @@ def test_file_name_ps5_and_ps4():  # AC-6.1
 def test_versions_differ():  # AC-7.2
     assert not versions_differ("01.05", "1.05")
     assert versions_differ("01.05", "01.06")
+
+
+def test_combine_cheats():
+    from cheatmaker.core.cheats import Cheat, Location, LocationKind, combine
+
+    a = Cheat("A", [Location(LocationKind.SESSION_ADDRESS, 0x10, b"\x01", b"\x00")], freeze=True)
+    b = Cheat("B", [Location(LocationKind.CODE_PATCH, 0x20, b"\x90", b"\xcc")])
+    c = combine([a, b])
+    assert c.name == "A + B" and c.freeze and c.value is None and c.session_only
+    assert [loc.offset for loc in c.locations] == [0x10, 0x20]
+    assert c.locations[0] is not a.locations[0]  # copies: editing one won't change the other
+    with pytest.raises(ValueError):
+        combine([a])
+    with pytest.raises(ValueError):
+        combine([a, Cheat("C", b.locations, anchor=("o", "f"))])
