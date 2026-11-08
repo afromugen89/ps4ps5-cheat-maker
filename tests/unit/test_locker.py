@@ -3,6 +3,7 @@ import pytest
 from cheatmaker.core.cheats import LocationKind
 from cheatmaker.core.freezer import Freezer, LiveCheats
 from cheatmaker.core.locker import (
+    Writer,
     find_writers,
     instruction_before,
     make_lock_cheat,
@@ -59,7 +60,6 @@ def test_unreadable_or_undecodable_rips(session, fake):
 
 
 def test_writer_outside_module_refused(session, fake):
-    from cheatmaker.core.locker import Writer
 
     with pytest.raises(LockFailed):
         make_lock_cheat(session, Writer(HEAP_BASE, b"\x89\x08", "mov", 1), "x")
@@ -95,3 +95,45 @@ def test_instruction_before_finds_readers_with_touches_memory():
     assert start == 0x400100 and code == read and text == "mov eax,[r12+2ACh]"
     lea = bytes.fromhex("498d442410")  # lea rax,[r12+10h]: names an address, no access
     assert instruction_before(lea, 0x400105, want=touches_memory) is None
+
+
+def test_instruction_before_does_not_eat_previous_instruction():
+    # mov eax,0x41000000 ; mov [rbx],ecx. "41 89 0B" (mov [r11],ecx) also ends at rip,
+    # but starts inside the mov eax: NOPing it would corrupt the game's code.
+    code = bytes.fromhex("b800000041890b")
+    start, raw, text = instruction_before(code, 0x1007)
+    assert (start, raw, text) == (0x1005, b"\x89\x0b", "mov [rbx],ecx")
+
+
+def test_instruction_before_resyncs_in_real_context():
+    # A run of real instructions before the writer; the last byte before it is 0x41.
+    prefix = bytes.fromhex(
+        "4889c34883c010c7400800000041"
+    )  # mov rbx,rax; add rax,10h; mov dword [rax+8],41000000h
+    code = prefix + bytes.fromhex("890b")
+    start, raw, _ = instruction_before(code, 0x5000)
+    assert start == 0x5000 - 2 and raw == b"\x89\x0b"
+
+
+@pytest.mark.parametrize(
+    ("hexcode", "unsafe"),
+    [
+        ("890b", False),  # mov [rbx],ecx
+        ("c5fa118c24ac020000", False),  # vmovss [rsp+2ACh],xmm1
+        ("ff00", False),  # inc dword [rax]
+        ("f00fb10b", True),  # lock cmpxchg [rbx],ecx
+        ("8708", True),  # xchg [rax],ecx
+        ("f3aa", True),  # rep stosb
+        ("8f00", True),  # pop qword [rax]
+    ],
+)
+def test_nop_unsafe(hexcode, unsafe):
+    from cheatmaker.core.locker import decode_one, nop_unsafe
+
+    assert (nop_unsafe(decode_one(bytes.fromhex(hexcode), 0)) is not None) is unsafe
+
+
+def test_make_lock_cheat_refuses_unsafe_writer(session):
+    w = Writer(MODULE_BASE + 0x100, bytes.fromhex("f00fb10b"), "lock cmpxchg", 1, "atomic")
+    with pytest.raises(LockFailed, match="freeze"):
+        make_lock_cheat(session, w, "x")

@@ -75,7 +75,7 @@ class LockWizard(QDialog):
     def _update(self) -> None:
         has = self.options.currentRow() >= 0
         self.test_btn.setEnabled(has)
-        self.test_all_btn.setEnabled(len(self.writers) > 1)
+        self.test_all_btn.setEnabled(sum(1 for w in self.writers if not w.unsafe) > 1)
         self.player_btn.setEnabled(has)
         self.keep_btn.setEnabled(has and self.candidate is not None and self.candidate.enabled)
 
@@ -111,6 +111,8 @@ class LockWizard(QDialog):
         self.options.clear()
         for i, w in enumerate(self.writers, 1):
             label = f"Option {i} (changed it {w.hits} time{'s' if w.hits != 1 else ''})"
+            if w.unsafe:
+                label += " - could freeze the game, use Player only"
             if self.show_code.isChecked():
                 label += f"   {w.address:#x}: {w.text}"
             self.options.addItem(label)
@@ -153,11 +155,12 @@ class LockWizard(QDialog):
     def do_test_all(self) -> None:
         """Switch off every instruction that changed the value, as one cheat. Quicker
         than trying options one by one; if the game misbehaves, test them singly."""
-        if len(self.writers) < 2:
+        safe = [w for w in self.writers if not w.unsafe]  # NOPs there could hang the game
+        if len(safe) < 2:
             return
         self._untest()
         try:
-            parts = [make_lock_cheat(self.ctl.session, w, self.source.name) for w in self.writers]
+            parts = [make_lock_cheat(self.ctl.session, w, self.source.name) for w in safe]
             cheat = parts[0]
             cheat.locations = [loc for c in parts for loc in c.locations]
             verify_original(self.ctl.session, cheat)
