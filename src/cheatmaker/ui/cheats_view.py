@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
 
 from cheatmaker import formats
 from cheatmaker.core import updater as up
-from cheatmaker.core.cheats import Cheat, versions_differ
+from cheatmaker.core.cheats import Cheat, combine, versions_differ
 from cheatmaker.core.values import parse_number
 from cheatmaker.ui import hints
 from cheatmaker.ui.controller import Controller
@@ -71,10 +71,15 @@ class CheatsView(QWidget):
         )
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        self.table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        # Ctrl/Shift-click picks several cheats, for Combine and Delete.
+        self.table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
         self.show_details = QCheckBox("Advanced: show details")
         self.delete_btn = QPushButton("Delete")
         self.lock_btn = QPushButton("Lock it")
+        self.combine_btn = QPushButton("Combine")
+        self.combine_btn.setToolTip(
+            "Ctrl-click two or more cheats, then press Combine to make them one cheat"
+        )
         self.learn_btn = QPushButton("Find it next time")
         self.learn_btn.setToolTip(
             "Learn how the game keeps this value, so Cheat Maker finds it again by itself "
@@ -96,6 +101,7 @@ class CheatsView(QWidget):
         buttons = QHBoxLayout()
         for w in (
             self.delete_btn,
+            self.combine_btn,
             self.lock_btn,
             self.learn_btn,
             self.again_btn,
@@ -120,6 +126,7 @@ class CheatsView(QWidget):
         self.show_details.toggled.connect(lambda _on: self.fill())
         self.show_details.toggled.connect(self.skip_hook.setVisible)
         self.delete_btn.clicked.connect(self.do_delete)
+        self.combine_btn.clicked.connect(self.do_combine)
         self.lock_btn.clicked.connect(lambda: self._with_selected(self.open_lock))
         self.learn_btn.clicked.connect(lambda: self._with_selected(self.open_learn))
         self.again_btn.clicked.connect(
@@ -138,11 +145,15 @@ class CheatsView(QWidget):
     def cheats(self) -> list[Cheat]:
         return self.ctl.cheat_file.cheats if self.ctl.cheat_file else []
 
+    def selected_all(self) -> list[Cheat]:
+        """Every selected cheat, in list order."""
+        rows = sorted(r.row() for r in self.table.selectionModel().selectedRows())
+        return [self.cheats[r] for r in rows if r < len(self.cheats)]
+
     def selected(self) -> Cheat | None:
-        rows = self.table.selectionModel().selectedRows()
-        if not rows or rows[0].row() >= len(self.cheats):
-            return None
-        return self.cheats[rows[0].row()]
+        """The selected cheat when exactly one is selected."""
+        picked = self.selected_all()
+        return picked[0] if len(picked) == 1 else None
 
     def _with_selected(self, fn: Callable[[Cheat], None]) -> None:
         c = self.selected()
@@ -187,11 +198,17 @@ class CheatsView(QWidget):
 
     def _update_buttons(self) -> None:
         c = self.selected()
-        self.delete_btn.setEnabled(c is not None)
+        picked = self.selected_all()
+        self.delete_btn.setEnabled(bool(picked))
+        self.combine_btn.setEnabled(len(picked) > 1 and all(ch.anchor is None for ch in picked))
         up = self.ctl.session.connected and self.ctl.session.game is not None
         located = c is not None and (c.anchor is None or c.anchor[0] in self.ctl.live.trackers)
         self.lock_btn.setEnabled(
-            c is not None and c.anchor is None and c.session_only and self.ctl.session.connected
+            c is not None
+            and c.anchor is None
+            and c.session_only
+            and len(c.locations) == 1  # Lock it watches one address
+            and self.ctl.session.connected
         )
         self.learn_btn.setEnabled(up and located and c.session_only and c.value_type is not None)
         p = self.ctl.project
@@ -227,17 +244,43 @@ class CheatsView(QWidget):
         self.fill()
 
     def do_delete(self) -> None:
-        c = self.selected()
-        if c is None:
+        picked = self.selected_all()
+        if not picked:
             return
-        if c.enabled:
+        for c in picked:
+            if c.enabled:
+                try:
+                    self.ctl.live.turn_off(c)
+                except Exception as exc:
+                    self.ctl.fail(exc, "toggle")
+            self.cheats.remove(c)
+            self.finder.forget(c)
+        self.ctl.cheats_changed.emit()
+
+    def do_combine(self) -> None:
+        """Replace the selected cheats with one cheat that does all of them."""
+        picked = self.selected_all()
+        try:
+            combined = combine(picked)
+        except ValueError as exc:
+            self.ctl.fail(exc, "combine")
+            return
+        was_on = any(c.enabled for c in picked)
+        for c in picked:
+            if c.enabled:  # nothing restored: the combined cheat takes over right away
+                self.ctl.live.turn_off(c, restore=False)
+        at = self.cheats.index(picked[0])
+        for c in picked:
+            self.cheats.remove(c)
+            self.finder.forget(c)
+        self.cheats.insert(at, combined)
+        if was_on:
             try:
-                self.ctl.live.turn_off(c)
+                self.ctl.live.turn_on(combined)
             except Exception as exc:
                 self.ctl.fail(exc, "toggle")
-        self.cheats.remove(c)
-        self.finder.forget(c)
         self.ctl.cheats_changed.emit()
+        self.ctl.message.emit(f'Combined into "{combined.name}". One tick turns them all on.')
 
     def _pick_file(self) -> str:
         path, _ = QFileDialog.getOpenFileName(

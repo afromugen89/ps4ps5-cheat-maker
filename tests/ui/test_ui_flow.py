@@ -715,3 +715,40 @@ def test_unknown_search_shows_both_types_and_lists_whole_numbers(win, fake):
     assert win.find.count.text() == "1 matches"
     assert win.find.row_types == [ValueType.INT32]
     win.find.test_btn.click()  # one match: nothing to test, no crash
+
+
+def test_combine_two_cheats_into_one(win, fake):
+    """Returnal needs two health values kept at once: one tick should do both."""
+    connect(win)
+    search(win, "100")
+    win.find.table.selectRow(0)
+    win.find.set_value.setText("500")
+    win.find.template.setCurrentIndex(0)  # Infinite Health (keeps writing)
+    win.find.make_btn.click()
+    win.tabs.setCurrentWidget(win.find)
+    win.find.new_btn.click()  # Start over: a new search, not a narrowing one
+    search(win, "2450")
+    win.find.table.selectRow(0)
+    win.find.set_value.setText("7000")
+    win.find.template.setCurrentIndex(0)
+    win.find.make_btn.click()
+    view = win.cheats
+    t = view.table
+    assert t.rowCount() == 2 and not view.combine_btn.isEnabled()
+    t.item(0, COL_ON).setCheckState(Qt.CheckState.Checked)  # one is on already
+    t.selectAll()
+    assert view.combine_btn.isEnabled() and not view.lock_btn.isEnabled()
+    view.combine_btn.click()
+    [c] = win.ctl.cheat_file.cheats
+    assert c.name == "Infinite Health + Infinite Health" and len(c.locations) == 2
+    assert c.enabled and c.freeze and c.value is None
+    fake.poke(PID, HEALTH_ADDR, struct.pack("<i", 1))
+    fake.poke(PID, GOLD_ADDR, struct.pack("<i", 1))
+    win.ctl.freezer.tick()
+    assert i32(fake, HEALTH_ADDR) == 500 and i32(fake, GOLD_ADDR) == 7000
+    t.item(0, COL_ON).setCheckState(Qt.CheckState.Unchecked)
+    assert i32(fake, HEALTH_ADDR) == 100 and i32(fake, GOLD_ADDR) == 2450
+    t.selectRow(0)
+    assert not view.lock_btn.isEnabled()  # Lock it watches one address
+    view.delete_btn.click()
+    assert t.rowCount() == 0
