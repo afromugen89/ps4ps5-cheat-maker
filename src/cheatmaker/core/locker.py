@@ -33,6 +33,7 @@ class Writer:
     text: str  # "mov [rax],ecx" (shown only under Advanced)
     hits: int  # how many times it wrote during the watch
     unsafe: str | None = None  # why NOPs here could hang the game; None = safe
+    shared: bool = False  # writes through a bare pointer: likely code shared by many values
 
     @property
     def length(self) -> int:
@@ -92,6 +93,19 @@ def nop_unsafe(insn: ix.Instruction) -> str | None:
     if any(r.access in _REG_WRITE for r in _info.info(insn).used_registers()):
         return "it also changes a register the game uses next"
     return None
+
+
+def bare_pointer(insn: ix.Instruction) -> bool:
+    """``mov [rax],ecx``: no offset into an object, so the register points straight at
+    the value. Such code is often shared (copy/set routines used for many values), and
+    switching it off or hooking it changes far more than the one value: on Kein's PS5
+    (Returnal, 2026-11-08) a 2-byte Lock it and a Player only on ``vmovss [r14],xmm0``
+    both crashed the game, and the console with it."""
+    return (
+        insn.memory_base not in (ix.Register.NONE, ix.Register.RIP, ix.Register.RSP)
+        and insn.memory_index == ix.Register.NONE
+        and insn.memory_displacement == 0
+    )
 
 
 def _chain_end(code: bytes, start: int, ip0: int) -> int | None:
@@ -175,16 +189,18 @@ def find_writers(
             log.warning("action=lock_watch no writing instruction ends at rip=%#x", rip)
             continue
         start, code, text = found
-        unsafe = nop_unsafe(decode_one(code, start))
+        insn = decode_one(code, start)
+        unsafe, shared = nop_unsafe(insn), bare_pointer(insn)
         log.info(
-            "action=lock_watch writer=%#x code=%s text=%r hits=%d unsafe=%s",
+            "action=lock_watch writer=%#x code=%s text=%r hits=%d unsafe=%s shared=%s",
             start,
             code.hex(),
             text,
             hits,
             unsafe,
+            shared,
         )
-        writers.append(Writer(start, code, text, hits, unsafe))
+        writers.append(Writer(start, code, text, hits, unsafe, shared))
     if not writers:
         raise LockFailed("couldn't work out which instruction changes the value")
     return writers
@@ -236,6 +252,7 @@ def patch_landed(session: Session, cheat: Cheat) -> bool:
 
 __all__ = [
     "Writer",
+    "bare_pointer",
     "find_writers",
     "instruction_before",
     "make_lock_cheat",

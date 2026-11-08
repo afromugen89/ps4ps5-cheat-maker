@@ -48,6 +48,8 @@ def test_target_and_refusals():
     assert t.base == ix.Register.R12 and t.disp == HP and t.base_name == "r12"
     with pytest.raises(LockFailed):  # [rax+rcx*4]: can't tell characters apart
         cv.writer_target(Writer(HOOK, bytes.fromhex("890c88"), "mov", 1))
+    with pytest.raises(LockFailed, match="shared"):  # vmovss [r14],xmm0 (Returnal crash)
+        cv.writer_target(Writer(HOOK, bytes.fromhex("c4c17a1106"), "vmovss", 1))
 
 
 def test_player_only_code_matches_the_known_returnal_cheat():

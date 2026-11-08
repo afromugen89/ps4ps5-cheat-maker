@@ -343,8 +343,10 @@ def test_type_in_bad_or_unmapped_address(win):
 
 def test_lock_it_test_all_at_once(win, fake):
     second = WRITER_ADDR + 0x40
-    fake.poke(PID, second, b"\x89\x08")  # another "mov [rax],ecx"
-    fake.writers[HEALTH_ADDR] = [WRITER_ADDR + 2, second + 2, second + 2]
+    # "mov [rax+10h],ecx" twice: object + offset writers (bare [rax] ones are skipped)
+    fake.poke(PID, WRITER_ADDR, b"\x89\x48\x10")
+    fake.poke(PID, second, b"\x89\x48\x10")
+    fake.writers[HEALTH_ADDR] = [WRITER_ADDR + 3, second + 3, second + 3]
     connect(win)
     search(win, "100")
     fake.poke(PID, HEALTH_ADDR, struct.pack("<i", 99))
@@ -355,10 +357,27 @@ def test_lock_it_test_all_at_once(win, fake):
     wiz.start_btn.click()
     assert wiz.options.count() == 2 and wiz.test_all_btn.isEnabled()
     wiz.test_all_btn.click()
-    assert fake.peek(PID, WRITER_ADDR, 2) == b"\x90\x90" == fake.peek(PID, second, 2)
+    assert fake.peek(PID, WRITER_ADDR, 3) == b"\x90" * 3 == fake.peek(PID, second, 3)
     assert wiz.hint.text().startswith("All options are on")
     wiz.keep_btn.click()
     assert len(win.ctl.cheat_file.cheats[0].locations) == 2
+
+
+def test_lock_it_test_all_skips_shared_writers(win, fake):
+    second = WRITER_ADDR + 0x40
+    fake.poke(PID, second, b"\x89\x08")  # two bare "mov [rax],ecx": maybe shared code
+    fake.writers[HEALTH_ADDR] = [WRITER_ADDR + 2, second + 2]
+    connect(win)
+    search(win, "100")
+    fake.poke(PID, HEALTH_ADDR, struct.pack("<i", 99))
+    search(win, "99")
+    win.find.table.selectRow(0)
+    win.find.make_btn.click()
+    wiz = LockWizard(win.ctl, win.ctl.cheat_file.cheats[0], win)
+    wiz.start_btn.click()
+    assert wiz.options.count() == 2 and not wiz.test_all_btn.isEnabled()
+    assert "may be shared" in wiz.options.item(0).text()
+    assert wiz.test_btn.isEnabled()  # still testable one at a time
 
 
 def test_pointer_scan_use_and_recheck_after_restart(win, fake):

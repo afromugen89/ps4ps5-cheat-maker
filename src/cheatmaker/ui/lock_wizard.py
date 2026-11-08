@@ -75,7 +75,7 @@ class LockWizard(QDialog):
     def _update(self) -> None:
         has = self.options.currentRow() >= 0
         self.test_btn.setEnabled(has)
-        self.test_all_btn.setEnabled(sum(1 for w in self.writers if not w.unsafe) > 1)
+        self.test_all_btn.setEnabled(sum(1 for w in self.writers if not (w.unsafe or w.shared)) > 1)
         self.player_btn.setEnabled(has)
         self.keep_btn.setEnabled(has and self.candidate is not None and self.candidate.enabled)
 
@@ -113,6 +113,8 @@ class LockWizard(QDialog):
             label = f"Option {i} (changed it {w.hits} time{'s' if w.hits != 1 else ''})"
             if w.unsafe:
                 label += " - could freeze the game, use Player only"
+            elif w.shared:
+                label += " - may be shared by other values; if the game crashes, try another"
             if self.show_code.isChecked():
                 label += f"   {w.address:#x}: {w.text}"
             self.options.addItem(label)
@@ -155,7 +157,8 @@ class LockWizard(QDialog):
     def do_test_all(self) -> None:
         """Switch off every instruction that changed the value, as one cheat. Quicker
         than trying options one by one; if the game misbehaves, test them singly."""
-        safe = [w for w in self.writers if not w.unsafe]  # NOPs there could hang the game
+        # NOPs in unsafe or shared code could hang or crash the game: test those singly
+        safe = [w for w in self.writers if not (w.unsafe or w.shared)]
         if len(safe) < 2:
             return
         self._untest()
