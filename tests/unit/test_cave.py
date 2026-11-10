@@ -8,6 +8,7 @@ from cheatmaker.core import cave as cv
 from cheatmaker.core.freezer import Freezer, LiveCheats
 from cheatmaker.core.locker import Writer
 from cheatmaker.core.session import Session
+from cheatmaker.core.values import ValueType
 from cheatmaker.errors import LockFailed
 
 PID = 9
@@ -87,6 +88,18 @@ def test_collect_compare_and_build_cheat():
     guesses = cv.compare_objects(s, PLAYER, objs)
     assert guesses[0].offset == 8 and guesses[0].player_value == 0x40048
     cheat = cv.make_player_only_cheat(s, WRITER, guesses[0], struct.pack("<f", 999.0), "HP")
+    assert cheat.value is None, "no type given: nothing to edit"
+    typed = cv.make_player_only_cheat(
+        s, WRITER, guesses[0], struct.pack("<f", 999.0), "HP", ValueType.FLOAT
+    )
+    assert typed.value == 999.0 and typed.locations[0].on == cheat.locations[0].on
+    typed.set_value(300)
+    assert (
+        typed.locations[0].on
+        == cv.make_player_only_cheat(s, WRITER, guesses[0], struct.pack("<f", 300.0), "HP")
+        .locations[0]
+        .on
+    )
     cave_loc, hook_loc = cheat.locations
     assert cheat.saveable and hook_loc.offset == HOOK - BASE
     assert hook_loc.on[0] == 0xE9 and hook_loc.off == VMOVSS

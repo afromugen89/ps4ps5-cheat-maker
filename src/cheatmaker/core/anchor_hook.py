@@ -29,10 +29,11 @@ import iced_x86 as ix
 from cheatmaker.console.client import WatchHit
 from cheatmaker.core import cave as cv
 from cheatmaker.core import updater as up
-from cheatmaker.core.cheats import Cheat, Location, LocationKind
+from cheatmaker.core.cheats import Cheat, Location, LocationKind, value_positions
 from cheatmaker.core.locker import MAX_INSN, instruction_before, touches_memory, writes_memory
 from cheatmaker.core.project import HookAnchor, HookFilter, ObjectSpec, Role
 from cheatmaker.core.session import Session
+from cheatmaker.core.values import ValueType
 from cheatmaker.errors import FindFailed, LockFailed, ReadFailed
 
 log = logging.getLogger(__name__)
@@ -265,11 +266,18 @@ def _build(
     return base + cave_off, code, site, jmp
 
 
-def hook_cheat(session: Session, obj: ObjectSpec, name: str, value: bytes | None = None) -> Cheat:
+def hook_cheat(
+    session: Session,
+    obj: ObjectSpec,
+    name: str,
+    value: bytes | None = None,
+    vtype: ValueType | None = None,
+) -> Cheat:
     """The routine and its jump as two CODE_PATCH lines, for a GoldHEN / CheatRunner
     file (D14, AC-13.1). With ``value`` it also keeps the field at that value for the
     object it captures (one routine: never two jumps on one instruction), in its own
-    spare room (``keep_cave``), so switching between the two only re-aims the jump."""
+    spare room (``keep_cave``), so switching between the two only re-aims the jump.
+    With ``vtype`` too, the kept value stays editable in My cheats and in the file."""
     anchor = obj.hook
     if anchor is None:
         raise FindFailed("This value has no game-code hook to save.")
@@ -278,6 +286,11 @@ def hook_cheat(session: Session, obj: ObjectSpec, name: str, value: bytes | None
     base = game.module_base
     if value is not None and _read(session)(cave, len(code)) not in (bytes(len(code)), code):
         raise FindFailed("There's no spare room in the game's code for this cheat.")
+    value_at = None
+    if value is not None and vtype is not None and vtype.size == len(value):
+        value_at = value_positions(lambda v: [_build(session, obj, anchor, v)[1]], len(value))
+        if value_at is None:
+            log.warning("action=value_positions found=0 name=%s: value won't be editable", name)
     return Cheat(
         name=name,
         locations=[
@@ -292,6 +305,8 @@ def hook_cheat(session: Session, obj: ObjectSpec, name: str, value: bytes | None
             if value is not None
             else "Lets Cheat Maker find your values again right away. Does nothing on its own."
         ),
+        value_type=vtype if value_at is not None else None,
+        value_at=value_at,
     )
 
 

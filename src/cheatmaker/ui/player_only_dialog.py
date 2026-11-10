@@ -126,10 +126,10 @@ class PlayerOnlyDialog(QDialog):
         self._update()
         self.ctl.fail(exc, "player_only")
 
-    def _value_bytes(self) -> bytes:
+    def _value(self) -> tuple[bytes, ValueType]:
         number = parse_number(self.value.text())
         vt = self.vtype or (ValueType.FLOAT if isinstance(number, float) else ValueType.INT32)
-        return vt.encode(number)
+        return vt.encode(number), vt
 
     def do_test(self) -> None:
         row = self.fields.currentRow()
@@ -137,12 +137,9 @@ class PlayerOnlyDialog(QDialog):
             return
         self._untest()
         try:
+            value, vt = self._value()
             cheat = cv.make_player_only_cheat(
-                self.ctl.session,
-                self.writer,
-                self.guesses[row],
-                self._value_bytes(),
-                self.source.name,
+                self.ctl.session, self.writer, self.guesses[row], value, self.source.name, vt
             )
             verify_original(self.ctl.session, cheat)
             self.ctl.live.turn_on(cheat)

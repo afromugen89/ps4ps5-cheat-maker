@@ -35,9 +35,10 @@ from dataclasses import dataclass
 import iced_x86 as ix
 
 from cheatmaker.console.client import MemMap
-from cheatmaker.core.cheats import Cheat, Location, LocationKind
+from cheatmaker.core.cheats import Cheat, Location, LocationKind, value_positions
 from cheatmaker.core.locker import Writer, writes_memory
 from cheatmaker.core.session import Session
+from cheatmaker.core.values import ValueType
 from cheatmaker.errors import LockFailed, ScanCancelled
 
 log = logging.getLogger(__name__)
@@ -498,9 +499,15 @@ def compare_objects(session: Session, player_obj: int, objects: list[int]) -> li
 
 # -- the cheat ---------------------------------------------------------------------
 def make_player_only_cheat(
-    session: Session, writer: Writer, field: FieldGuess, value: bytes, name: str
+    session: Session,
+    writer: Writer,
+    field: FieldGuess,
+    value: bytes,
+    name: str,
+    vtype: ValueType | None = None,
 ) -> Cheat:
-    """Two CODE_PATCH locations: the cave, and the jump to it. Saveable."""
+    """Two CODE_PATCH locations: the cave, and the jump to it. Saveable. With ``vtype``
+    the kept value stays editable in My cheats and in the file."""
     game = session.require_game()
     client = session.require_client()
     read = lambda a, n: client.read(game.pid, a, n)  # noqa: E731
@@ -514,6 +521,14 @@ def make_player_only_cheat(
         if not game.module_base <= addr < game.module_end:
             raise LockFailed("the patch would land outside the game's own code")
     base = game.module_base
+    value_at = None
+    if vtype is not None and vtype.size == len(value):
+        value_at = value_positions(
+            lambda v: [player_only_code(span, target, field.offset, field.player_value, v, cave)],
+            len(value),
+        )
+        if value_at is None:
+            log.warning("action=value_positions found=0 name=%s: value won't be editable", name)
     return Cheat(
         name=name,
         locations=[
@@ -527,6 +542,8 @@ def make_player_only_cheat(
         ],
         template="lock",
         hint="Keeps your value; everyone else is unchanged. Turn on before playing.",
+        value_type=vtype if value_at is not None else None,
+        value_at=value_at,
     )
 
 

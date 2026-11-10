@@ -10,7 +10,32 @@ import json
 
 from cheatmaker.core.cheats import Cheat, CheatFile, Location, LocationKind
 from cheatmaker.errors import CheatFileError
+from cheatmaker.formats import _value
 from cheatmaker.formats._hex import fmt_offset, parse_bytes, parse_offset
+
+VALUE_KEY = "cheatmaker_value"  # our own extra field: which bytes are the editable value
+
+
+def _mod(c: Cheat) -> dict:
+    mod: dict = {
+        "name": c.name,
+        "type": "checkbox",
+        "memory": [
+            {
+                "offset": fmt_offset(loc.offset),
+                "on": loc.on.hex().upper(),
+                "off": loc.off.hex().upper(),
+            }
+            for loc in c.locations
+        ],
+    }
+    vtype = _value.type_text(c)
+    if vtype is not None:
+        mod[VALUE_KEY] = {"type": vtype}
+        at = _value.at_pairs(c)
+        if at is not None:
+            mod[VALUE_KEY]["at"] = at
+    return mod
 
 
 def dumps(cf: CheatFile) -> bytes:
@@ -22,21 +47,7 @@ def dumps(cf: CheatFile) -> bytes:
         "id": cf.title_id.upper(),
         "version": cf.version,
         "process": cf.process,
-        "mods": [
-            {
-                "name": c.name,
-                "type": "checkbox",
-                "memory": [
-                    {
-                        "offset": fmt_offset(loc.offset),
-                        "on": loc.on.hex().upper(),
-                        "off": loc.off.hex().upper(),
-                    }
-                    for loc in c.locations
-                ],
-            }
-            for c in cheats
-        ],
+        "mods": [_mod(c) for c in cheats],
         "credits": list(cf.credits),
     }
     return (json.dumps(doc, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
@@ -76,13 +87,15 @@ def loads(data: bytes | str) -> CheatFile:
         if not locs:
             raise CheatFileError(f"mod {i} has no memory entries")
         hint = mod.get("hint")
-        cheats.append(
-            Cheat(
-                str(mod.get("name") or f"Cheat {i + 1}"),
-                locs,
-                hint=hint if isinstance(hint, str) else None,
-            )
+        cheat = Cheat(
+            str(mod.get("name") or f"Cheat {i + 1}"),
+            locs,
+            hint=hint if isinstance(hint, str) else None,
         )
+        extra = mod.get(VALUE_KEY)
+        if isinstance(extra, dict):
+            _value.apply(cheat, extra.get("type"), extra.get("at"))
+        cheats.append(cheat)
     credits = doc.get("credits")
     return CheatFile(
         title=str(doc.get("name", "")),

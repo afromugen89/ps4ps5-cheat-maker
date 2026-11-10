@@ -13,8 +13,11 @@ from xml.sax.saxutils import escape, quoteattr
 
 from cheatmaker.core.cheats import Cheat, CheatFile, Location, LocationKind
 from cheatmaker.errors import CheatFileError
+from cheatmaker.formats import _value
 from cheatmaker.formats._hex import fmt_offset, parse_bytes, parse_offset
 
+TYPE_ATTR = "CheatMakerValueType"  # which bytes are the editable value (ours only)
+AT_ATTR = "CheatMakerValueAt"
 _DECL = re.compile(r"^\s*<\?xml[^>]*\?>")
 
 
@@ -38,7 +41,14 @@ def dumps(cf: CheatFile) -> bytes:
         "  <Items />",
     ]
     for c in cheats:
-        lines.append(f"  <Cheat Text={quoteattr(c.name)}>")
+        extra = ""
+        vtype = _value.type_text(c)
+        if vtype is not None:  # our own attributes; CheatRunner looks others up by name
+            extra = f" {TYPE_ATTR}={quoteattr(vtype)}"
+            at = _value.at_text(c)
+            if at is not None:
+                extra += f" {AT_ATTR}={quoteattr(at)}"
+        lines.append(f"  <Cheat Text={quoteattr(c.name)}{extra}>")
         for loc in c.locations:
             lines += [
                 "    <Cheatline>",
@@ -99,7 +109,9 @@ def loads(data: bytes | str) -> CheatFile:
             )
         if not locs:
             raise CheatFileError(f"cheat {i} has no lines")
-        cheats.append(Cheat(ch.get("Text") or f"Cheat {i + 1}", locs))
+        cheat = Cheat(ch.get("Text") or f"Cheat {i + 1}", locs)
+        _value.apply(cheat, ch.get(TYPE_ATTR), ch.get(AT_ATTR))
+        cheats.append(cheat)
     moder = root.get("Moder")
     return CheatFile(
         title=root.get("Game") or "",
