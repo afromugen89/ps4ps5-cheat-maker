@@ -201,14 +201,18 @@ You can set these yourself under **Advanced**:
 Many games keep a **copy** of a value just for the screen. The copy changes along with the
 real one, so searching can't tell them apart.
 
-From 500 matches down, the app notes every match's value after each scan. Matches that
+From 20,000 matches down, the app notes every match's value after each scan, so the changes you make while narrowing down already count. Matches that
 always change together (one is always the other times the same number, like health 40 and
 its fraction 0.4) are shown as **one row** with **+N copies**; press the arrow to see every
 address. A row marked **likely real** has something that changed with it right next to it
 in memory at another scale (health next to its fraction), which display copies don't. It's
 a hint: nothing is removed. Set, Freeze and Make a cheat on a group's row use its likely
 real address; on an expanded row, that address. Values that never changed come last.
-Grouping needs each value from at least three scans, and it works for every search, not
+Groups show from 500 matches down (and when they fit **Show up to**). They need the value
+to have **changed twice** since those 20,000: a **Same** scan doesn't count, because nothing
+changed. If the list shows up before that, the hint says how many more changes it needs:
+change the value in the game and search again (the new number, or Went up / Went down).
+Grouping works for every search, not
 just percent ones: a plain number or Went up / Went down search shows the grouped list too.
 **Test the hits** then tests one address per group. If the matches keep the number
 different ways (say a fraction and a whole number), it tests only those stored the most

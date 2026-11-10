@@ -174,6 +174,11 @@ FIND_FULL_CONFIRM = (
     "Mark it full again? Keep it full and don't touch the controller: Cheat Maker runs a "
     "Same scan, which drops values that changed."
 )
+FIND_FEW_GROUPING = (
+    "Almost there. To fold copies of the same value into groups, make the value change "
+    "{n} more time{s} in the game, then search again (type the new number, or press Went "
+    "up / Went down). Same doesn't help here: copies only show when they change together."
+)
 FIND_GROUPS = (
     'Rows that change together are one group. "likely real" sits next to the same value '
     "at another scale; press the arrow to see every copy."

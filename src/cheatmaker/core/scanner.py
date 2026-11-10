@@ -37,7 +37,12 @@ READ_SPAN = 0x1000  # matches this close together are read in one request
 STILL_ROUNDS = 5  # AC-H4 "Stand still"
 STILL_INTERVAL_S = 2.0
 GROUP_LIMIT = TEST_LIMIT
-"""From this many matches down, every scan keeps each match's value, for grouping."""
+"""From this many matches down, linked matches are shown as groups."""
+RECORD_LIMIT = 20_000
+"""From this many matches down, every scan keeps each match's value, for grouping. Well
+above GROUP_LIMIT, so the changes that narrow the search down to GROUP_LIMIT already
+count: the groups are there as soon as the list is (fetching 20,000 values takes about
+0.05 s on the PS5, the scan file fetches up to 100,000 anyway)."""
 PERCENT_PC_LIMIT = 20_000
 """A percent scan in a Full search checks at most this many matches on the PC
 (setting ``percent_pc_limit``); above it the scan runs as Went up / Went down."""
@@ -121,7 +126,8 @@ class Scanner:
         self.last_unit = 0.0
         self.full: dict[tuple[int, ValueType], percent_filter.Full] = {}
         self.note: str | None = None  # TOO_MANY after a percent scan run as a compare
-        # Grouping (AC-G1): each match's value at every scan since GROUP_LIMIT or fewer.
+        # Grouping (AC-G1): each match's value at every scan since RECORD_LIMIT or fewer
+        # where a value changed (``recorded`` of them).
         self.values: dict[tuple[int, ValueType], list[float | None]] = {}
         self.tags: dict[tuple[int, ValueType], Scale | None] = {}
         self.recorded = 0
@@ -605,10 +611,10 @@ class Scanner:
 
     def _record(self) -> None:
         """After every scan: write its scan file, keep each match's value for grouping
-        (GROUP_LIMIT or fewer left), and with only a few matches left log where they are
+        (RECORD_LIMIT or fewer left), and with only a few matches left log where they are
         (helps console-test triage). One fetch serves all three."""
         count = self.count or 0
-        group = 0 < count <= GROUP_LIMIT
+        group = 0 < count <= RECORD_LIMIT
         want = min(count, max(self.scan_log.limit, LOG_MATCHES if count <= LOG_MATCHES else 0))
         if group:
             want = count
@@ -634,7 +640,11 @@ class Scanner:
 
     def _remember(self, hits: list[ScanHit] | None) -> None:
         """Add each match's value at this scan to ``values`` (AC-G1). None: too many
-        matches (or they couldn't be fetched), so start again from the next scan."""
+        matches (or they couldn't be fetched), so start again from the next scan.
+
+        A scan where no value changed (a "Same" scan) adds nothing a group could use, so
+        it isn't kept: ``recorded`` counts the scans that saw a change (plus the first),
+        and memory doesn't grow with every "Same"."""
         self._groups = None
         if hits is None:
             self.values, self.tags, self.recorded = {}, {}, 0
@@ -653,14 +663,18 @@ class Scanner:
             history.append(known)
             values[key] = history
             tags[key] = h.way
+        if n and values and all(len(v) > 1 and v[-1] == v[-2] for v in values.values()):
+            for v in values.values():
+                v.pop()  # nothing moved: keep the scans that did
+            self.values, self.tags = values, tags
+            return
         self.values, self.tags, self.recorded = values, tags, n + 1
         self.groups()  # work it out now, on the scan's thread, not in the live list
 
     def groups(self) -> list[Group]:
         """Linked matches as groups, best first (AC-G1..G4); [] unless 2 to GROUP_LIMIT
         matches are left and their values are known from at least GROUP_SCANS scans."""
-        count = self.count or 0
-        if not (self.active and 2 <= count <= GROUP_LIMIT and self.recorded >= GROUP_SCANS):
+        if not (self.group_size and self.recorded >= GROUP_SCANS):
             return []
         if self._groups is None:
             started = time.monotonic()
@@ -672,6 +686,17 @@ class Scanner:
                 time.monotonic() - started,
             )
         return self._groups
+
+    @property
+    def group_size(self) -> bool:
+        """Few enough matches left (2 to GROUP_LIMIT) to show them as groups."""
+        return self.active and 2 <= (self.count or 0) <= GROUP_LIMIT
+
+    @property
+    def changes_to_group(self) -> int:
+        """How many more scans where the value changes (Went up / Went down / the new
+        number) grouping needs before it can tell linked copies apart; 0 when it can."""
+        return max(0, GROUP_SCANS - self.recorded) if self.group_size else 0
 
     def matches(self, limit: int | None = None) -> list[Match]:
         """Current values of up to ``limit`` matches, read fresh (AC-3.4 live list)."""

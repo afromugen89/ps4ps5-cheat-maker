@@ -77,7 +77,7 @@ PC. Grouping only uses value history the Scanner collects in `_record()`.
    or another changed match changing in the same scans within 64 bytes at a factor not ~1.
    "copies (probably display)": all same value and all >64 KiB apart. Order: likely real
    first then most in-group neighbours; groups with likely real first, then smaller; never-
-   changed matches alone, last. `scanner.groups()` -> [] unless 2..500 matches and >=3 recorded scans (GROUP_SCANS).
+   changed matches alone, last. `scanner.groups()` -> [] unless 2..500 matches and >=3 recorded scans (GROUP_SCANS). Values are recorded from RECORD_LIMIT (20,000) matches down, and a scan where no value changed (Same) is not recorded, so `recorded` counts changes; `changes_to_group` says how many more the UI should ask for.
    UI: QTreeWidget, one top item per group (head value, way, "+N copies", tag), children
    members; each item stores its index into rows; Freeze/Make a cheat/Test the hits act on
    head for a group row, member for a child. Grouped list shown when <=500 matches and
