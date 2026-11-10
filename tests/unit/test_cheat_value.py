@@ -167,3 +167,26 @@ def test_files_from_other_tools_load_as_before():
     del doc["mods"][0][goldhen_json.VALUE_KEY]
     (c,) = goldhen_json.loads(json.dumps(doc)).cheats
     assert c.value is None
+
+
+@pytest.mark.parametrize(
+    ("vtype", "value"),
+    [
+        (ValueType.INT8, -5),
+        (ValueType.INT16, 0x1234),
+        (ValueType.DOUBLE, 123.456),
+        (ValueType.INT64, 0x0102030405060708),
+    ],
+)
+def test_value_positions_keep_byte_order_for_every_size(vtype, value):
+    c = _code_cheat(vtype, value)
+    assert c.value == value  # 8 bytes: two dword stores, low one first
+    c.set_value(value // 2 if isinstance(value, int) else value / 2)
+    assert c.locations[0].on == _code(vtype.encode(c.value))
+
+
+def test_shn_value_attributes_with_quotes_and_ampersand_in_the_name():
+    c = _code_cheat(ValueType.FLOAT, 2.5)
+    c.name = 'Health "max" & more'
+    (back,) = shn.loads(shn.dumps(_file(c))).cheats
+    assert back.name == c.name and back.value == 2.5 and back.value_at == c.value_at

@@ -256,3 +256,6 @@ def test_keep_value_cheat_value_is_editable_and_survives_a_file():
     game.set_health(10.0)
     game.fake.read(fg.PID, fg.BASE, 1)  # the game runs a frame
     assert game.health() == 300.0
+    cave, jmp = loaded.locations
+    assert cave.off == cave.on, "off leaves the edited routine in place"
+    assert jmp.off == fg.VMOVSS_R, "off still puts the game's instruction back"

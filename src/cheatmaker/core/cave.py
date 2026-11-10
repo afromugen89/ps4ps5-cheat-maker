@@ -527,6 +527,8 @@ def make_player_only_cheat(
             lambda v: [player_only_code(span, target, field.offset, field.player_value, v, cave)],
             len(value),
         )
+        if value_at is None:
+            log.warning("action=value_positions found=0 name=%s: value won't be editable", name)
     return Cheat(
         name=name,
         locations=[

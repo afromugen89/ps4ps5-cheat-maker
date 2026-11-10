@@ -289,6 +289,8 @@ def hook_cheat(
     value_at = None
     if value is not None and vtype is not None and vtype.size == len(value):
         value_at = value_positions(lambda v: [_build(session, obj, anchor, v)[1]], len(value))
+        if value_at is None:
+            log.warning("action=value_positions found=0 name=%s: value won't be editable", name)
     return Cheat(
         name=name,
         locations=[

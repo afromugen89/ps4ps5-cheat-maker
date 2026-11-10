@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 from cheatmaker.core.values import ValueType
+from cheatmaker.errors import CheatMakerError
 
 MAIN_MODULE = "eboot.bin"
 
@@ -84,7 +85,9 @@ class Cheat:
         """Change the number the cheat writes (AC-5.2). Raises ValueError if it can't."""
         if self.value is None:
             raise ValueError("this cheat doesn't hold a number")
-        data = self.value_type.encode(value)  # type: ignore[union-attr]
+        vt = self.value_type
+        assert vt is not None  # self.value is None without one
+        data = vt.encode(value)
         if self.value_at is None:
             for loc in self.locations:
                 loc.on = data
@@ -113,7 +116,7 @@ def value_positions(
     mark = bytes(range(1, size + 1))
     try:
         a, b, m = build(low), build(high), build(mark)
-    except Exception:  # the builder may refuse a test value
+    except (CheatMakerError, ValueError, RuntimeError):  # it may refuse a test value
         return None
     if not len(a) == len(b) == len(m) or any(
         not len(x) == len(y) == len(z) for x, y, z in zip(a, b, m, strict=True)
