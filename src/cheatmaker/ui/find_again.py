@@ -536,6 +536,7 @@ class LearnDialog(QDialog):
                 self.learned.obj,
                 f"{self.cheat.name} (works with the PC off)",
                 self.cheat.value_type.encode(self.cheat.value),
+                self.cheat.value_type,
             )
         except CheatMakerError as exc:
             self.ctl.fail(exc, "pc_off_cheat")

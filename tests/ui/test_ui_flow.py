@@ -221,6 +221,31 @@ def test_save_shn_and_overwrite_declined(win, fake, tmp_path):  # AC-6.2, AC-6.5
     assert dlg.do_save() is None
 
 
+@pytest.mark.parametrize("fmt_index", [0, 1])
+def test_saved_value_comes_back_on_open_and_can_be_edited(win, fake, tmp_path, fmt_index):
+    connect(win)
+    search(win, "5")
+    win.find.table.selectRow(
+        next(i for i, m in enumerate(win.find.rows) if m.address == STATIC_ADDR)
+    )
+    win.find.template.setCurrentIndex(3)  # Max Skill Points
+    win.find.make_btn.click()
+    t = win.cheats.table
+    t.item(0, COL_VALUE).setText("250")
+    dlg = SaveDialog(win.ctl, win)
+    dlg.folder.setText(str(tmp_path))
+    dlg.fmt.setCurrentIndex(fmt_index)
+    path = dlg.do_save()
+    win.cheats.pick_file = lambda: str(path)
+    win.cheats.open_btn.click()
+    item = t.item(0, COL_VALUE)
+    assert item.text() == "250", "the value is still there after Save and Open"
+    assert item.flags() & Qt.ItemFlag.ItemIsEditable
+    item.setText("300")
+    t.item(0, COL_ON).setCheckState(Qt.CheckState.Checked)
+    assert i32(fake, STATIC_ADDR) == 300
+
+
 def test_send_fails_falls_back_to_saved_path(win, fake, tmp_path):
     connect(win)
     search(win, "5")

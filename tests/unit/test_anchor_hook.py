@@ -229,3 +229,30 @@ def test_new_caves_and_slots_avoid_rooms_the_notes_keep():  # re-review leftover
     for lo, hi in game.session.reserved_rooms:  # a new sampler stays out of them too
         here = cv.find_cave(game.session, cv.CAVE_ROOM) - fg.BASE
         assert here + cv.CAVE_ROOM <= lo or here >= hi
+
+
+def test_keep_value_cheat_value_is_editable_and_survives_a_file():
+    from cheatmaker import formats
+    from cheatmaker.core.cheats import CheatFile
+    from cheatmaker.core.values import ValueType
+
+    game = fg.build()
+    obj = _player_object(game)
+    assert ah.hook_cheat(game.session, obj, "hook").value is None, "the plain hook has none"
+    keep = ah.hook_cheat(
+        game.session, obj, "Infinite Health", struct.pack("<f", 999.0), ValueType.FLOAT
+    )
+    assert keep.value == 999.0
+    cf = CheatFile("Returnal", "PPSA01285", "03.000.005", [keep])
+    (loaded,) = formats.FORMATS["json"].loads(formats.dumps(cf, "json")).cheats
+    assert loaded.value == 999.0
+    loaded.set_value(300)
+    assert (
+        loaded.locations[0].on
+        == ah.hook_cheat(game.session, obj, "x", struct.pack("<f", 300.0)).locations[0].on
+    ), "same routine as one built for 300"
+    for loc in loaded.locations:
+        game.fake.poke(fg.PID, fg.BASE + loc.offset, loc.on)
+    game.set_health(10.0)
+    game.fake.read(fg.PID, fg.BASE, 1)  # the game runs a frame
+    assert game.health() == 300.0

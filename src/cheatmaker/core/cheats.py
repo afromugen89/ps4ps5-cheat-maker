@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -52,6 +53,10 @@ class Cheat:
     anchor: tuple[str, str] | None = None
     """(object id, field name) in the game's .cmproj: the address is found again each
     run (v3) instead of being the one in ``locations``."""
+    value_at: list[tuple[int, int]] | None = None
+    """Where the value's bytes sit, lowest byte first, as (line, byte) pairs, when the
+    value is inside game code (Player only, works with the PC off). None: every line's
+    ``on`` bytes are the value."""
 
     @property
     def session_only(self) -> bool:
@@ -65,15 +70,70 @@ class Cheat:
     def value(self) -> float | int | None:
         if self.value_type is None or not self.locations:
             return None
-        return self.value_type.decode(self.locations[0].on)
+        if self.value_at is None:
+            return self.value_type.decode(self.locations[0].on)
+        try:
+            raw = bytes(self.locations[i].on[b] for i, b in self.value_at)
+        except IndexError:
+            return None
+        if len(raw) != self.value_type.size:
+            return None
+        return self.value_type.decode(raw)
 
     def set_value(self, value: float | int) -> None:
         """Change the number the cheat writes (AC-5.2). Raises ValueError if it can't."""
-        if self.value_type is None:
+        if self.value is None:
             raise ValueError("this cheat doesn't hold a number")
-        data = self.value_type.encode(value)
-        for loc in self.locations:
-            loc.on = data
+        data = self.value_type.encode(value)  # type: ignore[union-attr]
+        if self.value_at is None:
+            for loc in self.locations:
+                loc.on = data
+            return
+        on = {i: bytearray(loc.on) for i, loc in enumerate(self.locations)}
+        for (i, b), byte in zip(self.value_at, data, strict=True):
+            on[i][b] = byte
+        for i, loc in enumerate(self.locations):
+            new = bytes(on[i])
+            if new == loc.on:
+                continue
+            if loc.off == loc.on:  # a routine left in place when off: keep it the same
+                loc.off = new
+            loc.on = new
+
+
+def value_positions(
+    build: Callable[[bytes], list[bytes]], size: int
+) -> list[tuple[int, int]] | None:
+    """Where a value of ``size`` bytes lands in the lines ``build(value)`` makes, as
+    (line, byte) pairs lowest byte first; None if it can't be told (the lines change
+    shape with the value). Builds with three test values and compares them."""
+    if size < 1:
+        return None
+    low, high = bytes(size), b"\xff" * size
+    mark = bytes(range(1, size + 1))
+    try:
+        a, b, m = build(low), build(high), build(mark)
+    except Exception:  # the builder may refuse a test value
+        return None
+    if not len(a) == len(b) == len(m) or any(
+        not len(x) == len(y) == len(z) for x, y, z in zip(a, b, m, strict=True)
+    ):
+        return None
+    diff = [
+        (i, j)
+        for i, (x, y) in enumerate(zip(a, b, strict=True))
+        for j in range(len(x))
+        if x[j] != y[j]
+    ]
+    if len(diff) != size:
+        return None
+    ordered: list[tuple[int, int] | None] = [None] * size
+    for i, j in diff:
+        k = m[i][j] - 1
+        if not 0 <= k < size or ordered[k] is not None:
+            return None
+        ordered[k] = (i, j)
+    return ordered  # type: ignore[return-value]
 
 
 def combine(cheats: list[Cheat], name: str | None = None) -> Cheat:
