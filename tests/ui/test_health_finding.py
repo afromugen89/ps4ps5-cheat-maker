@@ -364,3 +364,34 @@ def test_tree_pick_survives_a_new_scan_and_found_rows_are_selected(win, fake):
     f.tree.clearSelection()
     f.use_found(COPIES[1], ValueType.FLOAT)  # e.g. Test the hits picked a copy
     assert f.selected().address == COPIES[1]
+
+
+# -- groups ready when listed (Kein, 2026-11-10) ----------------------------------------
+MANY = [HEAP_BASE + 0x800 + k * 0x20 for k in range(12)]  # 12 copies, more than a handful
+
+
+def show_many(fake, v: float) -> None:
+    for a in MANY:
+        fake.poke(PID, a, struct.pack("<f", v))
+
+
+def test_listed_without_groups_says_what_brings_them(win, fake):
+    """No "Found it" over a long flat list while the copies can't be grouped yet: say
+    the value must change again (Same doesn't help); then the groups show."""
+    f = win.find
+    f.show_n.setValue(100)
+    show_many(fake, 0.4)
+    search(win, "0.4")
+    sc = win.ctl.scanner
+    assert 10 < sc.count <= 100 and f.table.isVisibleTo(f)
+    assert f.hint.text() == hints.FIND_FEW_GROUPING.format(n=2, s="s")
+    assert not f.hint.text().startswith(hints.FIND_FEW)
+    f.still_btn.click()  # Same: nothing changed, still 2 to go
+    assert sc.changes_to_group == 2
+    show_many(fake, 0.3)
+    search(win, "0.3")
+    assert f.hint.text() == hints.FIND_FEW_GROUPING.format(n=1, s="")
+    show_many(fake, 0.2)
+    search(win, "0.2")
+    assert sc.changes_to_group == 0 and f.grouped and f.tree.isVisibleTo(f)
+    assert f.hint.text().startswith(hints.FIND_FEW)

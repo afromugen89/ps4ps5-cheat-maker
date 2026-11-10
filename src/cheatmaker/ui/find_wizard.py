@@ -34,7 +34,7 @@ from cheatmaker.core.guide import Action, Guide, Scan, Shows, Suggestion
 from cheatmaker.core.hit_tester import TEST_LIMIT
 from cheatmaker.core.pointers import Chain
 from cheatmaker.core.scan_log import way_label
-from cheatmaker.core.scanner import ABOUT, MAX_SHOW, NOTED, TOO_MANY, Match
+from cheatmaker.core.scanner import ABOUT, FEW_MATCHES, MAX_SHOW, NOTED, TOO_MANY, Match
 from cheatmaker.core.templates import TEMPLATES, make_cheat
 from cheatmaker.core.values import (
     OF_FULL,
@@ -434,6 +434,13 @@ class FindWizard(QWidget):
             self.hint.setText(
                 hints.FIND_PERCENT_TOO_MANY if sc.note == TOO_MANY else hints.FIND_PERCENT_NOTED
             )
+        elif sc.few_left and count > FEW_MATCHES and sc.changes_to_group:
+            # Listed, but the groups can't be told apart yet: say what brings them,
+            # rather than "Found it" over a long flat list of copies. A handful of
+            # matches is "Found it" as before: Test the hits sorts those out quickly.
+            n = sc.changes_to_group
+            self.hint.setText(hints.FIND_FEW_GROUPING.format(n=n, s="" if n == 1 else "s"))
+            self._suggest(tip, show_text=False)
         elif sc.few_left and count > 1:
             self.hint.setText(f"{hints.FIND_FEW} {hints.FIND_TEST_HITS}")
             self._suggest(tip, show_text=False)

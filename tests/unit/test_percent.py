@@ -11,7 +11,7 @@ from cheatmaker.console.client import ScanHit
 from cheatmaker.console.fake import FakeConsole
 from cheatmaker.console.local_scan import way_parts
 from cheatmaker.core import percent_filter as pf
-from cheatmaker.core.scanner import NOTED, TOO_MANY, Scanner
+from cheatmaker.core.scanner import NOTED, RECORD_LIMIT, TOO_MANY, Scanner
 from cheatmaker.core.session import Session
 from cheatmaker.core.values import (
     FRACTION,
@@ -412,18 +412,18 @@ def test_scanner_keeps_values_and_groups_linked_matches(fake, session):
     show_hp(fake, 250)
     sc = Scanner(session)
     sc.mark_full()
-    assert sc.recorded == 0 and sc.groups() == [], "too many to keep values"
+    assert sc.count <= RECORD_LIMIT and sc.recorded == 1, "few enough: values kept at once"
+    assert sc.groups() == []
     show_hp(fake, 100)
     sc.percent_scan(40, 1.0)
-    assert sc.recorded == 1 and sc.groups() == [], "one scan isn't enough"
-    show_hp(fake, 50)
-    sc.percent_scan(20, 1.0)
     assert sc.recorded == 2 and sc.groups() == [], "two values are one change: not enough"
+    assert sc.changes_to_group == 1
     show_hp(fake, 25)
     sc.percent_scan(10, 1.0)
     [g] = sc.groups()
+    assert sc.changes_to_group == 0
     assert {m.address for m in g.members} == {MAX_HP, HP_FRAC} and g.head_likely
-    assert sc.values[(MAX_HP, F)] == [100.0, 50.0, 25.0]
+    assert sc.values[(MAX_HP, F)] == [250.0, 100.0, 25.0]
     assert sc.tags[(HP_FRAC, F)] == FRACTION
 
 
