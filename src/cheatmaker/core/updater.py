@@ -27,7 +27,7 @@ import json
 import logging
 import re
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -94,6 +94,25 @@ class Signature:
         return len(data) >= len(self) and all(
             not m or data[i] == b for i, (b, m) in enumerate(zip(self.data, self.mask, strict=True))
         )
+
+
+def loose(sig: Signature) -> Signature | None:
+    """``sig`` with the first instruction's memory displacement also left open (the
+    field number in ``[r12+2ACh]``: the field may move inside the object after an
+    update). None if that instruction has no displacement to open."""
+    decoder = ix.Decoder(64, sig.data)
+    ins = decoder.decode()
+    if ins.code == ix.Code.INVALID or ins.len > len(sig):
+        return None
+    co = decoder.get_constant_offsets(ins)
+    if not co.has_displacement:
+        return None
+    mask = bytearray(sig.mask)
+    lo = co.displacement_offset
+    mask[lo : lo + co.displacement_size] = bytes(co.displacement_size)
+    if bytes(mask) == sig.mask or not any(mask):
+        return None
+    return Signature(sig.data, bytes(mask))
 
 
 def _volatile(decoder: ix.Decoder, ins: ix.Instruction) -> list[tuple[int, int]]:
@@ -174,13 +193,40 @@ class CodeImage:
                 return d[offset - s : offset - s + size]
         return b""
 
-    def zero_run(self, size: int, gap: int = 16) -> int:
+    def overlay(self, originals: Iterable[tuple[int, bytes]]) -> CodeImage:
+        """A copy with ``(offset, bytes)`` put back: the game's own bytes over our jumps,
+        routines and patches, so what is learned from it holds with cheats on or off.
+        Bytes outside the code are left out."""
+        blocks = [(s, bytearray(d)) for s, d in self.blocks]
+        for off, data in originals:
+            for s, d in blocks:
+                lo, hi = max(off, s), min(off + len(data), s + len(d))
+                if lo < hi:
+                    d[lo - s : hi - s] = data[lo - off : hi - off]
+        return CodeImage([(s, bytes(d)) for s, d in blocks])
+
+    def zero_run(
+        self,
+        size: int,
+        gap: int = 16,
+        *,
+        reserved: Iterable[tuple[int, int]] = (),
+        skip: int = 0,
+    ) -> int:
         """Offset of ``size`` spare zero bytes near the end of the code (16-aligned),
-        leaving ``gap`` zero bytes after the game's last instruction."""
+        leaving ``gap`` zero bytes after the game's last instruction. ``reserved``
+        module ranges (start, end) count as in use, and the last ``skip`` bytes of the
+        code are left alone (rooms other features place from the end)."""
         start, data = max(self.blocks, key=lambda b: b[0] + len(b[1]))
+        kept = [
+            (max(lo - start, 0), min(hi - start, len(data)))
+            for lo, hi in reserved
+            if lo < start + len(data) and hi > start
+        ]
         run = 0
-        for i in range(len(data) - 1, -1, -1):
-            run = run + 1 if data[i] == 0 else 0
+        for i in range(len(data) - 1 - max(skip, 0), -1, -1):
+            free = data[i] == 0 and not any(lo <= i < hi for lo, hi in kept)
+            run = run + 1 if free else 0
             if run >= size + gap + 16:
                 return (start + i + gap + 15) & ~15
         raise UpdateError("no spare space at the end of the game's code for the code caves")
@@ -297,12 +343,38 @@ def learn(cf: CheatFile, image: CodeImage) -> dict[int, Signature]:
     return sigs
 
 
+def learn_at(image: CodeImage, sites: list[tuple[int, int]]) -> dict[int, Signature]:
+    """A signature for each ``(offset, min_len)`` that matches exactly once in ``image``
+    (pass a clean image: see CodeImage.overlay). Sites that aren't code, or can't be
+    told apart within SIG_MAX bytes, are left out."""
+    sigs: dict[int, Signature] = {}
+    for offset, min_len in sites:
+        if not image.contains(offset):
+            log.info("action=learn_signature skip offset=%#x reason=not_code", offset)
+            continue
+        try:
+            sig = make_signature(
+                image.read(offset, SIG_MAX + 16),
+                offset,
+                unique=lambda s: len(image.find(s, 2)) == 1,
+                min_len=max(SIG_MIN, min_len),
+            )
+        except ValueError:
+            continue
+        if len(image.find(sig, 2)) != 1:
+            log.info("action=learn_signature skip offset=%#x reason=not_unique", offset)
+            continue
+        sigs[offset] = sig
+    return sigs
+
+
 # -- move (new version running) -----------------------------------------------------
 @dataclass
 class UpdateReport:
     moved: list[str] = field(default_factory=list)
     failed: dict[str, str] = field(default_factory=dict)
     guessed: list[str] = field(default_factory=list)  # found without a learned signature
+    failed_at: dict[str, int] = field(default_factory=dict)  # old offset of the first bad line
 
     def summary(self, version: str) -> str:
         total = len(self.moved) + len(self.failed)
@@ -368,8 +440,13 @@ def update_file(
     sigs: dict[int, Signature],
     image: CodeImage,
     new_version: str,
+    *,
+    reserved: Iterable[tuple[int, int]] = (),
+    cave_skip: int = 0,
 ) -> tuple[CheatFile, UpdateReport]:
-    """A copy of ``cf`` moved to the running version (whose code is ``image``)."""
+    """A copy of ``cf`` moved to the running version (whose code is ``image``). The
+    caves' new room is never in a ``reserved`` module range nor the last ``cave_skip``
+    bytes of the code (see CodeImage.zero_run)."""
     lay = _layout(cf)
     report = UpdateReport()
     problems: dict[int, str] = {}
@@ -399,7 +476,8 @@ def update_file(
     cave_delta: int | None = None
     if block is not None:
         try:
-            cave_delta = image.zero_run(block[1] - block[0]) - block[0]
+            room = image.zero_run(block[1] - block[0], reserved=reserved, skip=cave_skip)
+            cave_delta = room - block[0]
         except UpdateError as exc:
             for loc in lay.caves + lay.inside:
                 problems[loc.offset] = str(exc)
@@ -437,6 +515,8 @@ def update_file(
     for c in cf.cheats:
         if c.session_only:
             report.failed[c.name] = "this session only"
+            if c.locations:
+                report.failed_at[c.name] = c.locations[0].offset
             continue
         # report the root cause first: a patch not found, before the cave that jumps to it
         first = sorted(c.locations, key=lambda loc: loc not in lay.patches)
@@ -449,6 +529,8 @@ def update_file(
         others = [loc for loc in c.locations if loc.kind is not LocationKind.CODE_PATCH]
         if bad or missing or others:
             report.failed[c.name] = bad[0] if bad else "it changes saved values, not code"
+            first_bad = [loc for loc in first if loc.offset in problems] or missing or others
+            report.failed_at[c.name] = first_bad[0].offset
             continue
         cheats.append(
             replace(c, locations=[lines[loc.offset] for loc in c.locations], enabled=False)
@@ -500,7 +582,9 @@ __all__ = [
     "UpdateReport",
     "is_cave",
     "learn",
+    "learn_at",
     "load_signatures",
+    "loose",
     "make_signature",
     "patch_lines",
     "read_code_image",
