@@ -134,5 +134,10 @@ def test_watch_returns_hits_with_registers(client):
     access = client.watch(PID, HEALTH_ADDR, 4, "access", 1.0)
     assert access[0] == reader and len(access) == len(writes) + 1
     assert client.watch_writes(PID, HEALTH_ADDR, 4, 1.0) == [h.rip for h in writes]
+    asked = []
+    until = lambda hits, elapsed: asked.append((list(hits), elapsed)) or False  # noqa: E731
+    assert client.watch(PID, HEALTH_ADDR, 4, "write", 1.0, until=until) == writes
+    assert client.watch_writes(PID, HEALTH_ADDR, 4, 1.0, until=until) == [h.rip for h in writes]
+    assert asked and asked[-1][0] == writes, "until sees the hits so far"
     with pytest.raises(ValueError):
         client.watch(PID, HEALTH_ADDR, 4, "exec", 1.0)

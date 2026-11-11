@@ -18,6 +18,7 @@ from cheatmaker.ui.messages import GENERIC, report, user_message
         (e.LockFailed("nothing"), "Couldn't lock this value (nothing)"),
         (e.ProjectFileError("x"), 'Cheat Maker\'s saved "find it again" notes'),
         (e.FindFailed("Couldn't find Health this time."), "Couldn't find Health this time."),
+        (e.BuildFailed("Nothing changed it."), "Nothing changed it."),
         (ValueError("Type a number first."), "Type a number first."),
         (RuntimeError("boom"), GENERIC),
     ],

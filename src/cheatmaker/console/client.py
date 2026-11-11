@@ -94,6 +94,11 @@ class WatchHit:
         return self.regs.get(name.lower())
 
 
+WatchUntil = Callable[[list[WatchHit], float], bool]
+"""``until(hits so far, seconds since the watch started)``: return True to end a watch
+early (enough hits, or the player pressed Cancel)."""
+
+
 @runtime_checkable
 class ConsoleClient(Protocol):
     def version(self) -> str: ...
@@ -189,18 +194,36 @@ class ConsoleClient(Protocol):
         ...
 
     def watch(
-        self, pid: int, addr: int, size: int, kind: WatchKind, timeout_s: float
+        self,
+        pid: int,
+        addr: int,
+        size: int,
+        kind: WatchKind,
+        timeout_s: float,
+        *,
+        until: WatchUntil | None = None,
     ) -> list[WatchHit]:
         """Hardware watchpoint on ``addr`` for ``timeout_s`` seconds (at most 16 hits).
-        Each hit carries the RIP just past the instruction and the registers."""
+        Each hit carries the RIP just past the instruction and the registers.
+
+        ``until`` is asked after each hit and while no hit comes (about twice a
+        second); when it returns True the watch ends with the hits so far."""
         ...
 
-    def watch_writes(self, pid: int, addr: int, size: int, timeout_s: float) -> list[int]:
+    def watch_writes(
+        self,
+        pid: int,
+        addr: int,
+        size: int,
+        timeout_s: float,
+        *,
+        until: WatchUntil | None = None,
+    ) -> list[int]:
         """Watch ``addr`` for writes. Returns the RIP reported after each write.
 
         x86 data watchpoints trap *after* the writing instruction, so each RIP
         points just past the writer; core.locker finds the instruction itself.
-        Same as ``[h.rip for h in watch(pid, addr, size, "write", timeout_s)]``.
+        Same as ``[h.rip for h in watch(pid, addr, size, "write", timeout_s, until=until)]``.
         """
         ...
 

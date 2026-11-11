@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 
 from cheatmaker.core.cheats import Cheat
 from cheatmaker.logs import read_latest_log
+from cheatmaker.ui.build_dialog import MakeItWorkDialog
 from cheatmaker.ui.cheats_view import CheatsView
 from cheatmaker.ui.connect_view import ConnectView
 from cheatmaker.ui.controller import Controller
@@ -58,6 +59,8 @@ class MainWindow(QMainWindow):
         ctl.message.connect(self.status.setText)
         self.copy_log_btn.clicked.connect(self.copy_log)
         self.cheats.open_lock = self.open_lock
+        self.cheats.open_build = self.open_build
+        self.find.open_build = self.open_build
         self.cheats.open_save = self.open_save
         self.cheats.finder.open_search = self.open_search
         ctl.cheats_changed.connect(self._cheat_added)
@@ -80,6 +83,13 @@ class MainWindow(QMainWindow):
 
     def open_lock(self, cheat: Cheat) -> None:
         LockWizard(self.ctl, cheat, self).exec()
+
+    def open_build(self, **kw) -> None:
+        """Make it work (spec-cheat-builder) from Find or My cheats."""
+        self.make_build_dialog(**kw).exec()
+
+    def make_build_dialog(self, **kw) -> MakeItWorkDialog:
+        return MakeItWorkDialog(self.ctl, parent=self, **kw)
 
     def open_save(self) -> None:
         SaveDialog(self.ctl, self).exec()

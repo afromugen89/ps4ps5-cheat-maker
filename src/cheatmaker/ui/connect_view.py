@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QLineEdit, QPushButton, QWidget
 
+from cheatmaker.core import build_notes
 from cheatmaker.core.session import GameInfo
 from cheatmaker.errors import GameNotFound
 from cheatmaker.ui import hints
 from cheatmaker.ui.controller import Controller
-from cheatmaker.ui.messages import NO_GAME
+from cheatmaker.ui.messages import NO_GAME, report
 
 
 def describe_game(g: GameInfo) -> str:
@@ -48,9 +49,18 @@ class ConnectView(QWidget):
 
         def work():
             self.ctl.session.connect(ip, port)
-            return self._detect()
+            game = self._detect()
+            return game, self._left_over_fix() if game is not None else None
 
         self.ctl.tasks.run(work, self._connected, self._connect_failed)
+
+    def _left_over_fix(self) -> str | None:
+        """A Make it work test fix still open from last time (spec-cheat-builder B6)."""
+        try:
+            return build_notes.check_on_connect(self.ctl.session)
+        except Exception as exc:  # the notes must never stop a connect; logged
+            report(exc, "build")
+            return None
 
     def _detect(self) -> GameInfo | None:
         try:
@@ -58,13 +68,16 @@ class ConnectView(QWidget):
         except GameNotFound:
             return None
 
-    def _connected(self, game: GameInfo | None) -> None:
+    def _connected(self, result: tuple[GameInfo | None, str | None]) -> None:
+        game, left_over = result
         self.ip.setText(self.ctl.session.ip)
         self.ctl.settings.last_ip = self.ctl.session.ip
         self.ctl.settings.save()
         self.ctl.connection_changed.emit(True)
         if game is None:
             self.ctl.message.emit(NO_GAME)
+        elif left_over:
+            self.ctl.message.emit(left_over)
 
     def _connect_failed(self, exc: BaseException) -> None:
         self._on_connection(False)

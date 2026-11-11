@@ -22,6 +22,7 @@ from cheatmaker.console.client import (
     ScanHit,
     WatchHit,
     WatchKind,
+    WatchUntil,
 )
 from cheatmaker.console.local_scan import (
     LocalScanSession,
@@ -60,6 +61,9 @@ class FakeConsole:
         self.connected = True
         self._app_closed = False  # the app closed the link (it can open a new one)
         self.fail_writes = False
+        # Writes to code are acknowledged but change nothing (seen on some consoles;
+        # locker.patch_landed is there to notice).
+        self.drop_code_writes = False
         self.supports_unknown_scan = True
         # addr -> RIPs that "write" it while watched (set by tests / dumps)
         self.writers: dict[int, list[int]] = {}
@@ -68,6 +72,7 @@ class FakeConsole:
         self.write_hits: dict[int, list[WatchHit]] = {}
         self.read_hits: dict[int, list[WatchHit]] = {}
         self.watched: list[tuple[int, int, str, float]] = []  # (addr, size, kind, timeout)
+        self.until_answers: list[bool] = []  # what each watch's ``until`` said
         # Called before every read: lets a test "run the game" between requests
         # (e.g. tests/fakegame.py runs installed capture routines).
         self.game_ticks: list[Callable[[], None]] = []
@@ -196,7 +201,9 @@ class FakeConsole:
             raise WriteFailed("the console refused the write (fake)")
         with self._lock:
             try:
-                self.poke(pid, addr, data)
+                region, _off = self._locate(pid, addr, len(data))
+                if not (self.drop_code_writes and region.map.executable):
+                    self.poke(pid, addr, data)
             except ReadFailed as exc:
                 raise WriteFailed(str(exc)) from None
             self.writes.append((pid, addr, bytes(data)))
@@ -333,8 +340,17 @@ class FakeConsole:
         return out
 
     def watch(
-        self, pid: int, addr: int, size: int, kind: WatchKind, timeout_s: float
+        self,
+        pid: int,
+        addr: int,
+        size: int,
+        kind: WatchKind,
+        timeout_s: float,
+        *,
+        until: WatchUntil | None = None,
     ) -> list[WatchHit]:
+        """All the recorded hits at once. ``until`` is asked once, with them all and
+        no time passed (the fake doesn't wait)."""
         self._alive()
         self._proc(pid)
         if kind not in ("write", "access"):
@@ -344,10 +360,21 @@ class FakeConsole:
         if writes is None:
             writes = [WatchHit(r) for r in self.writers.get(addr, [])]
         hits = list(writes) if kind == "write" else [*self.read_hits.get(addr, []), *writes]
-        return hits[:16]
+        hits = hits[:16]
+        if until is not None:
+            self.until_answers.append(bool(until(list(hits), 0.0)))
+        return hits
 
-    def watch_writes(self, pid: int, addr: int, size: int, timeout_s: float) -> list[int]:
-        return [h.rip for h in self.watch(pid, addr, size, "write", timeout_s)]
+    def watch_writes(
+        self,
+        pid: int,
+        addr: int,
+        size: int,
+        timeout_s: float,
+        *,
+        until: WatchUntil | None = None,
+    ) -> list[int]:
+        return [h.rip for h in self.watch(pid, addr, size, "write", timeout_s, until=until)]
 
     def close(self) -> None:
         if self.connected:

@@ -115,3 +115,15 @@ def test_freeze_logs_address_and_bytes(session, caplog):
     fr.freeze("k", [(PID, HEALTH_ADDR, b"\x9f\x86\x01\x00")])
     fr.stop()
     assert f"action=freeze key=k addr={HEALTH_ADDR:#x} bytes=9f860100" in caplog.text
+
+
+def test_mark_on_writes_nothing(session, fake):
+    live = LiveCheats(session, Freezer(session))
+    c = Cheat("Kept", [Location(LocationKind.CODE_PATCH, 0x100, b"\x90", b"\xcc")])
+    writes = len(fake.writes)
+    live.mark_on(c)
+    assert c.enabled and live.active[id(c)] is c and len(fake.writes) == writes
+    frozen = _health_cheat()
+    frozen.freeze = True
+    with pytest.raises(ValueError):
+        live.mark_on(frozen)

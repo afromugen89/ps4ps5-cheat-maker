@@ -73,3 +73,9 @@ class FindFailed(CheatMakerError):
     """Find it next time / Find it again couldn't do it. The message is plain text."""
 
     action = "find_again"
+
+
+class BuildFailed(CheatMakerError):
+    """Make it work couldn't make a cheat. The message is plain text for the player."""
+
+    action = "build"

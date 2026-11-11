@@ -41,6 +41,18 @@ class ValueType(Enum):
     def decode(self, data: bytes) -> float | int:
         return struct.unpack(self.fmt, data[: self.size])[0]
 
+    def text(self, value: float | int) -> str:
+        """``value`` as the player would type it: for decimals the shortest text that
+        stores the very same bytes (``1234567``, not ``1.23457e+06``)."""
+        if not self.is_float:
+            return str(int(value))
+        raw = self.encode(value)
+        for digits in range(6, 18):
+            t = f"{value:.{digits}g}"
+            if self.encode(float(t)) == raw:
+                return t
+        return repr(float(value))
+
     def int_range(self) -> tuple[int, int]:
         bits = self.size * 8
         return -(1 << (bits - 1)), (1 << (bits - 1)) - 1

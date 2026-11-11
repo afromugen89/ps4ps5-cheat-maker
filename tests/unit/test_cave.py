@@ -54,17 +54,34 @@ def test_target_and_refusals():
 
 
 def test_player_only_code_matches_the_known_returnal_cheat():
+    # The bytes changed on 2026-11-11 (spec-cheat-builder, "two existing flags bugs"):
+    # the old cave ran its own ``cmp`` and left those flags for the game, and skipped
+    # the game's write on the player's path. Now the check sits inside pushfq/popfq
+    # past the red zone, and the game's write runs before the kept value goes over it.
+    # Player-only cheats saved before keep their old bytes.
     span = cv.decode_at(VMOVSS, 0x2B7B43F)
     code = cv.player_only_code(
         span, cv.writer_target(WRITER), 8, 0x40048, struct.pack("<f", 999.0), 0x65D7DB0
     )
     f = ix.Formatter(ix.FormatterSyntax.INTEL)
     text = [f.format(i) for i in ix.Decoder(64, code, ip=0x65D7DB0)]
-    assert text[0] == "cmp dword ptr [r12+8],40048h"
-    assert text[1].startswith("jne")
-    assert text[2] == "mov dword ptr [r12+2ACh],4479C000h"  # 999.0
-    assert text[3] == "jmp 0000000002B7B449h"  # back after the hooked instruction
-    assert text[4] == "vmovss [r12+2ACh],xmm1"  # everyone else: original write
+    assert text[:3] == ["lea rsp,[rsp-80h]", "pushfq", "cmp dword ptr [r12+8],40048h"]
+    assert text[3].startswith("jne")
+    assert text[4:9] == [
+        "popfq",
+        "lea rsp,[rsp+80h]",
+        "vmovss [r12+2ACh],xmm1",  # the game's write still runs
+        "mov dword ptr [r12+2ACh],4479C000h",  # then 999.0 over it
+        "jmp 0000000002B7B449h",  # back after the hooked instruction
+    ]
+    assert text[9:] == [  # everyone else: flags back, then the original write
+        "popfq",
+        "lea rsp,[rsp+80h]",
+        "vmovss [r12+2ACh],xmm1",
+        "jmp 0000000002B7B449h",
+    ]
+    jne = list(ix.Decoder(64, code, ip=0x65D7DB0))[3]
+    assert jne.near_branch_target == 0x65D7DB0 + code.rindex(b"\x9d"), "to the last popfq"
 
 
 def test_collect_compare_and_build_cheat():
@@ -261,3 +278,37 @@ def test_collect_leaves_the_sampler_code_for_threads_still_inside():
     cv.collect_objects(s, WRITER, 0.25, sleep=lambda _t: None)
     assert fake.peek(PID, HOOK, 10) == VMOVSS, "unhooked"
     assert fake.peek(PID, cave, 4) != bytes(4), "cave code left in place"
+
+
+# -- Player only leaves the game's flags (spec-cheat-builder, flags bug 2) ---------------
+def _red_zone(g):
+    from tests import fakegame as fg
+
+    return g.fake.peek(fg.PID, fg.RSP - cv.RED_ZONE, cv.RED_ZONE)
+
+
+@pytest.mark.parametrize("new", [5, 0, -3], ids=["alive", "zero", "below"])
+def test_player_only_keeps_the_games_flags_and_registers(new):
+    """``sub [rax+2B0h],ecx ; jle dead``: the old cave left its own ``cmp`` flags (equal,
+    so jle "killed" the player whatever the damage). Now both paths leave exactly the
+    flags and registers the game's own instruction leaves."""
+    from tests import fakegame as fg
+
+    want = {}
+    for who in ("player", "enemy"):
+        g = fg.build()
+        obj = g.player if who == "player" else g.enemies[0]
+        cpu = g.hit(obj, new, "int32")
+        want[who] = (cpu.snapshot(), cpu.status(), _red_zone(g))
+
+    g = fg.build()
+    writer = Writer(fg.SUB_SITE, fg.SUB_W, "sub [rax+2B0h],ecx", 1)
+    field = cv.FieldGuess(8, 0x40048, (0x30010,))
+    cheat = cv.make_player_only_cheat(g.session, writer, field, struct.pack("<i", 100), "HP")
+    for loc in cheat.locations:
+        g.fake.write(fg.PID, fg.BASE + loc.offset, loc.on)
+    for who, obj in (("player", g.player), ("enemy", g.enemies[0])):
+        cpu = g.hit(obj, new, "int32")
+        assert (cpu.snapshot(), cpu.status(), _red_zone(g)) == want[who], who
+    assert g.value(g.player, "int32") == 100, "the player keeps the value"
+    assert g.value(g.enemies[0], "int32") == new, "enemies take the damage"

@@ -60,7 +60,10 @@ easy game** so you learn the moves before you take on a hard one.
 6. Go to **My cheats** and look at the **Works after restart?** column:
    - **Yes**: you're done. Go to step 8.
    - **This session only**: the value moves every time the game starts. Do step 7.
-7. **Make it stick**, in one of two ways:
+7. **Make it stick**, in one of three ways:
+   - **Make it work...**: the easiest. Pick what the cheat should do, press Start and
+     play; the app finds the game code, tries safe fixes one by one, and keeps the one
+     that works. The result runs in CheatRunner with the PC off.
    - **Lock it**: finds the game code that changes the value and switches it off. This
      makes a cheat CheatRunner can run with the PC off.
    - **Find it next time**: teaches the app how the game keeps the value, so it finds it
@@ -264,7 +267,7 @@ uses that value instead.
 - **Pointer scan**: looks for a path from the game's fixed memory to this value, so you
   can reach it after a restart. Run it, restart the game, find the value again, then
   press **Re-check with this address** to keep only the paths that still work. This takes
-  a few minutes. Most people won't need it: **Find it next time** (section 6.3) does the
+  a few minutes. Most people won't need it: **Find it next time** (section 6.4) does the
   same job for you.
 - **Scan files**: every scan (the first one and each one after it) saves its matches,
   address in hex and value, to its own text file: `scan-001.txt`, `scan-002.txt`, and so
@@ -291,7 +294,10 @@ Each cheat has:
   - **Yes**: the value lives in the same place every time. You can save it as it is.
   - **This session only**: the value moves every time the game starts. It works now but
     can't be saved for CheatRunner yet.
-  - **Found again each run**: the app has learned how to find it after a restart (6.3).
+  - **Found again each run**: the app has learned how to find it after a restart (6.4).
+  - **Check after restart**: made by **Make it work** with **Only me**, using a detail
+    of your character that may change after a restart. Restart the game once and check
+    it still works (6.2).
 
 **Combine**: some games need two values kept at once (Returnal's health needs two). Make
 a cheat for each, Ctrl-click both in **My cheats**, and press **Combine**. You get one
@@ -322,14 +328,73 @@ hit enemies. The app finds what marks you apart from enemies and changes only yo
 Pick the top field, press **Test it**, take a hit (your value should stay, enemies should
 still die), then **Keep it**.
 
-### 6.2 Find it again
+**Player only cheats made before November 11, 2026** keep their old game code, which could
+confuse the game's own checks right after a hit (for example a game that tests "health
+at zero?" right after the damage). Player only now leaves the game's checks alone. If an
+old Player only cheat acts strangely, delete it and make it again (or use **Make it
+work** with **Only me**).
+
+### 6.2 Make it work
+
+**Make it work...** does what Lock it and Player only do, by itself: it finds the game
+code that changes the value, tries only fixes that are safe, tests each one while you
+play, and keeps the first one that works. If a fix doesn't work, the game is put back
+before the next one is tried.
+
+You'll find the button on the **Find** tab (next to **Make a cheat**) and in **My cheats**
+(next to **Lock it**). It works on one value at a time: a decimal, or a whole number of 4
+or 8 bytes. For a combined cheat or one that is found again each run, the button is off
+("Pick a single value.").
+
+1. **Save your game first.** The first time each run, the app reminds you: a fix that
+   doesn't work may make the game restart.
+2. Pick what the cheat should do:
+   - **Never goes down**: anything that would lower the value is ignored. Raising it
+     still works (you can still pick up health or money).
+   - **Always full**: the value always goes back to **Full**. Fill it up before you press
+     Start: the value at Start is Full. To use another number, type it in the box.
+   - **Half damage**: anything that lowers the value lowers it by half as much.
+   - **Only me** (tick box): the cheat works for your character only. Enemies go through
+     the game's own code, so they still take damage.
+3. Press **Start**. If the row is in a group that hasn't been checked yet, the app first
+   runs **Check which is real** on that group (section 5.7). If it can't tell, it uses
+   your row and says "Not sure this is the real one."
+4. **Make the value change** within 30 seconds (take a hit, spend money). With Only me,
+   the app then asks you to **get hit and hit enemies** for 20 seconds.
+5. The app tests each fix for 20 seconds: "Testing fix 1 of 3: keep playing and take a
+   hit." Keep playing and take a hit. Sometimes it asks a question:
+   - **Did you take a hit?**: for a fix it can't watch by itself. Press **Yes, I got
+     hit** only if you did.
+   - **Did enemies still take damage?**: with Only me, when it couldn't see an enemy get
+     hurt. Press **Yes** only if they did.
+6. When a fix works, the cheat goes into **My cheats**, switched on, named like "Health:
+   Never goes down". From My cheats it replaces the row you started from.
+
+Good to know:
+
+- If you didn't get hit during a test, the app tries the same fix once more.
+- If enemies stop dying, make it again with **Only me** ticked.
+- **Cancel**, closing the window, or disconnecting puts the game back as it was.
+- If the game stops responding during a test, the app puts the game back and tries the
+  next fix. A fix that crashed the game is never tried again for that game version
+  (leaving the game with the PS button doesn't count as a crash). If the PS5 didn't
+  answer at all, the app stops and says "Restart the game: fixes only live in memory
+  until then."
+- If no cheat is made, the My cheats row you started from is switched back on.
+- **Advanced: show details** lists the game code it caught, the ones it skipped and why,
+  and every fix it tried.
+- Values that need two places held at once (like Returnal's health and its fraction) are
+  not done by Make it work yet: make it work on one and use Lock it or Combine for the
+  other.
+
+### 6.3 Find it again
 
 **Find it again** looks for all your remembered values in the game now. Before changing
 anything after a restart, the app asks once: *"Is this your health? It shows 100 right
 now."* Take a hit and watch the number. Press **Yes** only if it changes with yours. If it
 found more than one candidate, it asks you to pick the one that changes.
 
-### 6.3 Find it next time
+### 6.4 Find it next time
 
 For values that move every restart or every new area, **Find it next time** teaches the
 app how the game keeps them.
@@ -350,7 +415,7 @@ when you disconnect or close Cheat Maker.
 cheat from the same place in the game's code that keeps your value (only yours), which
 CheatRunner can run with the PC off.
 
-### 6.4 Save and send
+### 6.5 Save and send
 
 Press **Save...**:
 
@@ -364,7 +429,7 @@ Press **Save...**:
 run are kept in the app's own notes for this game, and come back the next time you
 connect.
 
-### 6.5 After a game update
+### 6.6 After a game update
 
 When you open a cheat file made for an older version of the game, a warning appears with
 an **Update for this version** button. It finds your cheats in the new version's code and
@@ -467,6 +532,12 @@ health cheat for CheatRunner.
 | Couldn't send the file to the PS5. | Load the ftpsrv payload, or copy the saved file yourself. |
 | The PS5 answered in a way we didn't expect. | Restart PS5Debug-NG and try again. |
 | Something went wrong. | Press **Copy log** and send it with your bug report. |
+| Nothing changed it. Try again and make it change while the bar moves. | Make it work didn't see the value change. Press Start again and take a hit (or spend) straight away. |
+| None of the safe fixes worked for this value. Your game is unchanged. | Try another effect, tick Only me, or use Lock it. **Advanced: show details** shows what was skipped and why. |
+| Couldn't tell you apart from enemies. | During Collect, get hit *and* hit several enemies, then try again. |
+| This kind of value isn't supported yet. Use Lock it. | Make it work handles decimals and whole numbers of 4 or 8 bytes only. |
+| Restart the game: fixes only live in memory until then. | The PS5 stopped answering during a test. Restarting the game removes the test fix. |
+| Fix N crashed the game last time. Your game is unchanged after a restart. | Nothing to do: that fix won't be tried again. |
 
 ---
 
@@ -483,12 +554,14 @@ health cheat for CheatRunner.
 - **Freeze**: keep writing the same value so it can't change.
 - **This session only**: the value is somewhere different each time the game starts.
 - **Lock it**: switch off the bit of game code that changes the value.
+- **Make it work**: let the app find, test and keep a safe fix for a value by itself.
+- **Only me**: a cheat that changes your character's value but not the enemies'.
 - **CheatRunner**: the program on the PS5 that runs saved cheat files without the PC.
 
 ---
 
 ## Good to know
 
-Some of the newer features (Lock it, Player only, Find it next time, Test the hits and the
-percent search with It's full now) are still being checked on a real PS5. If one of them doesn't behave as described, press
+Some of the newer features (Make it work, Lock it, Player only, Find it next time, Test
+the hits and the percent search with It's full now) are still being checked on a real PS5. If one of them doesn't behave as described, press
 **Copy log** and report it.
