@@ -66,7 +66,7 @@ learn everything again. Today:
   [OPEN: Kein, ask first or do it by itself? Default: ask (the player must be in game, and
   hooks get written).]
 - **Not now**: not offered again for this pair of versions. **Advanced: Bring notes from
-  an older version...** stays available.
+  another version...** stays available.
 - Nothing is written to the game before the press. Log:
   `action=carry_offer title=... from=... to=... objects=N cheats=N`.
 - Given notes only for 03.000.005 and 03.001.000 running, when the player connects, then
@@ -183,7 +183,7 @@ learn everything again. Today:
   bringing over, after success, failure or Cancel the contents are byte for byte the
   same.
 - New notes that already hold objects or cheats are never overwritten.
-  **Advanced: Bring notes from an older version...** only adds objects and cheats whose
+  **Advanced: Bring notes from another version...** only adds objects and cheats whose
   names aren't in the new notes yet. [OPEN: default yes]
 - After a successful bring-over, the new version's fingerprints are learned straight away
   from the code already read (AC-U2), so the next update works too.

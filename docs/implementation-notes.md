@@ -451,6 +451,29 @@ tests/qa/test_game_update_qa.py was removed as its bug was fixed.
 - Doc points: guide 6.6 points to section 5 for searching; a combined cheat's No names
   its first brought-over value, not the cheat; the Advanced button says "another
   version"; a cheat whose value came over with no way to be found says "Not brought
-  over: search for it" (`Cheat.carried == "lost"`), not "check it". The spec still says
-  "an older version..." for the button label.
+  over: search for it" (`Cheat.carried == "lost"`), not "check it".
+
+## Bring notes over: re-review and QA re-test fixes (2026-11-11)
+
+- **BUG-11 (Advanced onto a value already here)**: `for_merge(..., left_out=)` leaves out
+  a cheat (single or combined part) whose number the value already in the notes lacks,
+  with "the Health already in your notes has no Health 32" under "Not brought over".
+  The number is not brought over onto the player's value. `ensure_cheats` matches single
+  cheats by name and value/number (several cheats may share a number), then a renamed
+  row by value/number alone; an entry whose value or number is gone is logged
+  (`action=notes_cheat ... result=skipped`), not skipped silently.
+- **BUG-12**: only the first source value with a label takes a lost value's id; others
+  get fresh ids.
+- **BUG-13 / m-d**: if any field would move below 0, no field moves; the
+  `action=carry_fields` line names the hooked field's real shift.
+- **BUG-10**: make_old_notes reads every document before moving anything, writes its
+  record first and updates it after each step (`made`, `aside`); `--undo` only does what
+  the record says is left, so it can run again after a stop half-way.
+- **m-a**: `CarryOver._run_lock` guards `self.run` and `run.installed` between the
+  worker's `_note_install` and `_rollback`/`_finish`.
+- **m-b**: the final fingerprint learning gives `ctl.code_reading` back only if the run
+  took it.
+- **m-c**: `_rollback` sets the run's Cancel before handing back the code read.
+- **Update for this version**: a name used by several cheats is numbered in the summary
+  ("No death #2"), so a moved one and a failed one read apart.
 

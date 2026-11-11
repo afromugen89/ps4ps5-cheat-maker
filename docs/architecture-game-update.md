@@ -79,6 +79,9 @@ question (AC-U8).
 - `ObjectSpec.check: bool = False` -> `"check": true` (brought over, not yet confirmed).
 - `ObjectSpec.relearn_class: bool = False` -> `"relearn_class": true` (class cleared at
   carry, learned again at the first Yes).
+- `ObjectSpec.carried_from: str | None = None` -> `"carried_from": "03.000.005"` (the
+  version this object came from; differs from the notes' after an Advanced merge from
+  another version). The question names it, falling back to `Project.carried_from`.
 - `HookAnchor.sig_unique: bool = False` -> `"signature_unique": true` (checked to match once
   in clean code). Older hooks load False and are relearned (AC-U2).
 - `ProjectCheat.test: bool = False` -> `"test": true` on a combined cheat whose fixed code
@@ -186,7 +189,10 @@ Rules:
   anchors dropped (saved with no way to be found, AC-U7). Static/chain objects, and hooked
   objects with no class collected, get `reset_class`.
 - **assemble**: `Project(title, new_version, process, objects, cheats, history=[],
-  carried_from=old.version)`; every object `check=True`; single cheats always copied;
+  carried_from=old.version)`; every object `check=True` and `carried_from=old.version`;
+  single cheats always copied (Advanced: a cheat on a value the notes already hold
+  counts as brought over via `have`; `for_merge` leaves out, with a reason in the
+  summary, a cheat whose number that value lacks);
   combined only if every fixed part moved (new offsets/bytes, `test=True` if code parts).
   `CarryReport`: `carried`, `check`, `guessed`, `failed: dict[name, reason]`;
   `summary(version)` gives the v2-style line.
