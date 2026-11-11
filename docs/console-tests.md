@@ -27,6 +27,9 @@ If anything fails: press **Copy log** and paste it into the thread.
   falls back to the process list and shows version "unknown"; C1 tells us which.
 - The main module is found by the map name `eboot.bin`; otherwise the lowest executable map is used and logged. C1's
   `manifest.json` confirms the real names for PS5 and PS4 games.
+- **Bring them over** (notes to a new game version) is checked on the fake PS5 only until
+  C21 passes: how long the code read and the class collect take on Returnal (C21a, C21b),
+  and whether a real update keeps the hooked instruction findable (C21c).
 
 ## C7 Pointer scan (added 2026-11-01)
 
@@ -239,3 +242,21 @@ the registers in a watch hit (C20a, logged with the raw packet); that a `rep mov
 reports the RIP of the `rep movs` itself (`rep_at_rip=True (UNVERIFIED...)`, C20a/C20b);
 and that an execute breakpoint doesn't fire again on the same instruction (C20d: a line
 saying "the breakpoint repeats" means it does, and the setting stays off).
+
+## C21 Bring notes to a new game version (added 2026-11-11)
+
+Spec: docs/spec-game-update.md. Needs C10 (and C19 for combined cheats) to pass first.
+Save your game first. `tools/make_old_notes.py` copies the notes and fingerprints
+of the running version as if they were from an older version (it sets the real ones
+aside as `.keep` and puts them back with `--undo`), so C21b to C21g can run before a real
+update. Close Cheat Maker before you run it, both ways.
+
+| # | Test | Steps | Pass when | Send back |
+|---|---|---|---|---|
+| C21a | Fingerprints, old version (reads only) | Returnal with notes from C10 or C19 (health found by the game's code). Connect and keep playing for 3 min. | Log `action=learn_signatures source=notes saved=N` within 3 min; each hook has a fingerprint; no write other than today's hook. | The `action=learn_signature*` and `action=read_code` lines. |
+| C21b | Dry run, Returnal | Close the app, run `python tools/make_old_notes.py PPSA01285 03.000.005 03.000.004`, start the app, Connect. Press **Bring them over**, keep playing, take hits when asked. Tick health, answer Yes, take hits. Then restart the game and connect. | The offer names 03.000.004. Summary "Brought over N of N". Field shift 0 and class the same as before in the log. One question per cheat. Health holds. After the restart, health is found again by the game's code. The 03.000.004 file is unchanged. | The summary, `action=carry_*` lines, time from the press to the summary. Run `--undo` afterwards. |
+| C21c | A real update | Any game with notes: run C21a before updating. Update, Connect, **Bring them over**. Check each cheat. | Each brought-over cheat works after a Yes; each cheat that didn't come over has a plain reason; no crash, no wrong write. | Summary, `action=carry_*` lines, which cheats worked. |
+| C21d | A simple game | A game whose value doesn't move (static) or has a proven memory path. Dry run as C21b with its title ID and version. | Done within 30 s plus the question; no hook, no slot check in the log. | `action=carry_*` lines. |
+| C21e | Cancel | Dry run as C21b, press **Cancel** during "Checking the spare memory". | Stops within 2 s; `action=hook_remove`; no new notes file; offer shows again on the next connect. | The hint and log lines. |
+| C21f | Cheat file with the hook | After C21b, open your saved file that has the find-it-again hook (made for the old version), press **Update for this version**, Save, Send to PS5, restart, turn the hook on in CheatRunner, Connect. | Hook lines rebuilt (not "can't follow"); log `action=hook_install ... already in the game`. | Those log lines and the summary. |
+| C21g | Combined cheat with a fixed part | A combined cheat with a learned part and a Make it work part (C18 + C19). Dry run. | Comes back as one row: "Brought over: test it"; one question; both parts work. | `action=carry_part` lines. |

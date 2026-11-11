@@ -341,3 +341,43 @@ Small changes against the design, each keeping the spec's behaviour:
   refills the table itself); `check_pending` emits it after a Yes there.
 - **`FindAgain.carrying`** is a property with a `carrying_changed` signal so CheatsView
   refreshes its buttons the moment a bring-over starts or ends.
+
+## Bring notes to a new game version, steps 7-12 (2026-11-11)
+
+- **Phased jobs.** A bring-over (`ui/carry.py`, `CarryOver`) is a chain of
+  `ctl.tasks.run` jobs: prepare (read the code, find hook sites, move fixed parts), then
+  per value collect + choose, the slot check + hook, and locate + settle. A pick
+  (`finder.ask_pick`) happens on the UI thread between two jobs; no worker ever waits on
+  a dialog. Each job's result is dropped if the run was rolled back meanwhile, and the
+  Cancel flag is checked before and after every job (core steps stop on it too).
+- **Rollback.** Cancel, an error, a dropped link or another game process takes out every
+  hook this run put in (`finder.take_out`), re-keeps the notes' rooms and saves nothing;
+  the offer shows again (or on the next connect after a dropped link). A value not found
+  by locate has its hook taken out *before* `settle` drops its ways. If that take-out
+  fails, the hook stays recorded in FindAgain but its notes object no longer names it, so
+  it isn't taken out on close (rare: the console refused a write); a later Find it next
+  time reuses the room only if it's free.
+- **The run reads the code once.** The new version's fingerprints are learned from the
+  same image at the end (on a copy, applied on the UI thread), and `NoteFingerprints`
+  is told (`mark_learned`) so it doesn't read again. While `finder.carrying` is set the
+  background learner never starts.
+- **NoteFingerprints** works on a copy of the notes and applies hook fingerprints only if
+  `ctl.project` is still the same object. It doesn't retry by itself when the cheat-file
+  learner held the one code read; the next notes save (Find it again, a confirm, ...) tries
+  again. A cancelled read isn't counted, so the next connect tries again.
+- **Game in front**: Bring them over needs the connected game to be the foreground app;
+  when the PS5 can't say (old PS5Debug-NG), the game being found is enough (the builder's
+  rule).
+- **Advanced** lists older versions (closest first), then newer ones. Into notes that hold
+  values or cheats, `for_merge` adds only new names; `start` always merges into such notes,
+  so they are never overwritten even from the offer.
+- **AC-U9** is `carry.update_with_hooks` (split, v2 move, rebuild, merge back in the file's
+  order); `do_update` reads the old notes read-only and passes this version's notes only
+  if they were brought over (`carried_from` set). Before that, hook lines say "bring your
+  notes over first (My cheats)".
+- **tools/make_old_notes.py**: `--undo` keeps whatever the dry run left for the current
+  version (notes and fingerprints) as `.carried` (`.carried2`, ... if taken), never
+  deleted. A missing current-notes `.keep` stops it with a plain message.
+- Tests: `tests/ui/test_carry_over.py` (offer, run, Cancel at each step, dropped link,
+  merge, AC-U9, dry run with the tool), `tests/ui/test_game_update.py` (question, check it,
+  fingerprints), `tests/unit/test_carry.py`, `tests/unit/test_tools.py`.

@@ -528,10 +528,50 @@ connect.
 
 ### 6.6 After a game update
 
-When you open a cheat file made for an older version of the game, a warning appears with
-an **Update for this version** button. It finds your cheats in the new version's code and
-moves them there. Tick each one to test it, then **Save**: the new file is named for the
-new version.
+**Your notes** (the values the app finds again by itself, and the cheats built on them)
+are kept per game version. After an update the new version has none yet, so the app
+offers to bring them over.
+
+**Before you update**: connect once while the old version still runs and play for a few
+minutes. The app reads the game's code in the background (it only reads) and remembers a
+**fingerprint** of each place it uses, so it can find those places in the new version.
+
+**After the update**: connect. The line above the status says *"Your notes for Returnal are
+for version 03.000.005; the game is now 03.001.000. Press Bring them over and keep playing
+for about 2 minutes."*
+
+1. Press **Bring them over** and keep playing; take a hit when the hint asks. The hint says
+   what it does ("Reading the game's code (reads only)...", "Finding Health in the new
+   version: play normally, take a hit if you can.", "Checking the spare memory (about a
+   minute, keep playing)..."), and a bar shows how far it is. A game whose notes only hold
+   values that don't move, or memory paths, is done in under 30 seconds.
+2. At the end one line says what came over, for example *"Brought over 3 of 4 cheats for
+   version 03.001.000. Check them: Health, Obolites. Not brought over: Shield (the game's
+   code changed where it was found)."*
+3. **Not now** hides the offer for this pair of versions. You can still use **Advanced:
+   Bring notes from an older version...** in My cheats (with *Advanced: show details* on);
+   it lets you pick the version, and into notes that already hold values it adds only
+   values and cheats with new names. Your old notes are only read, never changed.
+
+**Check it**: a brought-over cheat says **Found again each run (check it)** until you
+confirm it. The first time you tick it (each run, until you say Yes) the app asks: *"Is
+this your Health? It was brought over from version 03.000.005 and shows 300 right now.
+Take a hit and watch it change."* Press **Yes** only if it changes with yours; after
+that it asks only the usual question (6.3). **No** changes nothing: search for
+the value again (6.4). A combined cheat asks one question for the whole cheat. A combined
+cheat with fixed changes to the game's code says **Brought over: test it** until you tick
+it once: test it in the game and untick it if it doesn't work.
+
+**A cheat that didn't come over** keeps its reason in the summary. Its value is still in
+your notes: the next time you connect, the app says it couldn't find it and fills in the
+search, so search for it and press **Find it next time** again. A combined cheat that
+didn't come over stays in the old version's notes; make it again.
+
+**Cheat files** made for an older version: a warning appears with an **Update for this
+version** button. It finds your cheats in the new version's code and moves them there.
+Lines that are the find-it-again hook or a cheat that works with the PC off are made again
+from your brought-over notes, so bring your notes over first. Tick each one to test it,
+then **Save**: the new file is named for the new version.
 
 ---
 
@@ -664,6 +704,10 @@ health cheat for CheatRunner.
 - **Lock it**: switch off the bit of game code that changes the value.
 - **Make it work**: let the app find, test and keep a safe fix for a value by itself.
 - **Find the real one behind it**: follow a screen copy back to the value the game uses.
+- **Bring over**: copy your notes from the game's old version to the new one and find
+  every value's new place (6.6).
+- **Fingerprint**: a short piece of the game's code around a place the app uses, with the
+  parts that change between versions left open, so the place can be found after an update.
 - **Only me**: a cheat that changes your character's value but not the enemies'.
 - **CheatRunner**: the program on the PS5 that runs saved cheat files without the PC.
 
@@ -671,6 +715,6 @@ health cheat for CheatRunner.
 
 ## Good to know
 
-Some of the newer features (Make it work, Find the real one behind it, Lock it, Player only, Find it next time, Test
+Some of the newer features (Make it work, Find the real one behind it, Lock it, Player only, Find it next time, Bring them over, Test
 the hits and the percent search with It's full now) are still being checked on a real PS5. If one of them doesn't behave as described, press
 **Copy log** and report it.
