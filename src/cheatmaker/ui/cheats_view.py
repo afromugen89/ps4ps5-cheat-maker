@@ -20,11 +20,14 @@ from PySide6.QtWidgets import (
 )
 
 from cheatmaker import formats
+from cheatmaker.core import anchor_hook as ah
+from cheatmaker.core import carry as cr
 from cheatmaker.core import cave as cv
+from cheatmaker.core import project as pj
 from cheatmaker.core import updater as up
 from cheatmaker.core.cheats import Cheat, Location, LocationKind, combine, versions_differ
 from cheatmaker.core.values import parse_number
-from cheatmaker.errors import CheatMakerError
+from cheatmaker.errors import CheatMakerError, ProjectFileError
 from cheatmaker.ui import hints
 from cheatmaker.ui.controller import Controller
 from cheatmaker.ui.find_again import FindAgain, LearnDialog
@@ -39,8 +42,12 @@ CHECK_AFTER_RESTART = "Check after restart"
 
 
 def keeps_text(c: Cheat) -> str:
+    if c.carried == "test":  # brought-over code parts, not ticked yet (spec AC-U8)
+        return hints.KEEPS_TEST
+    if c.carried == "lost":  # its value came over with no way to be found
+        return hints.KEEPS_LOST
     if c.found_again:  # one found-again value, or a combined cheat with nothing moving
-        return FOUND_AGAIN
+        return hints.KEEPS_CHECK if c.carried == "check" else FOUND_AGAIN
     if c.check_after_restart:  # Make it work, Only me by a field (spec-cheat-builder B8)
         return CHECK_AFTER_RESTART
     return "This session only" if c.session_only else "Yes"
@@ -111,6 +118,8 @@ class CheatsView(QWidget):
         self.again_btn.setToolTip("Look for your remembered values in the game now")
         self.skip_hook = QCheckBox("Find again without the game's code (slower, for testing)")
         self.skip_hook.setVisible(False)  # Advanced only (console test C10e)
+        self.bring_btn = QPushButton(hints.ADVANCED_BRING)
+        self.bring_btn.setVisible(False)  # Advanced only (spec-game-update AC-U1)
         self.open_btn = QPushButton("Open cheat file...")
         self.save_btn = QPushButton("Save...")
         self.update_btn = QPushButton("Update for this version")
@@ -119,6 +128,7 @@ class CheatsView(QWidget):
         )
         self.update_btn.setVisible(False)
         self._learning = False
+        self._updating = False  # Update for this version is running
         self._learn_tried: set[tuple[str, str, int]] = set()
         buttons = QHBoxLayout()
         for w in (
@@ -134,6 +144,7 @@ class CheatsView(QWidget):
             buttons.addWidget(w)
         buttons.addStretch(1)
         buttons.addWidget(self.skip_hook)
+        buttons.addWidget(self.bring_btn)
         buttons.addWidget(self.show_details)
         lay = QVBoxLayout(self)
         lay.addWidget(self.hint)
@@ -148,6 +159,7 @@ class CheatsView(QWidget):
         self.table.itemSelectionChanged.connect(self._update_buttons)
         self.show_details.toggled.connect(lambda _on: self.fill())
         self.show_details.toggled.connect(self.skip_hook.setVisible)
+        self.show_details.toggled.connect(self.bring_btn.setVisible)
         self.delete_btn.clicked.connect(self.do_delete)
         self.combine_btn.clicked.connect(self.do_combine)
         self.lock_btn.clicked.connect(lambda: self._with_selected(self.open_lock))
@@ -159,6 +171,7 @@ class CheatsView(QWidget):
         self.open_btn.clicked.connect(self.do_open)
         self.save_btn.clicked.connect(lambda: self.open_save())
         self.update_btn.clicked.connect(self.do_update)
+        self.finder.carrying_changed.connect(lambda _on: self._update_buttons())
         ctl.cheats_changed.connect(self.fill)
         ctl.cheats_changed.connect(self._maybe_learn)
         ctl.game_changed.connect(lambda _g: self._check_version())
@@ -225,7 +238,8 @@ class CheatsView(QWidget):
         picked = self.selected_all()
         self.delete_btn.setEnabled(bool(picked))
         needs_notes = self._needs_notes(picked)
-        self.combine_btn.setEnabled(len(picked) > 1 and not needs_notes)
+        carrying = self.finder.carrying  # bringing notes over: these wait (spec AC-U3)
+        self.combine_btn.setEnabled(len(picked) > 1 and not needs_notes and not carrying)
         self.combine_btn.setToolTip(hints.COMBINE_NEEDS_NOTES if needs_notes else COMBINE_TIP)
         up = self.ctl.session.connected and self.ctl.session.game is not None
         located = c is not None and (c.anchor is None or c.anchor[0] in self.ctl.live.trackers)
@@ -241,9 +255,11 @@ class CheatsView(QWidget):
         self.build_btn.setToolTip(
             hints.BUILD_PICK_SINGLE if c is not None and not single else hints.BUILD_BUTTON_TIP
         )
-        self.learn_btn.setEnabled(up and self._can_learn(c, located))
+        self.learn_btn.setEnabled(up and not carrying and self._can_learn(c, located))
         p = self.ctl.project
-        self.again_btn.setEnabled(up and p is not None and bool(p.objects))
+        self.again_btn.setEnabled(up and not carrying and p is not None and bool(p.objects))
+        self.bring_btn.setEnabled(up and not carrying)
+        self.update_btn.setEnabled(not carrying and not self._updating)
         self.save_btn.setEnabled(any(ch.saveable for ch in self.cheats))
 
     def _can_learn(self, c: Cheat | None, located: bool) -> bool:
@@ -280,6 +296,8 @@ class CheatsView(QWidget):
                     if self.finder.confirm(c):  # AC-12.2: ask once per run
                         self.finder.before_on(c)
                         self.ctl.live.turn_on(c)
+                        if c.carried == "test" and c.enabled:
+                            self.finder.tested(c)
                 elif not want and c.enabled:
                     self.ctl.live.turn_off(c)
                     self.finder.after_off(c)
@@ -432,7 +450,7 @@ class CheatsView(QWidget):
         """While the file's own version runs, learn a signature for each code line so
         the cheats can be moved after the next game update. Reads only."""
         cf, g = self.ctl.cheat_file, self.ctl.session.game
-        if self._learning or not (cf and g and self.ctl.session.connected):
+        if self._learning or self.ctl.code_reading or not (cf and g and self.ctl.session.connected):
             return
         if cf.title_id.upper() != g.title_id or versions_differ(cf.version, g.version):
             return
@@ -453,6 +471,7 @@ class CheatsView(QWidget):
         for off in todo:
             self._learn_tried.add((g.title_id, g.version, off))
         self._learning = True
+        self.ctl.code_reading = True  # one code read at a time (notes' fingerprints too)
         session, title_id, version = self.ctl.session, g.title_id, g.version
 
         def work() -> int:
@@ -462,26 +481,51 @@ class CheatsView(QWidget):
 
         def done(n: int) -> None:
             self._learning = False
+            self.ctl.code_reading = False
             log.info("action=learn_signatures saved=%d version=%s", n, version)
 
         def failed(exc: BaseException) -> None:
             self._learning = False
+            self.ctl.code_reading = False
             log.warning("action=learn_signatures reason=%s", exc)
 
         self.ctl.tasks.run(work, done, failed)
 
     def do_update(self) -> None:
         cf, g = self.ctl.cheat_file, self.ctl.session.game
-        if not (cf and g):
+        if not (cf and g) or self.finder.carrying or self._updating:
             return
         session = self.ctl.session
         old_path = up.signatures_path(cf.title_id, cf.version)
+        notes_path = pj.project_path(cf.title_id, cf.version)
+        p = self.ctl.project  # the brought-over notes, if this version has them
+        new_notes = p if p is not None and not versions_differ(p.version, g.version) else None
+        # moved caves never go where the notes' hooks and code parts live (taken here,
+        # on the UI thread: the notes can change while the worker runs)
+        reserved = list(session.reserved_rooms)
+        if new_notes is not None:
+            reserved += ah.reserved_rooms(new_notes.objects) + cr.part_rooms(new_notes)
+        self._updating = True
         self.update_btn.setEnabled(False)
         self.hint.setText(hints.UPDATE_RUNNING)
 
         def work():
             image = up.read_code_image(session)
-            new, report = up.update_file(cf, up.load_signatures(old_path), image, g.version)
+            try:  # the old version's notes: read only, for its hook cheats (AC-U9)
+                old_notes = pj.load(notes_path)
+            except ProjectFileError as exc:
+                log.info("action=update_version old_notes=unreadable reason=%s", exc)
+                old_notes = None
+            new, report = cr.update_with_hooks(
+                session,
+                cf,
+                up.load_signatures(old_path),
+                image,
+                g.version,
+                old_notes,
+                new_notes,
+                reserved=reserved,
+            )
             up.save_signatures(
                 up.signatures_path(g.title_id, g.version),
                 g.title_id,
@@ -494,7 +538,8 @@ class CheatsView(QWidget):
 
     def _updated(self, result) -> None:
         new, report = result
-        self.update_btn.setEnabled(True)
+        self._updating = False
+        self._update_buttons()
         self.ctl.live.mark_all_off()
         self.ctl.cheat_file = new
         self.ctl.cheats_changed.emit()
@@ -507,6 +552,7 @@ class CheatsView(QWidget):
             self.hint.setText(hints.UPDATE_DONE)
 
     def _update_failed(self, exc: BaseException) -> None:
-        self.update_btn.setEnabled(True)
+        self._updating = False
+        self._update_buttons()
         self.fill()
         self.ctl.fail(exc, "update_version")

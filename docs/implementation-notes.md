@@ -303,3 +303,177 @@ QA and re-review round (2026-11-11, qa/reports/2026-11-11-trace-shown-number.md)
   (added once the restarts branch landed on main).
 - A share of a max of 0 shows "(screen: ?)". TOO_FAR says "1 step", and "ran out of time"
   when TOTAL_S ended it.
+
+## Bring notes to a new game version, steps 1-6 (2026-11-11)
+
+Design: docs/architecture-game-update.md. Steps 7-12 (NoteFingerprints, CarryOver/CarryBar,
+the run driver, AC-U9 in do_update, tools/make_old_notes.py, docs) come in a later pass.
+Small changes against the design, each keeping the spec's behaviour:
+
+- **Golden notes file is format 4.** `tests/fixtures/golden/...cmproj` now says
+  `"format_version": 4` (nothing else changed), so its byte-for-byte round trip still
+  holds. Formats 1-3 load as before (test covers 1, 2 and 3). The QA tests TC-50/TC-51
+  compare with `pj.FORMAT_VERSION` instead of a literal 3 (same rule, one step up).
+- **Reset the class before locate, not in settle.** `rf.verify` checks the saved class,
+  which moved with the update, so a static or chain object would never verify. `prepare`
+  calls `reset_class` on every object without a hook (and `drop_hook` on a hook that can't
+  come over); `settle` still resets an object that ends up with no hook.
+- **`choose(session, classes, item)`** takes the session (the Player-only route reads the
+  ident dword and calls `cv.compare_objects`) and raises `CarryFailed` instead of
+  returning it. A pick is answered with `answer(session, classes, need, address)`;
+  "None of these" fails the hook with "none of the places was picked".
+- **Steps take an `Item`** (new copy, old object, hook site, shift) instead of
+  `(obj, site)`; `collect_classes` and `place_hook` take `reserved=` (the plan's rooms,
+  which `place_hook` extends with the new hook's rooms).
+- **The hook's own capture rooms are laid over with zeros** in `learn_note_signatures`
+  (as well as `(hook, orig)` and the code parts), since the routine holds a copy of the
+  hooked instruction.
+- **Reasons use "it"** ("the game's code changed where it was found") to fit the summary
+  line `Not brought over: Shield (...)`; `find_hook_site(..., label=)` can name the value.
+  A failed part reads "part jump couldn't be found (...); make it again".
+- **`CarryReport.summary`** says "Brought over N of M values" when the notes have no cheats.
+- **`list_sources`** lists older versions (closest first), then newer ones.
+- **Fake game:** `build(static=True)` puts Obolites at `layout.static_off` (off by default,
+  so no existing search sees an extra value); `fight()` also runs the reader
+  (`Game.show`), so a collect on a reader hook sees objects. In run 1 the two enemies
+  share one sampler table entry (hashed by address), as on a console.
+- **`carried_yes` doesn't emit `cheats_changed`** (it runs inside the tick handler, which
+  refills the table itself); `check_pending` emits it after a Yes there.
+- **`FindAgain.carrying`** is a property with a `carrying_changed` signal so CheatsView
+  refreshes its buttons the moment a bring-over starts or ends.
+
+## Bring notes to a new game version, steps 7-12 (2026-11-11)
+
+- **Phased jobs.** A bring-over (`ui/carry.py`, `CarryOver`) is a chain of
+  `ctl.tasks.run` jobs: prepare (read the code, find hook sites, move fixed parts), then
+  per value collect + choose, the slot check + hook, and locate + settle. A pick
+  (`finder.ask_pick`) happens on the UI thread between two jobs; no worker ever waits on
+  a dialog. Each job's result is dropped if the run was rolled back meanwhile, and the
+  Cancel flag is checked before and after every job (core steps stop on it too).
+- **Rollback.** Cancel, an error, a dropped link or another game process takes out every
+  hook this run put in (`finder.take_out`), re-keeps the notes' rooms and saves nothing;
+  the offer shows again (or on the next connect after a dropped link). A value not found
+  by locate after its hook was placed keeps the hook (see the review fixes below).
+- **The run reads the code once.** The new version's fingerprints are learned from the
+  same image at the end (on a copy, applied on the UI thread), and `NoteFingerprints`
+  is told (`mark_learned`) so it doesn't read again. While `finder.carrying` is set the
+  background learner never starts.
+- **NoteFingerprints** works on a copy of the notes and applies hook fingerprints only if
+  `ctl.project` is still the same object. It doesn't retry by itself when the cheat-file
+  learner held the one code read; the next notes save (Find it again, a confirm, ...) tries
+  again. A cancelled read isn't counted, so the next connect tries again.
+- **Game in front**: Bring them over needs the connected game to be the foreground app;
+  when the PS5 can't say (old PS5Debug-NG), the game being found is enough (the builder's
+  rule).
+- **Advanced** lists older versions (closest first), then newer ones. Into notes that hold
+  values or cheats, `for_merge` adds only new names; `start` always merges into such notes,
+  so they are never overwritten even from the offer.
+- **AC-U9** is `carry.update_with_hooks` (split, v2 move, rebuild, merge back in the file's
+  order); `do_update` reads the old notes read-only and passes this version's notes only
+  if they were brought over (`carried_from` set). Before that, hook lines say "bring your
+  notes over first (My cheats)".
+- **tools/make_old_notes.py**: `--undo` keeps whatever the dry run left for the current
+  version (notes and fingerprints) as `.carried` (`.carried2`, ... if taken), never
+  deleted. A missing current-notes `.keep` stops it with a plain message.
+- Tests: `tests/ui/test_carry_over.py` (offer, run, Cancel at each step, dropped link,
+  merge, AC-U9, dry run with the tool), `tests/ui/test_game_update.py` (question, check it,
+  fingerprints), `tests/unit/test_carry.py`, `tests/unit/test_tools.py`.
+
+## Bring notes over: review fixes (2026-11-11)
+
+- **Not seen yet (decision from review M4).** When locate finds nothing after the new
+  hook went in and its slot was proven, the hook and its class are kept and the hook
+  stays in the game (recorded with `note_install`, taken out on close or when its last
+  cheat goes off, like any notes hook). The object is saved with `check=True`, gets no
+  tracker, and is found by Find it again / the next connect once the game runs that
+  code. Its cheats count as brought over; the summary adds "<value>: brought over, not
+  seen yet; take a hit (or change it in the game) and it will be found." Only when
+  nothing was placed are all ways dropped. This replaces "take the hook out before
+  settle" from steps 7-12.
+- **A rollback while a pick dialog is open** (disconnect, another game process) ends the
+  run quietly: each step checks that its run is still the current one after `ask_pick`
+  and returns early instead of asserting.
+- **place_hook** checks Cancel and that the game process is the same right before
+  `ah.install` (the slot check can be long). A hook that still goes in after a rollback
+  is recorded, then taken out at once.
+- **Rooms are passed, not set from workers**: `cv.find_slot(session, extra_reserved)`,
+  `cv.collect_objects(..., extra_reserved=)` and `ah.plan_hook(..., reserved=)`;
+  `session.reserved_rooms` is only written on the UI thread (`keep_rooms`).
+- **Update for this version (AC-U9)** passes `reserved` (the session's rooms, the
+  brought-over notes' hook rooms and code-part rooms, snapshot on the UI thread) to
+  `update_file`, so a moved cave never lands on them. Results are matched to cheats by
+  identity, not name (two cheats may share a name). A PC-off ("keep") hook line is
+  rebuilt only once its value is confirmed (`check` cleared): until then it says "confirm
+  Health in My cheats first, then update again", since the class may still be unlearned.
+- **The old class is taken as is** only when the hook site didn't move either (a dry run).
+- **A hooked instruction under 5 bytes** in the new code fails its hook (the jump would
+  cover the next instruction).
+- **Only fixed code parts in the game's module** make prepare read the game's code; a
+  fixed data value or another module's part still fails its cheat without a read.
+- **Ids**: brought-over objects get ids that neither the notes nor a hook still in the
+  game (`finder.installed`) use (`for_merge(..., avoid=)`, also without a merge).
+- **One job on the game at a time**: Bring them over waits (plain message) while Find it
+  again runs or the code is being read; Find it again doesn't start while bringing over;
+  Update for this version is disabled while bringing over.
+- **After the run**, `run` is cleared and `carrying` is off before the final fingerprint
+  learning, which runs detached (bar mode `learning`, no Cancel) with `code_reading` set
+  so no second code read starts.
+- **tools/make_old_notes.py** writes `<TITLE>_make_old_notes.json` (title, both versions,
+  files it wrote) next to the notes. `--undo` refuses without a record for the same title
+  and versions (so a typo never touches real notes), uses the versions as recorded for
+  the file names, and moves its copies aside as `.carried` instead of deleting them. A
+  second dry run is refused until `--undo`.
+
+## Bring notes over: QA fixes (2026-11-11)
+
+From qa/reports/2026-11-11-game-update.md (BUG-01 to BUG-09); each strict xfail in
+tests/qa/test_game_update_qa.py was removed as its bug was fixed.
+- **BUG-01**: `version_key` uses `isdecimal()`; "1.0²" compares "²" as text.
+- **BUG-02**: Bring them over takes the one code read (`ctl.code_reading`) for prepare's
+  read and cancels `NoteFingerprints`; it gives the read back after prepare or on a
+  rollback. It (and Advanced) refuses while another read runs (review m6).
+- **BUG-03 / BUG-06**: `for_merge` maps a cheat on a value the new notes already hold to
+  that value. A value a failed bring-over left behind (`check` set, no anchors) is brought
+  again under its own id and replaces it (`adopt_carried` replaces by id); the player's
+  own values (no `check`) are never replaced, even with no anchors. `assemble(have=...)`
+  counts cheats on values already held as brought over.
+- **BUG-04**: `ObjectSpec.carried_from` (format 4, written only when set) is set by
+  `assemble`; the question names the object's own version, falling back to the notes'.
+  A combined cheat with values from two versions names both.
+- **BUG-05**: C21e's pass line now says no hook was put in at the slot-check step.
+- **BUG-07**: covered by the review nit fix (results matched by cheat, not name). TC-23
+  now clears `check` first, since a PC-off line waits for the Yes (review m9).
+- **BUG-08**: a field that would move below offset 0 stays where it was and the value
+  fails with "its numbers moved in a way that can't be followed" (no hook placed).
+- **BUG-09**: plan/collect, slot-check and install errors become short lower-case
+  reasons (`NO_ROOM`, `ROOM_USED`, `NOT_PUT_IN`); the app's own message goes to the log
+  (`action=carry_hook ... step=... error=...`).
+- Doc points: guide 6.6 points to section 5 for searching; a combined cheat's No names
+  its first brought-over value, not the cheat; the Advanced button says "another
+  version"; a cheat whose value came over with no way to be found says "Not brought
+  over: search for it" (`Cheat.carried == "lost"`), not "check it".
+
+## Bring notes over: re-review and QA re-test fixes (2026-11-11)
+
+- **BUG-11 (Advanced onto a value already here)**: `for_merge(..., left_out=)` leaves out
+  a cheat (single or combined part) whose number the value already in the notes lacks,
+  with "the Health already in your notes has no Health 32" under "Not brought over".
+  The number is not brought over onto the player's value. `ensure_cheats` matches single
+  cheats by name and value/number (several cheats may share a number), then a renamed
+  row by value/number alone; an entry whose value or number is gone is logged
+  (`action=notes_cheat ... result=skipped`), not skipped silently.
+- **BUG-12**: only the first source value with a label takes a lost value's id; others
+  get fresh ids.
+- **BUG-13 / m-d**: if any field would move below 0, no field moves; the
+  `action=carry_fields` line names the hooked field's real shift.
+- **BUG-10**: make_old_notes reads every document before moving anything, writes its
+  record first and updates it after each step (`made`, `aside`); `--undo` only does what
+  the record says is left, so it can run again after a stop half-way.
+- **m-a**: `CarryOver._run_lock` guards `self.run` and `run.installed` between the
+  worker's `_note_install` and `_rollback`/`_finish`.
+- **m-b**: the final fingerprint learning gives `ctl.code_reading` back only if the run
+  took it.
+- **m-c**: `_rollback` sets the run's Cancel before handing back the code read.
+- **Update for this version**: a name used by several cheats is numbered in the summary
+  ("No death #2"), so a moved one and a failed one read apart.
+

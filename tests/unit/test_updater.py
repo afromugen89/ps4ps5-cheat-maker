@@ -168,3 +168,96 @@ def test_signatures_saved_per_version_and_merged(tmp_path):
     up.save_signatures(p, "PPSA01285", "1", {2: up.Signature.from_text("BB")})
     assert {k: v.text() for k, v in up.load_signatures(p).items()} == {1: "AA ??", 2: "BB"}
     assert up.load_signatures(tmp_path / "none.json") == {}
+
+
+# -- bring notes to a new game version (spec-game-update) ---------------------------------
+def test_overlay_puts_the_games_own_bytes_back_and_leaves_the_original_alone():
+    old = image(HOOK, CAVE, 0x1000, 0x2000)
+    on = bytearray(old.blocks[0][1])
+    on[0x42 : 0x42 + len(HOOK_ON)] = HOOK_ON
+    live = up.CodeImage([(old.blocks[0][0], bytes(on)), old.blocks[1]])
+    clean = live.overlay([(HOOK, VMOVSS), (0x10, b"\x01" * 4)])  # outside the code: ignored
+    assert clean.read(HOOK, len(VMOVSS)) == VMOVSS
+    assert live.read(HOOK, len(HOOK_ON)) == HOOK_ON, "a copy: the image itself is unchanged"
+    assert clean.blocks[1] == old.blocks[1]
+    end = old.blocks[1][0] + len(old.blocks[1][1])
+    edge = live.overlay([(end - 2, b"\xaa\xbb\xcc\xdd")])  # only the part inside the code
+    assert edge.read(end - 2, 4) == b"\xaa\xbb"
+
+
+def test_zero_run_defaults_are_unchanged_and_reserved_and_skip_are_kept():
+    img = up.CodeImage([(0x1000, b"\xcc" * 0x10 + bytes(0x400))])
+    end = 0x1000 + 0x410
+    first = img.zero_run(0x40)
+    assert first == img.zero_run(0x40, reserved=(), skip=0) == end - 0x50, "as before"
+    taken = (first, end)
+    moved = img.zero_run(0x40, reserved=[taken])
+    assert moved + 0x40 <= taken[0] and moved >= 0x1010, "a reserved room counts as in use"
+    assert img.zero_run(0x40, skip=0x100) + 0x40 <= end - 0x100, "the last bytes are left alone"
+    with pytest.raises(up.UpdateError):
+        img.zero_run(0x40, reserved=[(0x1000, end - 0x100)], skip=0xC0)
+    assert img.zero_run(0x40, reserved=[(0, 0x1000), (end, end + 0x100)]) == first, (
+        "ranges outside the code change nothing"
+    )
+
+
+def test_loose_opens_only_the_first_instructions_displacement():
+    sig = up.Signature.from_text("C4 C1 7A 11 8C 24 AC 02 00 00 48 8B 5C 24 30")
+    lo = up.loose(sig)
+    assert lo.text() == "C4 C1 7A 11 8C 24 ?? ?? ?? ?? 48 8B 5C 24 30"
+    assert lo.matches(bytes.fromhex("C4C17A118C24B4020000488B5C2430"))
+    assert not sig.matches(bytes.fromhex("C4C17A118C24B4020000488B5C2430"))
+    assert up.loose(up.Signature.from_text("48 89 C3 C3")) is None, "no displacement"
+    rip = up.Signature.from_text("48 8B 05 ?? ?? ?? ?? C3")
+    assert up.loose(rip) is None, "a RIP-relative one is already open"
+
+
+def test_learn_at_is_unique_on_the_clean_image_and_skips_what_cant_be():
+    old = image(HOOK, CAVE, 0x1000, 0x2000)
+    sigs = up.learn_at(old, [(HOOK, len(VMOVSS))])
+    assert old.find(sigs[HOOK]) == [HOOK] and len(sigs[HOOK]) >= up.SIG_MIN
+    twice = up.CodeImage([old.blocks[0], (0x5000000, old.blocks[0][1])])
+    assert up.learn_at(twice, [(HOOK, 10)]) == {}, "never unique: left out"
+    assert up.learn_at(old, [(0x10, 10)]) == {}, "not code"
+    on = bytearray(old.blocks[0][1])
+    on[0x42 : 0x42 + len(HOOK_ON)] = HOOK_ON
+    live = up.CodeImage([(old.blocks[0][0], bytes(on)), old.blocks[1]])
+    clean = live.overlay([(HOOK, VMOVSS)])
+    assert up.learn_at(clean, [(HOOK, 10)]) == sigs, "same with the hook on, once overlaid"
+
+
+def test_update_file_places_caves_outside_reserved_rooms_and_skip():
+    cf = celogamez()
+    old = image(HOOK, CAVE, 0x1000, 0x2000)
+    sigs = up.learn(cf, old)
+    new = image(HOOK + 0x1234, CAVE + 0x8000, 0x1F00, 0x2400)
+    plain, _ = up.update_file(cf, sigs, new, "2")
+    cave = plain.cheats[0].locations[0]
+    room = (cave.offset, cave.offset + len(CAVE_ON))
+    moved, report = up.update_file(cf, sigs, new, "2", reserved=[room], cave_skip=0x40)
+    assert not report.failed
+    got = moved.cheats[0].locations[0]
+    assert got.offset + len(CAVE_ON) <= room[0] or got.offset >= room[1]
+    block_end = new.blocks[1][0] + len(new.blocks[1][1])
+    assert got.offset + len(CAVE_ON) <= block_end - 0x40
+    rel = struct.unpack("<i", moved.cheats[0].locations[1].on[1:5])[0]
+    assert HOOK + 0x1234 + 5 + rel == got.offset, "the jump goes to the new room"
+
+
+def test_failed_at_names_the_first_bad_line():
+    cf = celogamez()
+    old = image(HOOK, CAVE, 0x1000, 0x2000)
+    sigs = up.learn(cf, old)
+    gone = up.CodeImage([(0x1000, b"\xcc" * 0x200), old.blocks[1]])
+    _, report = up.update_file(cf, sigs, gone, "2")
+    assert report.failed_at["Infinite Health/1 Hit Kill"] == HOOK, "the patch, not its cave"
+    cf3 = CheatFile(
+        "R",
+        "PPSA01285",
+        "1",
+        [Cheat("static", [Location(LocationKind.MODULE_VALUE, 0x10, b"\x01", b"\x00")])],
+    )
+    _, report = up.update_file(cf3, {}, old, "2")
+    assert report.failed_at == {"static": 0x10}
+    _, ok = up.update_file(cf, sigs, image(HOOK + 4, CAVE, 1, 2), "2")
+    assert ok.failed_at == {}

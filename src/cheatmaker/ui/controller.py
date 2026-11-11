@@ -55,6 +55,8 @@ class Controller(QObject):
         self.trace_notice_shown = False  # Find the real one's "Save your game first", once
         self.project: Project | None = None  # v3 "find it again" notes for this game
         self.before_disconnect: list[Callable[[], None]] = []  # e.g. take hooks out
+        # The game's code is being read (fingerprints): one read at a time (UI thread only).
+        self.code_reading = False
         self._lost.connect(self.handle_lost)
         self.session.on_game_changed.append(self._on_game)
 

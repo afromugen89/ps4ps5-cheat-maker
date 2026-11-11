@@ -709,13 +709,14 @@ def test_tc50_format_3_opened_by_an_older_app_is_kept_as_bak(win, console, monke
     win.ctl.shutdown()
     path = pj.project_path(fg.TITLE, fg.VERSION)
     original = path.read_text(encoding="utf-8")
-    assert json.loads(original)["format_version"] == 3
-    monkeypatch.setattr(pj, "FORMAT_VERSION", 2)  # "older" Cheat Maker
+    now = pj.FORMAT_VERSION  # 3 when written; format 4 (game update) keeps the rule
+    assert json.loads(original)["format_version"] == now
+    monkeypatch.setattr(pj, "FORMAT_VERSION", now - 1)  # "older" Cheat Maker
     win.ctl.cheat_file.cheats.clear()
     console.restart(2)
     connect(win)
     assert "notes for this game can't be read" in win.status.text()
-    assert "made by a newer Cheat Maker (format 3)" in caplog.text
+    assert f"made by a newer Cheat Maker (format {now})" in caplog.text
     assert win.ctl.project is None
     learn(win, add_health_cheat(win, console.game))  # saving notes: the old file is kept
     bak = path.with_name(path.name + ".bak")
@@ -739,7 +740,7 @@ def test_tc51_format_2_notes_come_back_the_same_and_are_saved_as_3(win, console)
     assert win.cheats.table.item(0, COL_KEEPS).text() == FOUND_AGAIN
     win.cheats.finder.save()
     doc3 = json.loads(path.read_text())
-    assert doc3["format_version"] == 3
+    assert doc3["format_version"] == pj.FORMAT_VERSION
     after = pj.load(path)
     assert after.objects == before.objects and after.cheats == before.cheats
     assert "parts" not in doc3["cheats"][0], "a single cheat is saved as before"

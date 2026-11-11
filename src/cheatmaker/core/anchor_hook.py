@@ -22,7 +22,7 @@ import logging
 import struct
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 
 import iced_x86 as ix
@@ -187,19 +187,25 @@ def plan_hook(
     cand: HookCandidate,
     vtable: int | None,
     fallback: HookFilter | None = None,
+    reserved: Iterable[tuple[int, int]] = (),
 ) -> HookAnchor:
     """Where the routine and slot go, and how it tells the object apart. The slot is
     not proven yet (see prove_slot). Only an instruction of 5+ bytes is hooked, so the
     jump never covers a following ``ret`` or a place other code jumps to. Raises
-    LockFailed."""
+    LockFailed. The room and slot never go in ``reserved`` (module offsets), nor in
+    ``session.reserved_rooms``."""
     game = session.require_game()
     read = _read(session)
+    rooms = list(reserved)
     span = cv.hook_span(read, cand.address, single=True)
     orig = b"".join(read(i.ip, i.len) for i in span)
     filt = HookFilter("vtable") if vtable is not None else fallback or HookFilter("none")
     # Room for two routines: keep-value (PC off) below, capture above (see keep_cave).
-    cave = cv.find_cave(session, 2 * cv.CAVE_ROOM, skip=CAPTURE_CAVE_SKIP) + cv.CAVE_ROOM
-    slot = cv.find_slot(session)
+    cave = (
+        cv.find_cave(session, 2 * cv.CAVE_ROOM, skip=CAPTURE_CAVE_SKIP, extra_reserved=rooms)
+        + cv.CAVE_ROOM
+    )
+    slot = cv.find_slot(session, rooms)
     try:
         sig = up.make_signature(read(cand.address, up.SIG_MAX + MAX_INSN), cand.address).text()
     except (ReadFailed, ValueError):  # near the end of the code: no signature, still usable

@@ -235,6 +235,14 @@ def test_find_slot_below_the_table():
         cv.find_slot(s)
 
 
+def test_find_slot_skips_rooms_it_is_given():
+    _fake, s = game()
+    first = cv.find_slot(s)
+    off = first - s.require_game().module_base
+    nxt = cv.find_slot(s, [(off, off + cv.SLOT_SIZE)])
+    assert nxt == first - cv.SLOT_SIZE and s.reserved_rooms == [], "the session isn't changed"
+
+
 def test_wide_vtable_is_compared_through_a_scratch_register():  # e.g. a higher module base
     span = cv.decode_at(VMOVSS, 0x2B7B43F)
     code = cv.capture_code(span, cv.writer_target(WRITER), SLOT, CAVE_IP, vtable=0x8_0040_1000)

@@ -1164,3 +1164,26 @@ def test_joining_a_learned_object_keeps_its_tracker(win, console):  # re-review 
     assert tracker is before and tracker.confirmed
     assert [f.name for f in tracker.obj.fields] == ["Infinite Health", "fraction"]
     assert tracker.obj is win.ctl.project.object("obj1")
+
+
+def test_two_single_cheats_on_one_number_both_come_back(win, caplog):  # QA BUG-11
+    from cheatmaker.core.cheats import CheatFile
+
+    obj = pj.ObjectSpec(
+        "obj1", "Health", None, [pj.Field("Health", fg.HP, ValueType.FLOAT, (0, 1e4), 100.0)]
+    )
+    p = pj.Project(fg.TITLE, fg.VERSION, objects=[obj])
+    p.cheats = [
+        pj.ProjectCheat("Infinite health", "obj1", "Health", "freeze", 999.0),
+        pj.ProjectCheat("Health 500", "obj1", "Health", "set", 500.0),
+        pj.ProjectCheat("Ghost", "obj9", "Health", "set", 1.0),  # its value is gone
+    ]
+    win.ctl.project = p
+    win.ctl.cheat_file = CheatFile("Returnal", fg.TITLE, fg.VERSION)
+    finder = win.cheats.finder
+    finder.ensure_cheats()
+    assert [c.name for c in win.ctl.cheat_file.cheats] == ["Infinite health", "Health 500"]
+    assert "action=notes_cheat name=Ghost object=obj9" in caplog.text
+    win.ctl.cheat_file.cheats[0].name = "God mode"  # renamed while the notes weren't loaded
+    finder.ensure_cheats()
+    assert [c.name for c in win.ctl.cheat_file.cheats] == ["God mode", "Health 500"]

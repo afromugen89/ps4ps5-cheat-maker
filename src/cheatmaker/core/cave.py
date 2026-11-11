@@ -609,9 +609,11 @@ def _float_effect(effect, value, old, s, game_ok: int) -> list:
     ]
 
 
-def find_slot(session: Session) -> int:
+def find_slot(session: Session, extra_reserved: Iterable[tuple[int, int]] = ()) -> int:
     """16 zero bytes just below the Player-only table at the end of the game's writable
-    data. The caller still has to prove the game never writes there (C10b)."""
+    data. The caller still has to prove the game never writes there (C10b). Never in
+    ``session.reserved_rooms`` nor ``extra_reserved`` (module offsets, start and end)."""
+    extra = list(extra_reserved)
     game = session.require_game()
     client = session.require_client()
     data_maps = [m for m in _module_maps(session) if m.writable and not m.executable]
@@ -623,7 +625,7 @@ def find_slot(session: Session) -> int:
         addr = top - k * SLOT_SIZE
         if addr < last.start:
             break
-        if _reserved(session, addr, SLOT_SIZE):
+        if _reserved(session, addr, SLOT_SIZE, extra):
             continue
         if client.read(game.pid, addr, SLOT_SIZE) != bytes(SLOT_SIZE):
             break
@@ -631,10 +633,13 @@ def find_slot(session: Session) -> int:
     raise LockFailed("no spare room in the game's data to remember where things are")
 
 
-def _reserved(session: Session, addr: int, size: int) -> bool:
+def _reserved(
+    session: Session, addr: int, size: int, extra: Iterable[tuple[int, int]] = ()
+) -> bool:
     base = session.require_game().module_base
     return any(
-        addr < base + end and base + start < addr + size for start, end in session.reserved_rooms
+        addr < base + end and base + start < addr + size
+        for start, end in [*session.reserved_rooms, *extra]
     )
 
 
@@ -701,15 +706,17 @@ def collect_objects(
     seconds: float,
     cancel: threading.Event | None = None,
     sleep: Callable[[float], None] = time.sleep,
+    extra_reserved: Iterable[tuple[int, int]] = (),
 ) -> list[int]:
-    """Hook ``writer`` for ``seconds`` and return the object addresses it wrote to."""
+    """Hook ``writer`` for ``seconds`` and return the object addresses it wrote to. The
+    sampler never goes in ``extra_reserved`` rooms (see find_cave)."""
     game = session.require_game()
     client = session.require_client()
     target = writer_target(writer)
     read = lambda a, n: client.read(game.pid, a, n)  # noqa: E731
     span = hook_span(read, writer.address)
     orig = b"".join(read(i.ip, i.len) for i in span)
-    cave = find_cave(session, CAVE_ROOM)
+    cave = find_cave(session, CAVE_ROOM, extra_reserved=extra_reserved)
     table = find_table(session)
     code = sampler_code(span, target, table, cave)
     client.write(game.pid, cave, code)

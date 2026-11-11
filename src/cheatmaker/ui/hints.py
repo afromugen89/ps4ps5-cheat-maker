@@ -181,6 +181,49 @@ CONFIRM_PARTS = (
     "Take a hit and watch these numbers change. Press Yes only if they do."
 )
 CONFIRM_PART_VALUE = "{part} shows {value}"
+
+# -- bring your notes to a new game version (spec-game-update) -------------------------
+CONFIRM_CARRIED = (
+    "Is this your {name}? It was brought over from version {version} and shows {value} "
+    "right now.\n\nTake a hit and watch it change. Press Yes only if it does."
+)
+CARRIED_FROM = "It was brought over from version {version}."
+CONFIRM_NO_CARRIED = "OK, nothing was changed. Search for {name} to find it in this version."
+CARRY_TEST_HINT = "Test it in the game; untick it if it doesn't work."
+KEEPS_CHECK = "Found again each run (check it)"
+KEEPS_TEST = "Brought over: test it"
+KEEPS_LOST = "Not brought over: search for it"
+CARRY_OFFER = (
+    "Your notes for {title} are for version {old}; the game is now {new}. Press Bring them "
+    "over and keep playing for about 2 minutes."
+)
+CARRY_OFFER_NEWER = (
+    "Your notes for {title} were made for a newer version, {old}; the game is now {new}. "
+    "Press Bring them over and keep playing for about 2 minutes."
+)
+CARRY_STEPS = {
+    "start": "Bringing your notes over from version {old}...",
+    "read": "Reading the game's code (reads only)...",
+    "collect": "Finding {name} in the new version: play normally, take a hit if you can.",
+    "prove": "Checking the spare memory (about a minute, keep playing)...",
+    "locate": "Finding {name} in the new version...",
+    "learn": "Remembering the game's code for the next update (reads only)...",
+}
+CARRY_CANCELLED = (
+    "Bringing your notes over was stopped. Nothing was changed; press Bring them over to try again."
+)
+CARRY_NEEDS_GAME = "Connect, start the game and keep it on screen, then press Bring them over."
+CARRY_NO_SOURCES = "There are no notes for {title} from another version."
+CARRY_PICK_VERSION = "Bring the notes from version:"
+ADVANCED_BRING = "Advanced: Bring notes from another version..."
+CARRY_WAIT = (
+    "Cheat Maker is still busy with the game (finding values or reading its code). Wait "
+    "until it's done, then press Bring them over."
+)
+CARRY_BUSY = (
+    "Cheat Maker is bringing your notes to this game version. Wait until it's done, or "
+    "press Cancel."
+)
 TEST_HITS_WARNING = (
     "This writes to the game's memory. Save your game first; a wrong address can crash it."
 )
