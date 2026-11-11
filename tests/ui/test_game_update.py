@@ -281,8 +281,8 @@ def test_combined_cheat_no_keeps_test_and_check(win, console, answers):
     connect(win)
     answers.append(False)
     tick(win)
-    assert win.status.text() == (
-        "OK, nothing was changed. Search for God to find it in this version."
+    assert win.status.text() == (  # its value, not the cheat's name (God)
+        "OK, nothing was changed. Search for Health to find it in this version."
     )
     saved = path()
     assert saved.cheats[0].test and saved.objects[0].check

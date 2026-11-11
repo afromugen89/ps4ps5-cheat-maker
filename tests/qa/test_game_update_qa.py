@@ -218,10 +218,6 @@ def test_tc11_other_fields_shift_like_the_hooked_one(make):
 
 
 # == AC-U2 / design: one code read at a time =================================================
-@pytest.mark.xfail(
-    reason="BUG-02: Bring them over reads the game's code without taking the one-read slot",
-    strict=True,
-)
 def test_tc12_bring_over_read_takes_the_one_code_read_slot(make, monkeypatch):
     """TC-12: while Bring them over reads the code, ctl.code_reading is set (so the
     fingerprint learners wait), and Advanced doesn't start a second read while another
@@ -306,11 +302,6 @@ def test_tc15_merge_keeps_new_named_cheats_on_values_already_here(make):
     assert "Health 500" in names or any("Health 500" in t for t in texts)
 
 
-@pytest.mark.xfail(
-    reason="BUG-04: a merged value's question names the version the notes were first "
-    "brought from, not the version it came from",
-    strict=True,
-)
 def test_tc16_merged_values_question_names_their_own_version(make):
     """TC-16: notes brought over from 03.000.004 earlier; Advanced now merges Obolites from
     03.000.005. Obolites' question must say 03.000.005."""
@@ -347,11 +338,6 @@ def _c21_row(test_id: str) -> str:
     return next(line for line in text.splitlines() if line.startswith(f"| {test_id} |"))
 
 
-@pytest.mark.xfail(
-    reason="BUG-05: C21e expects action=hook_remove when cancelling during the spare-memory "
-    "check, but no hook is in yet at that step",
-    strict=True,
-)
 def test_tc18_c21e_pass_line_matches_cancel_during_the_slot_check(make, monkeypatch, caplog):
     """TC-18 (AC-U13): docs/console-tests.md C21e says Cancel during "Checking the spare
     memory" logs action=hook_remove. Run that exact step and compare with the doc."""
@@ -429,10 +415,6 @@ def test_tc21_summary_wording_matches_the_spec_example():
 
 
 # == repeating a failed bring-over (spec "Not in this spec": the player uses Advanced) =========
-@pytest.mark.xfail(
-    reason="BUG-06: after a failed bring-over Advanced can't bring the failed values again",
-    strict=True,
-)
 def test_tc22_advanced_repeats_a_failed_bring_over(make):
     """TC-22: nobody took a hit during the 10 s collect, so Health came over with no way
     to be found. The spec says the player repeats a failed bring-over with Advanced; today

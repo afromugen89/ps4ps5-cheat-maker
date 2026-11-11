@@ -347,15 +347,19 @@ class FindAgain(QObject):
 
     def mark_carried(self) -> None:
         """Each cheat's "brought over" state from the notes (spec AC-U8): "test" until
-        its brought-over code parts were ticked once, "check" until every object it
-        uses was confirmed."""
+        its brought-over code parts were ticked once, "lost" while a value it uses came
+        over with no way to be found, "check" until every object it uses was confirmed."""
         p = self.ctl.project
         cheats = self.ctl.cheat_file.cheats if self.ctl.cheat_file else []
         checking = {o.id for o in p.objects if o.check} if p is not None else set()
+        # brought over with no way to be found: it didn't come over (search for it)
+        lost = {o.id for o in p.objects if o.check and not o.anchors} if p is not None else set()
         for c in cheats:
             pc = self._entry(c)
             if pc is not None and pc.test:
                 c.carried = "test"
+            elif pc is not None and any(o in lost for o in c.objects):
+                c.carried = "lost"
             elif pc is not None and any(o in checking for o in c.objects):
                 c.carried = "check"
             else:
@@ -522,8 +526,10 @@ class FindAgain(QObject):
         with ``merge_into``, are added to them): their cheats come back in My cheats
         (unticked, "check it"), found objects are followed unconfirmed, and the notes
         are saved. Hooks put in during the bring-over were recorded with note_install."""
-        if merge_into is not None:
-            merge_into.objects += project.objects
+        if merge_into is not None:  # an object with the same id replaces its lost copy
+            new = {o.id: o for o in project.objects}
+            merge_into.objects = [new.pop(o.id, o) for o in merge_into.objects]
+            merge_into.objects += new.values()
             merge_into.cheats += project.cheats
             if merge_into.carried_from is None:
                 merge_into.carried_from = project.carried_from
@@ -580,7 +586,10 @@ class FindAgain(QObject):
         self.save()
         self.ctl.message.emit(hints.CARRY_TEST_HINT)
 
-    def _carried_version(self) -> str:
+    def _carried_version(self, obj: pj.ObjectSpec) -> str:
+        """The version ``obj`` was brought over from (its own, then the notes')."""
+        if obj.carried_from:
+            return obj.carried_from
         p = self.ctl.project
         return p.carried_from if p is not None and p.carried_from else "?"
 
@@ -751,7 +760,7 @@ class FindAgain(QObject):
         obj = tracker.obj
         if obj.check:  # brought over from another version (spec AC-U8)
             text = hints.CONFIRM_CARRIED.format(
-                name=obj.label, version=self._carried_version(), value=fmt(value)
+                name=obj.label, version=self._carried_version(obj), value=fmt(value)
             )
         else:
             text = hints.CONFIRM.format(name=obj.label, value=fmt(value))
@@ -785,7 +794,8 @@ class FindAgain(QObject):
         text = hints.CONFIRM_PARTS.format(name=cheat.name, values=", ".join(values))
         carried = [t.obj for t in trackers if t is not None and t.obj.check]
         if carried:  # one question for the whole cheat, naming the old version
-            text = hints.CARRIED_FROM.format(version=self._carried_version()) + " " + text
+            versions = dict.fromkeys(self._carried_version(o) for o in carried)
+            text = hints.CARRIED_FROM.format(version=", ".join(versions)) + " " + text
         if self.ask_confirm(text):
             for t in trackers:
                 if t is not None:
@@ -793,8 +803,10 @@ class FindAgain(QObject):
             for obj in carried:
                 self.carried_yes(obj, where[obj.id])
             return True
-        no = hints.CONFIRM_NO_CARRIED if carried else hints.CONFIRM_NO
-        self.ctl.message.emit(no.format(name=cheat.name))
+        if carried:  # search for a value, not for the cheat's name
+            self.ctl.message.emit(hints.CONFIRM_NO_CARRIED.format(name=carried[0].label))
+            return False
+        self.ctl.message.emit(hints.CONFIRM_NO.format(name=cheat.name))
         return False
 
     def _ask_confirm(self, text: str) -> bool:

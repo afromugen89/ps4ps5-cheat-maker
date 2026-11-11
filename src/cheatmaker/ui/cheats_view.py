@@ -44,6 +44,8 @@ CHECK_AFTER_RESTART = "Check after restart"
 def keeps_text(c: Cheat) -> str:
     if c.carried == "test":  # brought-over code parts, not ticked yet (spec AC-U8)
         return hints.KEEPS_TEST
+    if c.carried == "lost":  # its value came over with no way to be found
+        return hints.KEEPS_LOST
     if c.found_again:  # one found-again value, or a combined cheat with nothing moving
         return hints.KEEPS_CHECK if c.carried == "check" else FOUND_AGAIN
     if c.check_after_restart:  # Make it work, Only me by a field (spec-cheat-builder B8)

@@ -219,6 +219,7 @@ class _Run:
     started: float = field(default_factory=time.monotonic)
     total: int = 1
     done: int = 0
+    reading: bool = False  # holds the one code read (ctl.code_reading) for prepare
 
 
 def decline_key(title_id: str, old: str, new: str) -> str:
@@ -401,7 +402,10 @@ class CarryOver(QObject):
             len(project.objects),
             merge,
         )
-        if hooked or parts:
+        if hooked or parts:  # the one code read at a time is this run's until prepare is done
+            run.reading = self.ctl.code_reading = True
+            if self.fingerprints is not None:
+                self.fingerprints.cancel()
             self._say("read")
         reserved = list(self.ctl.session.reserved_rooms) + [
             (off, off + len(data)) for off, data in open_code_lines(self.ctl)
@@ -456,12 +460,17 @@ class CarryOver(QObject):
         self._rollback(None)
         self.ctl.fail(exc, "carry")
 
+    def _release_read(self, run: _Run) -> None:
+        if run.reading:
+            run.reading = self.ctl.code_reading = False
+
     def _rollback(self, text: str | None) -> None:
         """Every hook put in during this run comes out; nothing is saved; the offer is
         shown again."""
         run, self.run = self.run, None
         if run is None:
             return
+        self._release_read(run)
         if self.ctl.session.connected:
             for obj in run.installed:
                 self.finder.take_out(obj)
@@ -507,6 +516,7 @@ class CarryOver(QObject):
         if run is None:
             return
         run.plan = plan
+        self._release_read(run)
         if plan.image is not None:
             self._advance(W_READ)
         self._next_item()
@@ -646,7 +656,10 @@ class CarryOver(QObject):
         if run is None or run.plan is None:
             return
         plan = run.plan
-        new, report = cr.assemble(plan, run.found, run.reasons)
+        have: set[str] = set()  # values the notes hold already (Advanced), kept as they are
+        if run.merge_into is not None:
+            have = {o.id for o in run.merge_into.objects} - {o.id for o in run.project.objects}
+        new, report = cr.assemble(plan, run.found, run.reasons, have)
         learning = plan.image is not None
         if learning:  # before the notes are saved: no second read of the game's code
             self.ctl.code_reading = True

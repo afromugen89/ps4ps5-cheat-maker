@@ -77,7 +77,8 @@ class Cheat:
     carried: str = field(default="", compare=False)
     """Brought over from another game version (spec-game-update AC-U8): "check" until
     the player confirms its value, "test" until its brought-over code parts were
-    ticked once, "" otherwise. Set from the notes; never saved in cheat files."""
+    ticked once, "lost" while a value it uses came over with no way to be found, ""
+    otherwise. Set from the notes; never saved in cheat files."""
 
     @property
     def session_only(self) -> bool:

@@ -389,6 +389,7 @@ def test_cancel_takes_every_hook_out_saves_nothing_and_keeps_the_offer(
     assert app.w.status.text() == hints.CARRY_CANCELLED
     assert app.bar.mode == "offer" and not app.w.cheats.finder.carrying
     assert app.w.cheats.finder.installed == {}
+    assert not app.ctl.code_reading, "the code read is given back"
     if where == "locate":
         assert "action=hook_remove" in caplog.text
 
@@ -551,6 +552,27 @@ def test_carried_ids_stay_clear_of_hooks_still_in_the_game(make):
     assert [o.id for o in saved.objects] == ["obj2"]
     assert saved.cheats[0].object == "obj2" and finder.installed["obj2"].label == "Health"
     finder.installed.pop("obj1")
+
+
+def test_a_value_that_didnt_come_over_says_so_not_check_it(make):
+    tc.learned_v1(3)
+    app = make(Console(run=3))
+    app.connect()
+    app.w.carry.sleep = lambda _s: None  # nobody took a hit: nothing touched it
+    app.bring()
+    assert "Not brought over: Infinite health" in app.w.status.text()
+    assert app.w.cheats.table.item(0, COL_KEEPS).text() == hints.KEEPS_LOST
+    assert not app.ctl.code_reading
+
+
+def test_the_bring_over_holds_the_one_code_read_and_stops_the_learner(make, monkeypatch):
+    tc.learned_v1(3)
+    app = make(Console(run=3))
+    app.connect()
+    stopped = []
+    monkeypatch.setattr(app.w.fingerprints, "cancel", lambda: stopped.append(1))
+    app.bring()
+    assert stopped and app.bar.mode == "done" and not app.ctl.code_reading
 
 
 def test_needs_the_game_in_front(make):

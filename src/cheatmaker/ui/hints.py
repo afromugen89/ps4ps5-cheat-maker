@@ -192,6 +192,7 @@ CONFIRM_NO_CARRIED = "OK, nothing was changed. Search for {name} to find it in t
 CARRY_TEST_HINT = "Test it in the game; untick it if it doesn't work."
 KEEPS_CHECK = "Found again each run (check it)"
 KEEPS_TEST = "Brought over: test it"
+KEEPS_LOST = "Not brought over: search for it"
 CARRY_OFFER = (
     "Your notes for {title} are for version {old}; the game is now {new}. Press Bring them "
     "over and keep playing for about 2 minutes."
@@ -214,7 +215,7 @@ CARRY_CANCELLED = (
 CARRY_NEEDS_GAME = "Connect, start the game and keep it on screen, then press Bring them over."
 CARRY_NO_SOURCES = "There are no notes for {title} from another version."
 CARRY_PICK_VERSION = "Bring the notes from version:"
-ADVANCED_BRING = "Advanced: Bring notes from an older version..."
+ADVANCED_BRING = "Advanced: Bring notes from another version..."
 CARRY_WAIT = (
     "Cheat Maker is still busy with the game (finding values or reading its code). Wait "
     "until it's done, then press Bring them over."
