@@ -42,7 +42,16 @@ SearchWay = Callable[[tr.TraceResult, float | int | None], None]
 
 
 def result_text(r: tr.TraceResult) -> str:
-    """The plain hint for a finished trace (AC-T7, AC-T8, AC-T9)."""
+    """The plain hint for a finished trace (AC-T7, AC-T8, AC-T9), plus the addresses
+    that may still hold a test value, whatever the outcome."""
+    text = _outcome_text(r)
+    if r.not_restored:
+        addrs = ", ".join(f"{a:#x}" for a in r.not_restored)
+        text += " " + hints.TRACE_NOT_RESTORED.format(addrs=addrs)
+    return text
+
+
+def _outcome_text(r: tr.TraceResult) -> str:
     Out = tr.Outcome
     if r.outcome is Out.FOUND:
         if r.value is None or r.way is None or r.vtype is None:
@@ -63,7 +72,7 @@ def result_text(r: tr.TraceResult) -> str:
     if r.outcome is Out.TOO_FAR:
         text = hints.TRACE_TOO_FAR.format(n=len(r.hops))
         return f"{text} {hints.TRACE_NOT_SURE}" if r.address is not None else text
-    text = {
+    return {
         Out.ALREADY_REAL: hints.TRACE_ALREADY_REAL,
         Out.NO_WRITER: hints.TRACE_NO_WRITER,
         Out.CANT_WATCH: hints.TRACE_CANT_WATCH,
@@ -73,11 +82,8 @@ def result_text(r: tr.TraceResult) -> str:
         Out.UNCONFIRMED: hints.TRACE_UNCONFIRMED,
         Out.CANCELLED: hints.TRACE_CANCELLED,
         Out.LOST: hints.TRACE_LOST,
+        Out.FAILED: hints.TRACE_FAILED,
     }[r.outcome]
-    if r.not_restored:
-        addrs = ", ".join(f"{a:#x}" for a in r.not_restored)
-        text += " " + hints.TRACE_NOT_RESTORED.format(addrs=addrs)
-    return text
 
 
 def details(r: tr.TraceResult) -> list[str]:

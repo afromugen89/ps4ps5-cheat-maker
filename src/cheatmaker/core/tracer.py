@@ -36,7 +36,7 @@ from cheatmaker.core.locker import CONTEXT, Writer
 from cheatmaker.core.session import Session
 from cheatmaker.core.trace_way import Kind, Way
 from cheatmaker.core.values import ValueType, unit_of
-from cheatmaker.errors import ConnectionLost, ReadFailed
+from cheatmaker.errors import CheatMakerError, ConnectionLost, ReadFailed
 
 log = logging.getLogger(__name__)
 
@@ -53,6 +53,7 @@ CHANGE_WAIT_S = 30.0
 POLL_S = 0.25
 TOTAL_S = 240.0  # whole trace, including the player's changes
 HOP_WORK_S = 15.0  # one hop without waiting for the player (logged when over)
+TOO_LONG = "the trace took too long"
 CODE_READ = tf.WINDOW + tf.MAX_INSN  # bytes read before a writer's RIP
 
 
@@ -127,6 +128,7 @@ class Outcome(Enum):
     UNCONFIRMED = "number didn't change"
     CANCELLED = "cancelled"
     LOST = "lost"
+    FAILED = "failed"  # the console refused a read or write the trace needed
 
 
 @dataclass(frozen=True)
@@ -200,6 +202,7 @@ class Tracer:
         self._cancel: threading.Event | None = None
         self._start = 0.0
         self._waited = 0.0  # this hop's time spent waiting for the player
+        self._last: tuple[int, Way] | None = None  # the last source tested (address, way)
 
     # -- the whole trace -------------------------------------------------------------
     def run(
@@ -223,23 +226,33 @@ class Tracer:
         except ConnectionLost:
             log.warning("action=trace_lost hops=%d", len(self.hops))
             result = self._end(Outcome.LOST, "lost connection")
+        except CheatMakerError as exc:  # a refused read/write, a bad answer: no crash
+            log.warning("action=trace_failed hops=%d error=%r", len(self.hops), exc)
+            result = self._end(Outcome.FAILED, str(exc) or type(exc).__name__)
+        except BaseException:
+            self._log_end("error", None, None)
+            raise
         finally:
             self._resume_all()
         if self.not_restored:
             result = replace(result, not_restored=tuple(self.not_restored))
+        self._log_end(result.outcome.value, result.address, result.way)
+        return result
+
+    def _log_end(self, outcome: str, address: int | None, way: Way | None) -> None:
+        """The two closing lines, whatever ended the trace."""
         log.info(
             "action=trace_result outcome=%s addr=%s way=%r hops=%d secs=%.1f",
-            result.outcome.value,
-            f"{result.address:#x}" if result.address is not None else "-",
-            result.way.text() if result.way else "-",
-            len(result.hops),
+            outcome,
+            f"{address:#x}" if address is not None else "-",
+            way.text() if way else "-",
+            len(self.hops),
             self.clock() - self._start,
         )
         log.info(
             "action=trace_restore not_restored=%s",
-            ",".join(f"{a:#x}" for a in result.not_restored) or "-",
+            ",".join(f"{a:#x}" for a in self.not_restored) or "-",
         )
-        return result
 
     def _end(self, outcome: Outcome, reason: str = "", **kw) -> TraceResult:
         return TraceResult(outcome, self.address, hops=tuple(self.hops), reason=reason, **kw)
@@ -249,10 +262,10 @@ class Tracer:
         total: Way | None = None  # the current copy -> the start row's screen
         earlier: list[rc.Target] = []
         seen = {self.address}
-        last: tuple[int, Way] | None = None  # the last source checked (address, total way)
+        self._last = None
         for n in range(1, MAX_HOPS + 1):
-            if self.clock() - self._start > TOTAL_S:
-                return self._too_far(last, "the trace took too long")
+            if self._out_of_time():
+                return self._too_far(self._last, TOO_LONG)
             hop = Hop(n, copy)
             self.hops.append(hop)
             work_start, self._waited = self.clock(), 0.0
@@ -265,9 +278,9 @@ class Tracer:
             src = option.cand.address
             if src in seen:
                 hop.stop = "goes round in a circle"
-                return self._too_far(last, hop.stop)
+                return self._too_far(self._last, hop.stop)
             verdict = self._test(hop, option, copy, earlier)
-            last = (src, way)
+            self._last = (src, way)
             log.info("action=trace_hop n=%d stop=%s", n, hop.stop or "-")
             work = self.clock() - work_start - self._waited
             if work > HOP_WORK_S:
@@ -282,7 +295,7 @@ class Tracer:
             earlier.insert(0, copy)
             copy = rc.Target(src, option.way.real)
             total = way
-        return self._too_far(last, f"{MAX_HOPS} hops")
+        return self._too_far(self._last, f"{MAX_HOPS} hops")
 
     def _too_far(self, last: tuple[int, Way] | None, why: str) -> TraceResult:
         log.info("action=trace_stop reason=%r", why)
@@ -340,7 +353,8 @@ class Tracer:
             raise _Stop(self._end(Outcome.NO_WRITER, hop.stop))
         self._say(hop, Stage.READ)
         by_writer = self._writers(hop, hits)
-        if any(wp.path and wp.path.end is tf.End.ALREADY_REAL for wp, _h in by_writer):
+        rmw = _rmw_writers(by_writer)
+        if rmw and _most_hits(rmw, by_writer):
             hop.stop = "read-modify-write: it's the real one"
             return None
         options = self._options(hop, by_writer)
@@ -352,6 +366,10 @@ class Tracer:
         winner = self._check(hop, options) if options else None
         if winner is None and self.exec_breakpoint:
             winner = self.exec_fallback(hop)
+        if winner is None and rmw:
+            # a writer that changes it in place, and no other gives a source that passes
+            _note(hop, "read-modify-write, no other source passed: it's the real one")
+            return None
         if winner is None:
             raise _Stop(self._no_address(hop, options, total))
         hop.source, hop.way = winner.cand, winner.way
@@ -369,7 +387,9 @@ class Tracer:
 
         addr, size = hop.span
         started = self.clock()
-        hits = self.client.watch(self.pid, addr, size, "write", WATCH_S, until=until)
+        hits = self.client.watch(
+            self.pid, addr, size, "write", self._time_for(WATCH_S), until=until
+        )
         hop.hits = len(hits)
         self._waited += self.clock() - started
         log.info("action=trace_watch hop=%d addr=%#x size=%d hits=%d", hop.n, addr, size, len(hits))
@@ -556,7 +576,7 @@ class Tracer:
                     path.load.ip,
                     len(hits),
                 )
-                hop.stop = "the breakpoint repeats"
+                _note(hop, "the breakpoint repeats")
                 continue
             for h in hits:
                 addr = tf.exec_address(path.load, h)
@@ -587,7 +607,7 @@ class Tracer:
             return stop or len(hits) >= EXEC_HITS
 
         started = self.clock()
-        hits = self.client.watch(self.pid, ip, 1, "execute", EXEC_S, until=until)
+        hits = self.client.watch(self.pid, ip, 1, "execute", self._time_for(EXEC_S), until=until)
         self._waited += self.clock() - started
         log.info("action=trace_watch kind=execute ip=%#x hits=%d", ip, len(hits))
         self._check_cancel()
@@ -596,7 +616,12 @@ class Tracer:
     # -- memory check (AC-T5) --------------------------------------------------------------
     def _copy_value(self, hop: Hop) -> float | int:
         t = hop.watched
-        return t.vtype.decode(self._read(t.address, t.vtype.size))
+        try:
+            return t.vtype.decode(self._read(t.address, t.vtype.size))
+        except ReadFailed as exc:  # freed while we checked (a menu, an area unloaded)
+            log.info("action=trace_check copy=%#x unreadable reason=%s", t.address, exc)
+            _note(hop, "the copy can't be read any more")
+            raise _Stop(self._end(Outcome.NOT_FOLLOWED, hop.stop)) from None
 
     def _wait_steady(self, hop: Hop, until: float, differ_from=None) -> float | int | None:
         """Poll the copy until it held one value for STEADY_S (and, with
@@ -624,19 +649,37 @@ class Tracer:
     def _deadline(self, wait: float) -> float:
         return min(self.clock() + wait, self._start + TOTAL_S)
 
+    def _out_of_time(self) -> bool:
+        return self.clock() - self._start >= TOTAL_S
+
+    def _time_for(self, wait: float) -> float:
+        """``wait``, or what is left of TOTAL_S if that is less (a trace near its end
+        mustn't start a full 30 s watch)."""
+        left = self._start + TOTAL_S - self.clock()
+        if left <= 0:
+            raise _Stop(self._too_far(self._last, TOO_LONG))
+        return min(wait, left)
+
+    def _waited_out(self, hop: Hop, why: str) -> _Stop:
+        """The copy didn't hold still / change in time. When the whole trace ran out
+        of time, the last tested source is offered "not sure" (TOO_FAR)."""
+        if self._out_of_time():
+            _note(hop, TOO_LONG)
+            return _Stop(self._too_far(self._last, TOO_LONG))
+        hop.stop = why
+        return _Stop(self._end(Outcome.UNCONFIRMED, why))
+
     def _check(self, hop: Hop, options: list[_Option]) -> _Option | None:
         first = self._wait_steady(hop, self._deadline(CHANGE_WAIT_S))
         if first is None:
-            hop.stop = "the number never held still"
-            raise _Stop(self._end(Outcome.UNCONFIRMED, hop.stop))
+            raise self._waited_out(hop, "the number never held still")
         alive = [o for o in options if self._matches(hop, o, first)]
         if not alive:
             return None
         self._say(hop, Stage.CHANGE)
         second = self._wait_steady(hop, self._deadline(CHANGE_WAIT_S), differ_from=first)
         if second is None:
-            hop.stop = "the number didn't change"
-            raise _Stop(self._end(Outcome.UNCONFIRMED, hop.stop))
+            raise self._waited_out(hop, "the number didn't change")
         alive = [o for o in alive if self._matches(hop, o, second)]
         return alive[0] if alive else None
 
@@ -684,22 +727,24 @@ class Tracer:
         ]
         if ways:
             way = ways[0] if total is None else ways[0].then(total)
-            hop.stop = "no address passed the memory check"
+            why = "no address passed the memory check"
+            _note(hop, why)
             try:
                 max_now = self._max_now(way)
             except ReadFailed:
                 max_now = None
-            return self._end(
-                Outcome.SEARCH_THAT_WAY, hop.stop, vtype=way.real, way=way, max_now=max_now
-            )
+            if _same_search(way, max_now):  # nothing new to search for (AC-T8)
+                return self._end(Outcome.NOT_FOLLOWED, why)
+            return self._end(Outcome.SEARCH_THAT_WAY, why, vtype=way.real, way=way, max_now=max_now)
         if any(p.end is tf.End.SCRAMBLED for p in paths):
-            hop.stop = "scrambled"
-            return self._end(Outcome.SCRAMBLED, hop.stop)
+            _note(hop, "scrambled")
+            return self._end(Outcome.SCRAMBLED, "scrambled")
         if paths and all(p.end is tf.End.CONSTANT for p in paths):
-            hop.stop = "sets it to a fixed number"
-            return self._end(Outcome.NO_WRITER, hop.stop)
-        hop.stop = "; ".join(p.reason or p.end.value for p in paths) or "no writer could be read"
-        return self._end(Outcome.NOT_FOLLOWED, hop.stop)
+            _note(hop, "sets it to a fixed number")
+            return self._end(Outcome.NO_WRITER, "sets it to a fixed number")
+        why = "; ".join(p.reason or p.end.value for p in paths) or "no writer could be read"
+        _note(hop, why)
+        return self._end(Outcome.NOT_FOLLOWED, why)
 
     # -- write test (AC-T6) ----------------------------------------------------------------
     def _test(
@@ -746,6 +791,34 @@ def _with_max(way: Way, cand: tf.Candidate) -> Way:
         for s in way.steps
     )
     return replace(way, steps=steps)
+
+
+def _note(hop: Hop, why: str) -> None:
+    """Add to ``hop.stop`` without losing what is already there ("the breakpoint
+    repeats" stays when the hop then ends for another reason)."""
+    hop.stop = f"{hop.stop}; {why}" if hop.stop else why
+
+
+def _rmw_writers(by_writer: list[tuple[WriterPath, list[WatchHit]]]) -> list[WriterPath]:
+    return [wp for wp, _h in by_writer if wp.path and wp.path.end is tf.End.ALREADY_REAL]
+
+
+def _most_hits(rmw: list[WriterPath], by_writer: list[tuple[WriterPath, list[WatchHit]]]) -> bool:
+    """A read-modify-write writer has more hits than every other writer (a tie is
+    decided by whether another writer's source passes the check)."""
+    others = [wp.writer.hits for wp, _h in by_writer if wp not in rmw]
+    return not others or max(wp.writer.hits for wp in rmw) > max(others)
+
+
+def _same_search(way: Way, max_now) -> bool:
+    """The way is the copy's own search (same type, factor 1, no share of a max):
+    "Search for it that way" would find the same rows again."""
+    if way.real is not way.shown or way.has_share:
+        return False
+    try:
+        return way.factor(max_now) == 1
+    except ValueError:
+        return False
 
 
 def _repeats(hits: list[WatchHit]) -> bool:

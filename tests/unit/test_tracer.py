@@ -17,6 +17,7 @@ from cheatmaker.core.real_check import Verdict
 from cheatmaker.core.trace_way import Kind
 from cheatmaker.core.tracer import Outcome, Tracer, watch_span
 from cheatmaker.core.values import ValueType
+from cheatmaker.errors import ProtocolError, ReadFailed, WriteFailed
 from tests.asm import call, ends, ins, mem, rep_movsb, ret, rip
 from tests.tracegame import PID, RSP, TraceGame
 
@@ -337,19 +338,29 @@ def test_wrong_registers_fail_the_memory_check_and_write_nothing():
     g = TraceGame()
     obj, hud = g.alloc(0x40), g.alloc(0x80)
     decoy = g.alloc(0x40)
-    g.set(decoy + 0x10, F, 12.0)
-    g.set(obj + 0x10, F, 87.0)
+    k100 = g.const(F, 100.0)
+    g.set(decoy + 0x10, F, 0.5)
+    g.set(obj + 0x10, F, 0.875)
     g.routine(
         ins("MOVSS_XMM_XMMM32", "xmm0", mem("rbx", 0x10)),
+        ins("MULSS_XMM_XMMM32", "xmm0", rip(k100)),
         ins("MOVSS_XMMM32_XMM", mem("rdi", 0x40), "xmm0"),
         regs={"rbx": obj, "rdi": hud},
         trap_regs={"rbx": decoy},  # the console reports rbx wrong
     )
     r, _t, _c = run(g, hud + 0x40, F)
     assert r.outcome is Outcome.SEARCH_THAT_WAY and r.address is None
-    assert [why for _c, why in r.hops[0].tried] == ["held 12, expected 87"]
-    assert r.way.real is F and r.way.screen_text() == "as is"
+    assert [why for _c, why in r.hops[0].tried] == ["held 0.5, expected 0.875"]
+    assert r.way.real is F and r.way.screen_text() == "x100"
     assert g.fake.writes == []
+
+
+def test_a_way_that_is_the_copys_own_search_is_not_offered():
+    """As is, same type: searching that way finds the same rows (review finding 11)."""
+    g, _obj, hud, _decoy, _ip = wrong_regs_game()
+    r, _t, _c = run(g, hud + 0x40, F)
+    assert r.outcome is Outcome.NOT_FOLLOWED and r.way is None
+    assert r.reason == "no address passed the memory check"
 
 
 def two_hops(g: TraceGame):
@@ -582,8 +593,9 @@ def test_exec_fallback_stops_when_the_breakpoint_repeats(caplog):
     same = WatchHit(load_ip, {"rbx": obj, "rip": load_ip})
     g.fake.exec_hits[load_ip] = [same] * tr.EXEC_HITS
     r, _t, _c = run(g, hud + 0x40, F, Player(), exec_breakpoint=True)
-    assert r.outcome is Outcome.SEARCH_THAT_WAY
+    assert r.outcome is Outcome.NOT_FOLLOWED
     assert "the breakpoint repeats" in caplog.text
+    assert r.hops[0].stop.startswith("the breakpoint repeats; "), "kept, not overwritten"
     assert g.fake.writes == []
 
 
@@ -591,5 +603,227 @@ def test_exec_fallback_is_off_by_default():
     g, _obj, hud, _decoy, load_ip = wrong_regs_game()
     g.fake.exec_hits[load_ip] = [WatchHit(load_ip, {"rbx": 0, "rip": load_ip})]
     r, _t, _c = run(g, hud + 0x40, F)
-    assert r.outcome is Outcome.SEARCH_THAT_WAY
+    assert r.outcome is Outcome.NOT_FOLLOWED
     assert all(kind != "execute" for _a, _s, kind, _t in g.fake.watched)
+
+
+# -- review follow-ups: errors, time, read-modify-write, verdicts -------------------------
+def test_kept_test_value_ends_found_kept():
+    """Nothing copies the source any more by the write test: it keeps the test value."""
+    g = TraceGame()
+    obj, hud = float_copy(g)
+    player = Player(setter(g, obj + 0x10, F, 50.0))
+    player.on_hint[tr.Stage.TEST] = g.routines.clear
+    r, _t, _c = run(g, hud + 0x40, F, player)
+    assert r.outcome is Outcome.FOUND and r.verdict is Verdict.KEPT and r.sure
+    assert r.address == obj + 0x10
+    assert g.get(obj + 0x10, F) == 50.0, "put back"
+
+
+def test_a_write_test_that_fails_is_not_followed():
+    g = TraceGame()
+    obj, hud = float_copy(g)
+    player = Player(setter(g, obj + 0x10, F, 50.0))
+    player.on_hint[tr.Stage.TEST] = lambda: setattr(g.fake, "fail_writes", True)
+    r, _t, _c = run(g, hud + 0x40, F, player)
+    assert r.outcome is Outcome.NOT_FOLLOWED and r.reason == "couldn't be checked"
+    assert r.hops[0].verdict is Verdict.FAILED
+
+
+def test_a_source_that_passes_the_first_value_but_not_the_second():
+    """The trap's rbx points at a decoy that holds the same number at first."""
+    g = TraceGame()
+    obj, hud, decoy = g.alloc(0x40), g.alloc(0x80), g.alloc(0x40)
+    k100 = g.const(F, 100.0)
+    g.set(decoy + 0x10, F, 0.875)
+    g.set(obj + 0x10, F, 0.875)
+    g.routine(
+        ins("MOVSS_XMM_XMMM32", "xmm0", mem("rbx", 0x10)),
+        ins("MULSS_XMM_XMMM32", "xmm0", rip(k100)),
+        ins("MOVSS_XMMM32_XMM", mem("rdi", 0x40), "xmm0"),
+        regs={"rbx": obj, "rdi": hud},
+        trap_regs={"rbx": decoy},
+    )
+    r, _t, _c = run(g, hud + 0x40, F, Player(setter(g, obj + 0x10, F, 0.5)))
+    assert r.outcome is Outcome.SEARCH_THAT_WAY
+    assert [why for _c, why in r.hops[0].tried] == ["held 0.875, expected 0.5"]
+    assert g.fake.writes == []
+
+
+def cancel_run(g: TraceGame, addr: int, player: Player, stop: threading.Event, **kw):
+    clock = Clock()
+    kw.setdefault("sleep", clock.sleep)
+    t = Tracer(g.session, addr, F, clock=clock, settle_s=1.0, **kw)
+    return t.run(player, stop)
+
+
+def test_cancel_during_the_change_wait():
+    g = TraceGame()
+    _obj, hud = float_copy(g)
+    stop = threading.Event()
+    player = Player()
+    player.on_hint[tr.Stage.CHANGE] = stop.set
+    r = cancel_run(g, hud + 0x40, player, stop)
+    assert r.outcome is Outcome.CANCELLED and r.hops[0].verdict is None
+    assert g.fake.writes == []
+
+
+def test_cancel_during_the_write_test_puts_the_value_back():
+    g = TraceGame()
+    obj, hud = float_copy(g)
+    stop = threading.Event()
+    clock = Clock()
+    testing: list[bool] = []
+    player = Player(setter(g, obj + 0x10, F, 50.0))
+    player.on_hint[tr.Stage.TEST] = lambda: testing.append(True)
+
+    def sleep(s: float) -> None:
+        clock.sleep(s)
+        if testing:
+            stop.set()  # Cancel pressed while the test value is in
+
+    t = Tracer(g.session, hud + 0x40, F, clock=clock, sleep=sleep, settle_s=1.0)
+    r = t.run(player, stop)
+    assert r.outcome is Outcome.CANCELLED
+    assert any(a == obj + 0x10 for _p, a, _d in g.fake.writes), "the test value went in"
+    assert g.get(obj + 0x10, F) == 50.0, "its own value is back"
+    assert r.not_restored == ()
+
+
+def test_the_copy_freed_while_checking_is_not_followed(caplog):
+    caplog.set_level(logging.INFO, logger="cheatmaker.core.tracer")
+    g = TraceGame()
+    _obj, hud = float_copy(g)
+    real_read = g.fake.read
+
+    def gone(pid, addr, size):
+        if addr == hud + 0x40:
+            raise ReadFailed("not mapped")
+        return real_read(pid, addr, size)
+
+    player = Player()
+    player.on_hint[tr.Stage.STEADY] = lambda: setattr(g.fake, "read", gone)
+    r, _t, _c = run(g, hud + 0x40, F, player)
+    assert r.outcome is Outcome.NOT_FOLLOWED
+    assert r.reason == "the copy can't be read any more"
+    assert "action=trace_result outcome=not followed" in caplog.text
+    assert "action=trace_restore" in caplog.text
+
+
+def test_a_console_error_ends_failed_with_both_log_lines(caplog):
+    caplog.set_level(logging.INFO, logger="cheatmaker.core.tracer")
+    g = TraceGame()
+    _obj, hud = float_copy(g)
+
+    def bad_watch(*_a, **_kw):
+        raise ProtocolError("unexpected answer")
+
+    g.fake.watch = bad_watch
+    resumed = []
+    r, _t, _c = run(g, hud + 0x40, F, release=lambda a, n: lambda: resumed.append(a))
+    assert r.outcome is Outcome.FAILED and r.reason == "unexpected answer"
+    assert resumed == [hud + 0x40]
+    assert "action=trace_result outcome=failed" in caplog.text
+    assert "action=trace_restore not_restored=-" in caplog.text
+
+
+def test_a_failed_put_back_names_what_stayed():
+    g = TraceGame()
+    obj, hud = float_copy(g)
+    player = Player(setter(g, obj + 0x10, F, 50.0))
+    real_write = g.fake.write
+    count = []
+
+    def write(pid, addr, data):
+        count.append(addr)
+        if len(count) > 1:  # the test value goes in, the put-back is refused
+            raise WriteFailed("refused")
+        real_write(pid, addr, data)
+
+    g.fake.write = write
+    g.routines.clear()  # nothing rewrites it: the test value is still there to put back
+    g.every_read(lambda: g.set(hud + 0x40, F, g.get(obj + 0x10, F)))
+    r, _t, _c = run(g, hud + 0x40, F, player)
+    assert r.outcome is Outcome.FAILED and r.not_restored == (obj + 0x10,)
+
+
+def test_time_running_out_in_the_check_offers_the_last_source():
+    """Hop 2's check runs past TOTAL_S: TOO_FAR with hop 1's source, not sure."""
+    g = TraceGame()
+    obj, widget, hud = two_hops(g)
+    clock = Clock()
+    player = Player(setter(g, obj + 0x10, F, 0.5))  # only hop 1's change comes
+
+    def late() -> None:
+        if player.seen[-1][2] == 2:
+            clock.t = tr.TOTAL_S - 5  # hop 2's watch starts with 5 s left
+
+    player.on_hint[tr.Stage.WATCH] = late
+    t = Tracer(g.session, hud, I32, clock=clock, sleep=clock.sleep, settle_s=1.0)
+    r = t.run(player)
+    assert r.outcome is Outcome.TOO_FAR and r.reason == "the trace took too long"
+    assert r.address == widget + 0x20 and r.verdict is None and not r.sure
+    watches = [timeout for _a, _s, kind, timeout in g.fake.watched if kind == "write"]
+    assert watches[0] == tr.WATCH_S and watches[1] <= 5, "the watch is capped"
+    assert clock.t <= tr.TOTAL_S + tr.STEADY_S + tr.POLL_S
+
+
+def rmw_once(g: TraceGame, addr: int) -> None:
+    """``add [rsi],ecx`` (ecx 0) on ``addr``, run once: one read-modify-write hit."""
+    r = g.routine(ins("ADD_RM32_R32", mem("rsi"), "ecx"), regs={"rsi": addr, "rcx": 0})
+    g.routines.remove(r)
+
+
+def test_one_read_modify_write_among_more_frequent_writers_doesnt_decide():
+    g = TraceGame()
+    obj, hud = g.alloc(0x40), g.alloc(0x40)
+    g.set(obj + 8, I32, 51)
+    rmw_once(g, hud)
+    g.routine(
+        ins("MOV_R32_RM32", "eax", mem("rcx", 8)),
+        ins("MOV_RM32_R32", mem("rdx"), "eax"),
+        regs={"rcx": obj, "rdx": hud},
+    )
+    for _ in range(3):
+        g.tick()  # the copy is written every frame, the change in place only once
+    r, _t, _c = run(g, hud, I32, Player(setter(g, obj + 8, I32, 40)))
+    assert r.outcome is Outcome.FOUND and r.address == obj + 8, r.reason
+    assert [w.writer.hits for w in r.hops[0].writers] == [4, 1]
+
+
+def test_a_read_modify_write_decides_when_no_other_source_passes():
+    g = TraceGame()
+    obj, hud, decoy = g.alloc(0x40), g.alloc(0x40), g.alloc(0x40)
+    g.set(obj + 8, I32, 51)
+    g.set(decoy + 8, I32, 7)
+    rmw_once(g, hud)
+    g.routine(
+        ins("MOV_R32_RM32", "eax", mem("rcx", 8)),
+        ins("MOV_RM32_R32", mem("rdx"), "eax"),
+        regs={"rcx": obj, "rdx": hud},
+        trap_regs={"rcx": decoy},
+    )
+    r, _t, _c = run(g, hud, I32, Player(setter(g, obj + 8, I32, 40)))
+    assert r.outcome is Outcome.ALREADY_REAL and r.address is None
+    assert "no other source passed" in r.hops[0].stop
+
+
+def test_read_modify_write_found_at_hop_2_is_found_not_sure():
+    """The widget is changed in place (add [rsi],ecx) and the HUD copies it; something
+    the watch doesn't see puts the widget back after a test write, so hop 1 says copy."""
+    g = TraceGame()
+    widget, hud = g.alloc(0x40), g.alloc(0x40)
+    held = {"v": 60}
+    g.set(widget, I32, 60)
+    g.routine(ins("ADD_RM32_R32", mem("rsi"), "ecx"), regs={"rsi": widget, "rcx": 0})
+    g.routine(
+        ins("MOV_R32_RM32", "eax", mem("rsi")),
+        ins("MOV_RM32_R32", mem("rdx"), "eax"),
+        regs={"rsi": widget, "rdx": hud},
+    )
+    g.every_read(lambda: g.set(widget, I32, held["v"]))
+    r, _t, _c = run(g, hud, I32, Player(lambda: held.update(v=45)))
+    assert r.outcome is Outcome.FOUND, (r.reason, [h.stop for h in r.hops])
+    assert r.address == widget and r.verdict is None and not r.sure
+    assert r.hops[0].verdict is Verdict.COPY
+    assert r.hops[1].stop == "read-modify-write: it's the real one"

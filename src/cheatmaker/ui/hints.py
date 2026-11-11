@@ -293,6 +293,9 @@ TRACE_NOT_SURE = "The last place it checked is added to the list, marked not sur
 TRACE_UNCONFIRMED = "Change the number in the game so the app can check."
 TRACE_CANCELLED = "Stopped. Nothing was left changed."
 TRACE_LOST = "Lost connection to the PS5."
+TRACE_FAILED = (
+    "The PS5 refused a step of the check. Try again; if it keeps happening, press Copy log."
+)
 TRACE_NOT_RESTORED = "These may still hold a test value; restart the game to be safe: {addrs}"
 TRACE_KINDS = {
     "FLOAT": "a decimal",

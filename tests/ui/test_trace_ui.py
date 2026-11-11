@@ -203,10 +203,12 @@ def wrong_regs(game: Game) -> int:
     """A float copy whose trap registers point at a decoy: no address passes."""
     g = game.g
     obj, hud, decoy = g.alloc(0x40), g.alloc(0x80), g.alloc(0x40)
-    g.set(decoy + 0x10, F, 12.0)
-    g.set(obj + 0x10, F, 87.0)
+    k100 = g.const(F, 100.0)
+    g.set(decoy + 0x10, F, 0.5)
+    g.set(obj + 0x10, F, 0.875)
     g.routine(
         ins("MOVSS_XMM_XMMM32", "xmm0", mem("rbx", 0x10)),
+        ins("MULSS_XMM_XMMM32", "xmm0", rip(k100)),
         ins("MOVSS_XMMM32_XMM", mem("rdi", 0x40), "xmm0"),
         regs={"rbx": obj, "rdi": hud},
         trap_regs={"rbx": decoy},
@@ -222,13 +224,13 @@ def test_search_for_it_that_way(win, game):
     [d] = h.dialogs
     assert d.result.outcome is tr.Outcome.SEARCH_THAT_WAY
     assert d.hint.text() == (
-        "The game keeps it as decimal (4 bytes), the screen shows it as is. Search for it that way?"
+        "The game keeps it as decimal (4 bytes), the screen shows it x100. Search for it that way?"
     )
     assert not d.search_btn.isHidden()
     d.search_btn.click()
     f = win.find
     assert f.advanced.isChecked() and f.vtype.currentData() is F
-    assert f.number.text() == "87"
+    assert f.number.text() == "87.5"
 
 
 R = tr.TraceResult
@@ -269,6 +271,18 @@ R = tr.TraceResult
             "Found the value the game uses: 51, an 8-byte whole number; the screen shows it as is.",
         ),
         (R(tr.Outcome.FOUND, 1, 5), "Found the value the game uses."),
+        (R(tr.Outcome.FAILED, 1), hints.TRACE_FAILED),
+        (
+            R(tr.Outcome.FAILED, 1, not_restored=(0x20,)),
+            hints.TRACE_FAILED + " " + hints.TRACE_NOT_RESTORED.format(addrs="0x20"),
+        ),
+        (
+            R(tr.Outcome.TOO_FAR, 1, address=5, not_restored=(0x30,)),
+            "Followed it 0 steps without reaching the real value. "
+            + hints.TRACE_NOT_SURE
+            + " "
+            + hints.TRACE_NOT_RESTORED.format(addrs="0x30"),
+        ),
     ],
 )
 def test_result_text(result, text):
