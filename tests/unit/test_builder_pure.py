@@ -55,6 +55,15 @@ def methods(writer, vtype=INT32, effect=Effect.NEVER_DOWN, only_me=False, **kw):
             b.FLAGS_CARRY,
         ),
         (_w("294808", unsafe=FLAGS_UNSAFE, flags=FlagsUse(unknown=True)), INT32, b.FLAGS_UNKNOWN),
+        (  # inc [m] ; jbe: ZF is the inc's, CF from before it (review 5)
+            _w(
+                "ff80b0020000",
+                unsafe=FLAGS_UNSAFE,
+                flags=FlagsUse(frozenset({"ZF"}), before=frozenset({"CF"})),
+            ),
+            INT32,
+            b.FLAGS_BEFORE,
+        ),
         (_w("2988B0020000"), INT32, b.FLAGS_UNKNOWN),  # changes flags, never checked
     ],
 )

@@ -21,7 +21,8 @@ from cheatmaker.core.locker import Writer
 from cheatmaker.core.values import ValueType
 from cheatmaker.errors import LockFailed
 from tests import fakegame as fg
-from tests.minicpu import CF, OF, SF, ZF, bits_f32, f32_bits
+from tests.fakegame import _GameMemory
+from tests.minicpu import CF, OF, SF, ZF, Cpu, bits_f32, f32_bits
 
 FULL = {"float": 250.0, "int32": 250, "int64": 250_000}
 WRITES = {  # form -> (lower, raise, equal), from the start value
@@ -205,6 +206,34 @@ def test_sub_writer_jle_sees_the_stored_value_with_flags_fix():
         cpu = g.hit(g.player, -5, "int32")
         assert g.value(g.player, "int32") == 100
         assert cpu.condition(ix.ConditionCode.LE) is dead
+
+
+def test_flags_fix_changes_a_carry_the_writer_left_alone():
+    """Why classify skips ``inc [m] ; jbe`` (FLAGS_BEFORE): the jbe reads CF from before
+    the inc, and when the routine stores its value the flags_fix ``cmp`` sets CF = 0,
+    sending the game the other way."""
+    g = fg.build()
+    site = fg.BASE + 0x600
+    inc = bytes.fromhex("ff80b0020000")  # inc dword [rax+2B0h]
+    g.fake.poke(fg.PID, site, inc + bytes.fromhex("7600c3"))
+    w = Writer(site, inc, "", 1)
+    span = cv.hook_span(lambda a, n: g.fake.peek(fg.PID, a, n), site, single=True)
+    target = cv.writer_target(w)
+
+    def run() -> Cpu:
+        cpu = Cpu(_GameMemory(g.fake), rflags=0x202 | CF)
+        cpu["rsp"], cpu["rax"] = fg.RSP, g.player
+        return cpu.run(site, site + len(inc))
+
+    assert run().condition(ix.ConditionCode.BE), "the game's own run: CF=1 stays"
+    cave = cv.find_cave(g.session, 2 * cv.CAVE_ROOM, skip=cv.BUILD_CAVE_SKIP)
+    full = ValueType.INT32.encode(250)
+    code = cv.effect_code(
+        span, target, ValueType.INT32, cv.Effect.ALWAYS_FULL, cave, full=full, flags_fix=True
+    )
+    g.fake.poke(fg.PID, cave, code)
+    g.fake.poke(fg.PID, site, cv.jmp_patch(site, cave, len(inc)))
+    assert not run().condition(ix.ConditionCode.BE), "with flags_fix the old CF is lost"
 
 
 def test_wide_vtable_filter_runs_through_a_scratch_register():

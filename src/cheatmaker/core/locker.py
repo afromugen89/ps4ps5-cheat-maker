@@ -35,10 +35,14 @@ class FlagsUse:
     """Which flags left by a writer the game reads before anything sets them again.
 
     ``read`` holds names from CF PF AF ZF SF OF. ``unknown``: the code after the
-    writer couldn't be followed far enough to tell (treat as read)."""
+    writer couldn't be followed far enough to tell (treat as read). ``before``: when
+    ``read`` isn't empty, the flags the writer leaves alone that the game reads too
+    (``dec [m] ; jbe`` reads CF from before the dec): a hook that rebuilds the
+    writer's flags changes those as well."""
 
     read: frozenset[str] = frozenset()
     unknown: bool = False
+    before: frozenset[str] = frozenset()
 
     @property
     def used(self) -> bool:
@@ -194,16 +198,19 @@ _FLAGS_DEAD = (ix.FlowControl.RETURN, ix.FlowControl.CALL, ix.FlowControl.INDIRE
 FLAGS_UNSAFE = "the game checks the result right after it"
 
 
-def flags_read_after(read: Read, writer: Writer, budget: int = 32) -> FlagsUse:
+def flags_read_after(
+    read: Read, writer: Writer, budget: int = 32, *, pending: int | None = None
+) -> FlagsUse:
     """Follow the code after ``writer`` and report which of the flags it changes are
     read before something sets them again (``sub [rax+2ACh],ecx ; jle dead``).
 
     Both ways of a conditional jump are followed, plain jumps too; ``ret`` and
     ``call`` end a path (the calling convention doesn't keep flags across them).
     An indirect jump, code that won't decode, or running out of ``budget``
-    instructions with flags still unread makes the answer ``unknown``."""
+    instructions with flags still unread makes the answer ``unknown``. ``pending``:
+    the flags to follow (RflagsBits) instead of those the writer changes."""
     insn = decode_one(writer.code, writer.address)
-    pending0 = insn.rflags_modified & _STATUS_FLAGS
+    pending0 = (insn.rflags_modified if pending is None else pending) & _STATUS_FLAGS
     if not pending0:
         return FlagsUse()
     code = _CodeCache(read)
@@ -237,6 +244,18 @@ def flags_read_after(read: Read, writer: Writer, budget: int = 32) -> FlagsUse:
             elif pending:  # indirect jump, trap, interrupt: can't follow
                 return FlagsUse(_names(got), True)
     return FlagsUse(_names(got), False)
+
+
+def flags_use(read: Read, writer: Writer) -> FlagsUse:
+    """``flags_read_after``, plus ``before`` when the game reads the writer's flags."""
+    use = flags_read_after(read, writer)
+    if not use.read or use.unknown:
+        return use
+    left = _STATUS_FLAGS & ~decode_one(writer.code, writer.address).rflags_modified
+    if not left:
+        return use
+    every = flags_read_after(read, writer, pending=_STATUS_FLAGS)
+    return replace(use, unknown=every.unknown, before=every.read & _names(left))
 
 
 def _names(bits: int) -> frozenset[str]:
@@ -310,12 +329,12 @@ def find_writers(
         insn = decode_one(code, start)
         unsafe, shared = nop_unsafe(insn), bare_pointer(insn)
         writer = Writer(start, code, text, hits, unsafe, shared)
-        flags = flags_read_after(lambda a, n: client.read(game.pid, a, n), writer)
+        flags = flags_use(lambda a, n: client.read(game.pid, a, n), writer)
         if flags.used and unsafe is None:
             unsafe = FLAGS_UNSAFE
         log.info(
             "action=lock_watch writer=%#x code=%s text=%r hits=%d unsafe=%s shared=%s "
-            "flags_read=%s flags_unknown=%s",
+            "flags_read=%s flags_before=%s flags_unknown=%s",
             start,
             code.hex(),
             text,
@@ -323,6 +342,7 @@ def find_writers(
             unsafe,
             shared,
             ",".join(sorted(flags.read)) or "-",
+            ",".join(sorted(flags.before)) or "-",
             flags.unknown,
         )
         writers.append(replace(writer, unsafe=unsafe, flags=flags))
@@ -383,6 +403,7 @@ __all__ = [
     "bare_pointer",
     "find_writers",
     "flags_read_after",
+    "flags_use",
     "instruction_before",
     "make_lock_cheat",
     "nop_unsafe",

@@ -199,6 +199,25 @@ def test_flags_read_after(hexcode, read, unknown):
     assert use.used is (bool(read) or unknown)
 
 
+@pytest.mark.parametrize(
+    ("hexcode", "read", "before", "unknown"),
+    [
+        ("ff4808" + "7600c3", {"ZF"}, {"CF"}, False),  # dec ; jbe: CF from before the dec
+        ("ff4808" + "7400" + "f8" + "7200c3", {"ZF"}, set(), False),  # clc first: no CF read
+        ("ff4808" + "7e00c3", {"ZF", "SF", "OF"}, set(), False),  # dec ; jle: all the dec's
+        (SUB + "7600c3", {"ZF", "CF"}, set(), False),  # sub sets all six: nothing before
+        ("ff4808" + "7400" + "ffe0", {"ZF"}, set(), True),  # can't follow for the old CF
+        ("ff4808" + "7200c3", set(), set(), False),  # only CF read: no hook flags fix
+    ],
+)
+def test_flags_use_finds_flags_from_before_the_writer(hexcode, read, before, unknown):
+    from cheatmaker.core.locker import decode_one, flags_use
+
+    insn = decode_one(bytes.fromhex(hexcode), SITE)
+    use = flags_use(_code_at(hexcode), Writer(SITE, bytes.fromhex(hexcode)[: insn.len], "", 1))
+    assert (set(use.read), set(use.before), use.unknown) == (read, before, unknown)
+
+
 def test_flags_read_after_budget():
     code = SUB + "90" * 40 + "7e00c3"
     assert _flags(code).unknown
@@ -213,6 +232,13 @@ def test_find_writers_marks_a_writer_whose_flags_are_read(session, fake):
     assert w.unsafe == FLAGS_UNSAFE and w.flags == FlagsUse(frozenset({"ZF", "SF", "OF"}))
     with pytest.raises(LockFailed, match="right after it"):
         make_lock_cheat(session, w, "x")
+
+
+def test_find_writers_notes_flags_from_before_the_writer(session, fake):
+    fake.poke(PID, WRITER_ADDR, bytes.fromhex("ff4808" + "7600c3"))  # dec [rax+8] ; jbe
+    fake.writers[HEALTH_ADDR] = [WRITER_ADDR + 3]
+    [w] = find_writers(session, HEALTH_ADDR, 4, 1)
+    assert w.flags == FlagsUse(frozenset({"ZF"}), before=frozenset({"CF"}))
 
 
 def test_find_writers_keeps_safe_and_earlier_reasons(session, fake):

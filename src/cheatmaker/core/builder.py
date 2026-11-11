@@ -73,6 +73,7 @@ WRONG_SIZE = "it writes more than this value"
 MANY_WRITES = "it writes more than one place"
 FLAGS_UNKNOWN = "couldn't tell what the game checks right after it"
 FLAGS_CARRY = "the game checks a carry or parity right after it"
+FLAGS_BEFORE = "the game checks a flag from before it right after it"
 CRASHED = "it crashed the game last time"
 NO_METHOD = "no safe way to change it with this effect"
 TOO_SHORT_ONLY_ME = "it's too short for a jump, and Only me needs one"
@@ -225,6 +226,8 @@ def _rule_out(w: Writer, vtype: ValueType) -> tuple[str | None, bool]:
             return FLAGS_UNKNOWN, False
         if flags.read - _CAN_FIX:
             return FLAGS_CARRY, False
+        if flags.read and flags.before:  # flags_fix's cmp would change those too
+            return FLAGS_BEFORE, False
     return None, True
 
 
