@@ -238,7 +238,7 @@ def test_shift_fields_and_reset_class():
     down = health()
     down.fields.append(pj.Field("Ident", 8, ValueType.INT32))
     assert cr.shift_fields(down, -0x20) == ["Ident"]
-    assert [f.off for f in down.fields] == [fg.HP - 0x20, fg.HP32 - 0x20, 8], "never below 0"
+    assert [f.off for f in down.fields] == [fg.HP, fg.HP32, 8], "none moves when one can't"
 
 
 def test_a_field_that_would_move_before_the_object_fails_it():
@@ -347,7 +347,8 @@ def test_summary_without_cheats_counts_values():
 
 # -- Advanced: add to notes that already hold objects -----------------------------------------
 def test_for_merge_skips_names_and_remaps_ids():
-    found_here = pj.ObjectSpec("obj1", "Health", None, anchors=[pj.StaticAnchor(0x10)])
+    hp = [pj.Field("Health", fg.HP, ValueType.FLOAT)]
+    found_here = pj.ObjectSpec("obj1", "Health", None, hp, [pj.StaticAnchor(0x10)])
     into = pj.Project(fg.TITLE, "03.001.000", objects=[found_here])
     into.cheats.append(pj.ProjectCheat("Infinite health", "obj1", "Health"))
     src = notes()
@@ -378,8 +379,26 @@ def test_for_merge_brings_a_value_with_no_way_to_be_found_again_in_its_place():
     assert [(o.id, o.label) for o in out.objects] == [("obj7", "Health"), ("obj1", "Obolites")]
     assert out.objects[0].anchors == notes().objects[0].anchors
     assert [c.name for c in out.cheats] == ["Rich"] and out.cheats[0].object == "obj1"
+    twice = notes()
+    twice.objects.append(pj.ObjectSpec("obj9", "Health", None, [], [pj.StaticAnchor(0x40)]))
+    ids = [o.id for o in cr.for_merge(twice, into).objects]
+    assert ids == ["obj7", "obj1", "obj2"], "only the first Health takes the lost one's id"
     lost.check = False  # the player's own value with no way yet: never replaced
     assert [o.label for o in cr.for_merge(notes(), into).objects] == ["Obolites"]
+
+
+def test_for_merge_leaves_out_a_cheat_on_a_number_the_value_here_lacks():
+    here = pj.ObjectSpec("obj1", "Health", None, [pj.Field("Health", fg.HP, ValueType.FLOAT)])
+    here.anchors = [pj.StaticAnchor(0x10)]
+    into = pj.Project(fg.TITLE, "03.001.000", objects=[here])
+    src = notes()
+    src.cheats.append(pj.ProjectCheat("HP32 max", "obj1", "Health 32", "set", 5000))
+    src.cheats.append(pj.ProjectCheat("Both", parts=[pj.ProjectPart("a", "obj1", "Health 32", 1)]))
+    left: dict[str, str] = {}
+    out = cr.for_merge(src, into, left_out=left)
+    assert [c.name for c in out.cheats] == ["Infinite health", "Rich"]
+    why = "the Health already in your notes has no Health 32"
+    assert left == {"HP32 max": why, "Both": why}
 
 
 def test_assemble_counts_cheats_on_values_already_here_and_names_each_ones_version():
@@ -1032,7 +1051,8 @@ def test_update_with_hooks_tells_two_cheats_with_one_name_apart():
     )
     [moved] = [c for c in out.cheats if c.name == "No death"]
     assert moved.locations[0].offset == SHIFTED.sub_site - fg.BASE, "the one that moved"
-    assert rep.moved == ["No death"] and "No death" in rep.failed
+    assert rep.moved == ["No death #2"] and "No death #1" in rep.failed, "numbered apart"
+    assert rep.failed_at["No death #1"] == 0x10
 
 
 def test_update_with_hooks_before_a_bring_over_says_so():

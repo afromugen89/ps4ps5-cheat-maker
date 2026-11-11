@@ -70,6 +70,7 @@ NO_OBJECT = "its value isn't in the notes any more"
 NOT_PICKED = "none of the places was picked"
 HOOK_FILE_FIRST = "bring your notes over first (My cheats)"
 PC_OFF_AGAIN = "make the PC-off cheat again (Find it next time)"
+NO_FIELD = "the {label} already in your notes has no {field}"
 FIELDS_MOVED = "its numbers moved in a way that can't be followed"
 NO_ROOM = "there was no spare room in the game's memory for it"
 ROOM_USED = "the game used the spare memory it needs; restart the game and try again"
@@ -269,14 +270,12 @@ def carried_object(obj: ObjectSpec) -> ObjectSpec:
 
 
 def shift_fields(obj: ObjectSpec, shift: int) -> list[str]:
-    """Every field moves like the hooked field did (spec AC-U4 default). A field that
-    would land before the object's start stays where it was; their names are returned
-    (the object can't be trusted then)."""
-    stuck = []
-    for f in obj.fields:
-        if f.off + shift < 0:
-            stuck.append(f.name)
-        else:
+    """Every field moves like the hooked field did (spec AC-U4 default). If a field
+    would land before the object's start, none moves and their names are returned (the
+    object can't be trusted then)."""
+    stuck = [f.name for f in obj.fields if f.off + shift < 0]
+    if not stuck:
+        for f in obj.fields:
             f.off += shift
     return stuck
 
@@ -471,27 +470,37 @@ def assemble(
     return project, report
 
 
-def for_merge(source: Project, into: Project, avoid: Iterable[str] = ()) -> Project:
+def for_merge(
+    source: Project,
+    into: Project,
+    avoid: Iterable[str] = (),
+    left_out: dict[str, str] | None = None,
+) -> Project:
     """``source`` with only what ``into`` doesn't have yet (Advanced, AC-U7): objects
     whose label is new, and cheats whose name is new. A cheat on a value ``into``
-    already holds uses that value. A value a failed bring-over left in ``into`` (still
-    to be checked, no way to be found) is brought again under its own id, replacing it;
-    the player's own values are never replaced. Other object ids
-    are remapped to ids neither ``into`` nor ``avoid`` (e.g. objects whose hook is still
-    in the game) uses."""
+    already holds uses that value; if that value lacks the cheat's number, the cheat is
+    left out and named in ``left_out`` (cheat name -> reason). A value a failed
+    bring-over left in ``into`` (still to be checked, no way to be found) is brought
+    again under its own id, replacing it (once per id); the player's own values are
+    never replaced. Other object ids are remapped to ids neither ``into`` nor ``avoid``
+    (e.g. objects whose hook is still in the game) uses."""
     here = {o.label: o for o in into.objects}
     names = {c.name for c in into.cheats}
     used = {o.id for o in into.objects} | set(avoid)
     ids: dict[str, str] = {}
+    kept: dict[str, ObjectSpec] = {}  # source id -> the value already here it maps to
+    taken: set[str] = set()  # lost values already replaced (two source values, one label)
     objects = []
     n = 1
     for o in source.objects:
         mine = here.get(o.label)
         if mine is not None and (mine.anchors or not mine.check):  # kept; new cheats use it
             ids[o.id] = mine.id
+            kept[o.id] = mine
             continue
-        if mine is not None:  # a failed bring-over (no way to be found): brought again
+        if mine is not None and mine.id not in taken:  # a failed bring-over: brought again
             new_id = mine.id
+            taken.add(new_id)
         else:
             while f"obj{n}" in used:
                 n += 1
@@ -504,6 +513,16 @@ def for_merge(source: Project, into: Project, avoid: Iterable[str] = ()) -> Proj
     cheats = []
     for pc in source.cheats:
         if pc.name in names or any(o not in ids for o, _f in pc.anchors):
+            continue
+        missing = next(
+            ((kept[o], f) for o, f in pc.anchors if o in kept and not _has_field(kept[o], f)),
+            None,
+        )
+        if missing is not None:
+            why = NO_FIELD.format(label=missing[0].label, field=missing[1])
+            log.info("action=carry_merge cheat=%s result=left_out reason=%s", pc.name, why)
+            if left_out is not None:
+                left_out[pc.name] = why
             continue
         copy = _copy_cheat(pc)
         if copy.parts:
@@ -522,6 +541,10 @@ def for_merge(source: Project, into: Project, avoid: Iterable[str] = ()) -> Proj
         history=[],
         carried_from=source.carried_from,
     )
+
+
+def _has_field(obj: ObjectSpec, name: str) -> bool:
+    return any(f.name == name for f in obj.fields)
 
 
 # -- live steps (new version running) -----------------------------------------------------
@@ -579,17 +602,18 @@ def prepare(
         except CarryFailed as exc:
             drop_hook(it, exc.reason)
             continue
-        stuck = shift_fields(it.obj, it.shift)
+        shift = it.shift
+        stuck = shift_fields(it.obj, shift)
         if stuck:  # a cheat on such a field would write in front of the object
-            it.site = None
-            drop_hook(it, FIELDS_MOVED)
-            it.obj.anchors = []
             log.info(
                 "action=carry_fields object=%s shift=%d result=failed fields=%s",
                 it.obj.id,
-                it.shift,
+                shift,
                 ",".join(stuck),
             )
+            it.site = None
+            drop_hook(it, FIELDS_MOVED)
+            it.obj.anchors = []
     _carry_parts(plan, plan.image)
     return plan
 
@@ -1058,8 +1082,6 @@ def update_with_hooks(
             out[id(c)] = moved_by_tag[tag]
         else:
             failed[id(c)] = tag_report.failed.get(tag, NOT_FOUND)
-            if tag in tag_report.failed_at:
-                report.failed_at[c.name] = tag_report.failed_at[tag]
         if tag in tag_report.guessed:
             guessed.add(id(c))
     for line in lines:
@@ -1068,16 +1090,42 @@ def update_with_hooks(
         except CarryFailed as exc:
             failed[id(line.cheat)] = exc.reason
             log.info("action=update_hook cheat=%s result=failed reason=%s", line.cheat.name, exc)
+    at = {
+        id(c): tag_report.failed_at[str(i)]
+        for i, c in enumerate(rest.cheats)
+        if str(i) in tag_report.failed_at
+    }
+    label = _report_names(cf.cheats)
     cheats: list[Cheat] = []
     for c in cf.cheats:
+        name = label[id(c)]
         if id(c) in out:
             cheats.append(out[id(c)])
-            report.moved.append(c.name)
+            report.moved.append(name)
             if id(c) in guessed:
-                report.guessed.append(c.name)
+                report.guessed.append(name)
         else:
-            report.failed[c.name] = failed[id(c)]
+            report.failed[name] = failed[id(c)]
+            if id(c) in at:
+                report.failed_at[name] = at[id(c)]
     return replace(moved, cheats=cheats), report
+
+
+def _report_names(cheats: list[Cheat]) -> dict[int, str]:
+    """Each cheat's name in the summary: a name used more than once gets its number in
+    the file ("No death #2"), so a moved one and a failed one read apart."""
+    count: dict[str, int] = {}
+    for c in cheats:
+        count[c.name] = count.get(c.name, 0) + 1
+    seen: dict[str, int] = {}
+    out = {}
+    for c in cheats:
+        if count[c.name] == 1:
+            out[id(c)] = c.name
+        else:
+            seen[c.name] = seen.get(c.name, 0) + 1
+            out[id(c)] = f"{c.name} #{seen[c.name]}"
+    return out
 
 
 # -- fingerprints for the notes (AC-U2) -------------------------------------------------
@@ -1192,6 +1240,7 @@ __all__ = [
     "NOTHING_TOUCHED",
     "NOT_FOUND",
     "NOT_PUT_IN",
+    "NO_FIELD",
     "NO_ROOM",
     "OTHER_MODULE",
     "PART_FAILED",

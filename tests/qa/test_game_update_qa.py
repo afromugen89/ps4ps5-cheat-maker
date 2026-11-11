@@ -473,7 +473,7 @@ def test_tc24_field_shift_never_gives_a_negative_offset():
     g = fg.build(3, layout=dataclasses.replace(fg.V2, field_shift=-0x20))
     _plan, new, _report, _ = tc.run_carry(old, g)
     offs = {f.name: f.off for f in new.objects[0].fields}
-    assert offs["Health"] == fg.HP - 0x20
+    assert offs["Health"] == fg.HP, "none moves when one can't (review m-d)"
     assert all(off >= 0 for off in offs.values()), offs
 
 
@@ -726,10 +726,6 @@ def test_tc36_link_drops_while_the_player_picks(make):
     assert not new_path().exists() and not app.ctl.code_reading
 
 
-@pytest.mark.xfail(
-    reason="BUG-13: the carry_fields log line says shift=0 instead of the real shift",
-    strict=True,
-)
 def test_tc41_the_field_log_line_names_the_real_shift(caplog):
     """TC-41 (BUG-08 fix, log): the console tester reads action=carry_fields to see how far
     the value moved; the shift must be the hooked field's (-0x20 = -32), not 0."""
@@ -855,11 +851,6 @@ def test_tc39_merge_onto_a_value_without_the_cheats_field(make):
     assert "HP32 max" in shown or "Not brought over: HP32 max" in text, (shown, text)
 
 
-@pytest.mark.xfail(
-    reason="BUG-12: Advanced gives two values with the same name one id when the notes "
-    "hold a lost value of that name",
-    strict=True,
-)
 def test_tc40_merge_keeps_object_ids_unique_with_repeated_names():
     """TC-40 (BUG-06 fix, new edge): the old notes hold two values both named "Ammo" (two
     cheats with one name, as TC-23); the new notes hold a lost "Ammo". for_merge must not
