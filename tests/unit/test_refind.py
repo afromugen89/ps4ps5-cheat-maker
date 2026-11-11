@@ -420,3 +420,27 @@ def test_on_lost_runs_without_the_tracker_lock():  # QA risk, round 5
     tracker.on_lost = lost
     game.fake.poke(fg.PID, game.player, bytes(0x300))  # gone, and nothing finds it
     assert tracker.current() is None and free == [True]
+
+
+def test_learn_failed_carries_the_plain_reasons():  # spec-restart-combined AC-2
+    game = fg.build()
+    game.fake.read_hits.clear()
+    game.fake.write_hits.clear()
+    with pytest.raises(rf.LearnFailed) as err:
+        rf.learn(game.session, game.health_addr, ValueType.FLOAT, "fraction", "obj1")
+    assert isinstance(err.value, FindFailed)
+    assert err.value.notes == ["Nothing in the game touched the value while we watched."]
+
+
+def test_learn_stops_when_cancelled():  # AC-2: Cancel
+    import threading
+
+    from cheatmaker.errors import ScanCancelled
+
+    game = fg.build()
+    cancel = threading.Event()
+    cancel.set()
+    with pytest.raises(ScanCancelled):
+        rf.learn(game.session, game.health_addr, ValueType.FLOAT, "h", "obj1", cancel=cancel)
+    assert len(game.fake.watched) == 1, "no spare-memory check after Cancel"
+    assert not any(a < fg.HEAP for _p, a, _d in game.fake.writes), "no game code changed"

@@ -273,6 +273,15 @@ def remember(project: Project, outcome: Outcome) -> None:
 
 
 # -- learn ("Find it next time") -----------------------------------------------------------
+class LearnFailed(FindFailed):
+    """No way to find the value again. ``notes`` say why, in plain words (a combined
+    cheat's dialog shows them for the part that failed)."""
+
+    def __init__(self, message: str, notes: list[str]) -> None:
+        super().__init__(message)
+        self.notes = list(notes)
+
+
 @dataclass
 class Learned:
     obj: ObjectSpec
@@ -323,8 +332,8 @@ def learn(
     progress: ProgressFn | None = None,
     cancel: threading.Event | None = None,
 ) -> Learned:
-    """Build every anchor that can hold for the value at ``address``. Raises FindFailed
-    when none can (AC-11.3)."""
+    """Build every anchor that can hold for the value at ``address``. Raises LearnFailed
+    when none can (AC-11.3), ScanCancelled when ``cancel`` is set during the watches."""
     game = session.require_game()
     client = session.require_client()
     say = step or (lambda _s: None)
@@ -341,7 +350,10 @@ def learn(
 
     say("watch")
     # Only instructions whose registers proved [reg + disp] == the value's address.
-    cands = [c for c in ah.find_hooks(session, address, vtype.size, watch_seconds) if c.confirmed]
+    found = ah.find_hooks(session, address, vtype.size, watch_seconds, cancel=cancel)
+    if cancel is not None and cancel.is_set():
+        raise ScanCancelled("Find it next time was cancelled")
+    cands = [c for c in found if c.confirmed]
     if cands:
         obj_addr = cands[0].object_for(address)
         fld.off = cands[0].disp
@@ -359,7 +371,7 @@ def learn(
             try:
                 hook = ah.plan_hook(session, hookable, obj.vtable, fallback)
                 say("prove")
-                ah.prove_slot(session, game.module_base + hook.slot, prove_seconds)
+                ah.prove_slot(session, game.module_base + hook.slot, prove_seconds, cancel=cancel)
             except (FindFailed, LockFailed) as exc:
                 notes.append(str(exc))
             else:
@@ -382,9 +394,10 @@ def learn(
         if chains:
             methods.append("chain")
     if not obj.anchors:
-        raise FindFailed(
+        raise LearnFailed(
             f"Couldn't find a way to find {label} again. It still works for this session; "
-            "try Lock it to make it stick. " + " ".join(notes)
+            "try Lock it to make it stick. " + " ".join(notes),
+            notes,
         )
     log.info(
         "action=learn object=%s address=%#x object_at=%#x field=%#x vtable=%s methods=%s",
@@ -638,6 +651,7 @@ class Tracker:
 
 __all__ = [
     "Found",
+    "LearnFailed",
     "Learned",
     "MapIndex",
     "Outcome",
