@@ -3,6 +3,8 @@ import pytest
 from cheatmaker.core.cheats import LocationKind
 from cheatmaker.core.freezer import Freezer, LiveCheats
 from cheatmaker.core.locker import (
+    FLAGS_UNSAFE,
+    FlagsUse,
     Writer,
     find_writers,
     instruction_before,
@@ -10,7 +12,7 @@ from cheatmaker.core.locker import (
     patch_landed,
     verify_original,
 )
-from cheatmaker.errors import LockFailed
+from cheatmaker.errors import LockFailed, ReadFailed
 from tests.conftest import HEALTH_ADDR, HEAP_BASE, MODULE_BASE, PID, WRITER_ADDR
 
 
@@ -146,3 +148,77 @@ def test_bare_pointer_writers_are_flagged_shared():
     assert bare_pointer(decode_one(bytes.fromhex("c4c17a1106"), 0))  # vmovss [r14],xmm0
     assert not bare_pointer(decode_one(bytes.fromhex("c5fa118f28070000"), 0))  # [rdi+728h]
     assert not bare_pointer(decode_one(bytes.fromhex("890c88"), 0))  # [rax+rcx*4]
+
+
+# -- flags the game reads after a writer (spec-cheat-builder S3) -----------------------
+SITE = 0x401000
+SUB = "2988ac020000"  # sub [rax+2ACh],ecx: sets all six status flags
+
+
+def _code_at(hexcode: str, site: int = SITE):
+    buf = bytes.fromhex(hexcode)
+
+    def read(addr: int, size: int) -> bytes:
+        if not site <= addr < site + len(buf):
+            raise ReadFailed("not mapped")
+        return buf[addr - site : addr - site + size]
+
+    return read
+
+
+def _flags(hexcode: str, budget: int = 32):
+    from cheatmaker.core.locker import decode_one, flags_read_after
+
+    insn = decode_one(bytes.fromhex(hexcode), SITE)
+    writer = Writer(SITE, bytes.fromhex(hexcode)[: insn.len], "", 1)
+    return flags_read_after(_code_at(hexcode), writer, budget)
+
+
+@pytest.mark.parametrize(
+    ("hexcode", "read", "unknown"),
+    [
+        ("898808000000" + "7e00c3", set(), False),  # mov: no flags to read
+        (SUB + "7e00c3", {"ZF", "SF", "OF"}, False),  # sub ; jle: the classic
+        (SUB + "89c883c001c3", set(), False),  # mov leaves them, add rewrites all
+        (SUB + "c3", set(), False),  # ret: flags are dead
+        (SUB + "e800000000", set(), False),  # call: flags are dead
+        (SUB + "ffe0", set(), True),  # jmp rax: can't follow
+        (SUB + "06", set(), True),  # doesn't decode
+        (SUB + "0f0b", set(), True),  # ud2: can't follow
+        (SUB + "ebfe", set(), True),  # jmp to itself: runs out of budget
+        (SUB + "eb0190" + "72fec3", {"CF"}, False),  # jmp over a byte, then jb
+        (SUB + "740483c001c3" + "7200c3", {"ZF", "CF"}, False),  # jz both ways
+        ("ff4008" + "720039c0c3", set(), False),  # inc leaves CF: jb reads the old one
+        ("ff4008" + "7c00c3", {"SF", "OF"}, False),  # inc ; jl
+        (SUB + "9c", {"CF", "PF", "AF", "ZF", "SF", "OF"}, True),  # pushfq, then ends
+    ],
+)
+def test_flags_read_after(hexcode, read, unknown):
+    use = _flags(hexcode)
+    assert set(use.read) == read and use.unknown is unknown
+    assert use.used is (bool(read) or unknown)
+
+
+def test_flags_read_after_budget():
+    code = SUB + "90" * 40 + "7e00c3"
+    assert _flags(code).unknown
+    assert _flags(code, budget=64) == FlagsUse(frozenset({"ZF", "SF", "OF"}), False)
+
+
+def test_find_writers_marks_a_writer_whose_flags_are_read(session, fake):
+    # sub [rax+8],ecx ; jle: switching it off leaves the jle on stale flags
+    fake.poke(PID, WRITER_ADDR, bytes.fromhex("294808" + "7e00c3"))
+    fake.writers[HEALTH_ADDR] = [WRITER_ADDR + 3]
+    [w] = find_writers(session, HEALTH_ADDR, 4, 1)
+    assert w.unsafe == FLAGS_UNSAFE and w.flags == FlagsUse(frozenset({"ZF", "SF", "OF"}))
+    with pytest.raises(LockFailed, match="right after it"):
+        make_lock_cheat(session, w, "x")
+
+
+def test_find_writers_keeps_safe_and_earlier_reasons(session, fake):
+    [w] = find_writers(session, HEALTH_ADDR, 4, 1)  # mov [rax],ecx
+    assert w.unsafe is None and w.flags == FlagsUse()
+    fake.poke(PID, WRITER_ADDR, bytes.fromhex("f00fc108" + "7e00c3"))  # lock xadd ; jle
+    fake.writers[HEALTH_ADDR] = [WRITER_ADDR + 4]
+    [w] = find_writers(session, HEALTH_ADDR, 4, 1)
+    assert "atomic" in w.unsafe and w.flags.used

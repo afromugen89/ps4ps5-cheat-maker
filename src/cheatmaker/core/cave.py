@@ -10,12 +10,16 @@ Games often write everyone's health with one instruction, e.g. at Returnal's
    value differs from all the others (Returnal: +0x08 == 0x40048).
 3. **Cave.** In spare zero bytes at the end of the game's code, write::
 
+       lea rsp,[rsp-128] ; pushfq              ; keep the red zone and the flags
        cmp dword [r12+field], player_value
        jne normal
-       mov [r12+0x2AC], <the value you want>   ; player: keep it
+       popfq ; lea rsp,[rsp+128]
+       vmovss [r12+0x2AC], xmm1                ; player: the game's write runs first,
+       mov [r12+0x2AC], <the value you want>   ;   then the kept value goes over it
        <instructions after the writer that the hook covered>
        jmp back
      normal:
+       popfq ; lea rsp,[rsp+128]
        <the original instructions>             ; everyone else: as before
        jmp back
 
@@ -36,7 +40,7 @@ import iced_x86 as ix
 
 from cheatmaker.console.client import MemMap
 from cheatmaker.core.cheats import Cheat, Location, LocationKind, value_positions
-from cheatmaker.core.locker import Writer, writes_memory
+from cheatmaker.core.locker import Read, Writer, writes_memory
 from cheatmaker.core.session import Session
 from cheatmaker.core.values import ValueType
 from cheatmaker.errors import LockFailed, ScanCancelled
@@ -51,8 +55,6 @@ CAVE_ROOM = 256  # bytes reserved for one cave
 MAX_SLOTS = 64  # find_slot looks this far below the table for a free 16-byte slot
 SEARCH_TAIL = 0x10000  # look for spare bytes in the last 64 KiB of the code
 RED_ZONE = 128  # SysV leaf functions may use 128 bytes below rsp
-
-Read = Callable[[int, int], bytes]
 
 
 @dataclass(frozen=True)
@@ -206,25 +208,49 @@ def player_only_code(
     value: bytes,
     cave: int,
 ) -> bytes:
-    """The cave: the player gets ``value`` instead of the game's write."""
+    """The cave: the player gets ``value`` instead of the game's write.
+
+    The ``cmp`` runs between ``pushfq`` and ``popfq`` (past the red zone), so the game
+    never sees flags from our check. On the player's path the game's writer still runs
+    first, then ``value`` goes over it, so the flags it leaves are the game's own (an
+    older version skipped the writer and left our ``cmp`` flags behind)."""
     back = span[-1].next_ip
     C, Ins = ix.Code, ix.Instruction
     normal_ip = 0xFFFF_0000  # placeholder label, resolved by the encoder
-    stores = _stores(target, value)
-    normal = [i.copy() for i in span]
+    normal = [*_unstack(), *[i.copy() for i in span]]
     normal[0] = _label(normal[0], normal_ip)
+    copies = [_label(i.copy(), 0xFFFE_0000 + k) for k, i in enumerate(span)]
     body = [
+        *_stack(),
         Ins.create_mem_u32(C.CMP_RM32_IMM32, _mem(target.base, field), player_value & 0xFFFFFFFF),
         Ins.create_branch(C.JNE_REL32_64, normal_ip),
-        *stores,
-        *[  # what the hook covered after the writer (fresh labels: they're copies)
-            _label(i.copy(), 0xFFFE_0000 + k) for k, i in enumerate(span[1:])
-        ],
+        *_unstack(),
+        copies[0],  # the game's write: its flags, its other effects
+        *_stores(target, value),
+        *copies[1:],  # what the hook covered after the writer
         Ins.create_branch(C.JMP_REL32_64, back),
         *normal,
         Ins.create_branch(C.JMP_REL32_64, back),
     ]
     return _encode(body, cave)
+
+
+def _stack() -> list[ix.Instruction]:
+    """Step past the red zone and keep the game's flags."""
+    C, Ins = ix.Code, ix.Instruction
+    return [
+        Ins.create_reg_mem(C.LEA_R64_M, ix.Register.RSP, _mem(ix.Register.RSP, -RED_ZONE)),
+        Ins.create(C.PUSHFQ),
+    ]
+
+
+def _unstack() -> list[ix.Instruction]:
+    """Undo ``_stack``: the game's flags and stack as they were."""
+    C, Ins = ix.Code, ix.Instruction
+    return [
+        Ins.create(C.POPFQ),
+        Ins.create_reg_mem(C.LEA_R64_M, ix.Register.RSP, _mem(ix.Register.RSP, RED_ZONE)),
+    ]
 
 
 SLOT_SIZE = 16
@@ -289,17 +315,6 @@ def capture_code(
         check = []
     else:
         raise ValueError(f"unknown filter {filter_kind!r}")
-    pro = [
-        Ins.create_reg_mem(C.LEA_R64_M, ix.Register.RSP, _mem(ix.Register.RSP, -RED_ZONE)),
-        Ins.create(C.PUSHFQ),
-    ]
-
-    def epilogue() -> list[ix.Instruction]:
-        return [
-            Ins.create(C.POPFQ),
-            Ins.create_reg_mem(C.LEA_R64_M, ix.Register.RSP, _mem(ix.Register.RSP, RED_ZONE)),
-        ]
-
     capture = [
         *check,
         *([Ins.create_branch(C.JNE_REL32_64, other_ip)] if check else []),
@@ -314,16 +329,16 @@ def capture_code(
         n = 1 if writes_memory(span[0]) else 0
         copies = [_label(i.copy(), 0xFFFE_0000 + k) for k, i in enumerate(span)]
         keep = [
-            *epilogue(),
+            *_unstack(),
             *copies[:n],
             *_stores(target, value),
             *copies[n:],
             Ins.create_branch(C.JMP_REL32_64, back),
         ]
-    other = epilogue()
+    other = _unstack()
     other[0] = _label(other[0], other_ip)
     body = [
-        *pro,
+        *_stack(),
         *capture,
         *keep,
         *other,

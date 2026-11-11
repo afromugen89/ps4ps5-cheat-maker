@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import iced_x86 as ix
 
@@ -25,6 +25,24 @@ NOP = 0x90
 _formatter = ix.Formatter(ix.FormatterSyntax.INTEL)
 _info = ix.InstructionInfoFactory()
 
+Read = Callable[[int, int], bytes]
+"""``read(address, size)``: the game's memory."""
+
+
+@dataclass(frozen=True)
+class FlagsUse:
+    """Which flags left by a writer the game reads before anything sets them again.
+
+    ``read`` holds names from CF PF AF ZF SF OF. ``unknown``: the code after the
+    writer couldn't be followed far enough to tell (treat as read)."""
+
+    read: frozenset[str] = frozenset()
+    unknown: bool = False
+
+    @property
+    def used(self) -> bool:
+        return bool(self.read) or self.unknown
+
 
 @dataclass(frozen=True)
 class Writer:
@@ -34,6 +52,7 @@ class Writer:
     hits: int  # how many times it wrote during the watch
     unsafe: str | None = None  # why NOPs here could hang the game; None = safe
     shared: bool = False  # writes through a bare pointer: likely code shared by many values
+    flags: FlagsUse | None = None  # flags the game reads after it; None = not checked
 
     @property
     def length(self) -> int:
@@ -161,10 +180,102 @@ def decode_one(code: bytes, ip: int) -> ix.Instruction:
     return ix.Decoder(64, code, ip=ip).decode()
 
 
+_FLAG_NAMES = (
+    (ix.RflagsBits.CF, "CF"),
+    (ix.RflagsBits.PF, "PF"),
+    (ix.RflagsBits.AF, "AF"),
+    (ix.RflagsBits.ZF, "ZF"),
+    (ix.RflagsBits.SF, "SF"),
+    (ix.RflagsBits.OF, "OF"),
+)
+_STATUS_FLAGS = sum(bit for bit, _name in _FLAG_NAMES)
+_FLAGS_DEAD = (ix.FlowControl.RETURN, ix.FlowControl.CALL, ix.FlowControl.INDIRECT_CALL)
+FLAGS_UNSAFE = "the game checks the result right after it"
+
+
+def flags_read_after(read: Read, writer: Writer, budget: int = 32) -> FlagsUse:
+    """Follow the code after ``writer`` and report which of the flags it changes are
+    read before something sets them again (``sub [rax+2ACh],ecx ; jle dead``).
+
+    Both ways of a conditional jump are followed, plain jumps too; ``ret`` and
+    ``call`` end a path (the calling convention doesn't keep flags across them).
+    An indirect jump, code that won't decode, or running out of ``budget``
+    instructions with flags still unread makes the answer ``unknown``."""
+    insn = decode_one(writer.code, writer.address)
+    pending0 = insn.rflags_modified & _STATUS_FLAGS
+    if not pending0:
+        return FlagsUse()
+    code = _CodeCache(read)
+    seen: set[tuple[int, int]] = set()
+    todo = [(writer.address + writer.length, pending0)]
+    got = 0
+    while todo:
+        ip, pending = todo.pop()
+        if (ip, pending) in seen:
+            continue
+        seen.add((ip, pending))
+        while pending:
+            if budget <= 0:
+                return FlagsUse(_names(got), True)
+            budget -= 1
+            insn = code.decode(ip)
+            if insn is None:
+                return FlagsUse(_names(got), True)
+            got |= insn.rflags_read & pending
+            pending &= ~insn.rflags_modified
+            flow = insn.flow_control
+            if flow in _FLAGS_DEAD:
+                break
+            if flow == ix.FlowControl.CONDITIONAL_BRANCH:
+                todo.append((insn.near_branch_target, pending))
+                ip = insn.next_ip
+            elif flow == ix.FlowControl.UNCONDITIONAL_BRANCH:
+                ip = insn.near_branch_target
+            elif flow == ix.FlowControl.NEXT:
+                ip = insn.next_ip
+            elif pending:  # indirect jump, trap, interrupt: can't follow
+                return FlagsUse(_names(got), True)
+    return FlagsUse(_names(got), False)
+
+
+def _names(bits: int) -> frozenset[str]:
+    return frozenset(name for bit, name in _FLAG_NAMES if bits & bit)
+
+
+class _CodeCache:
+    """Decodes instructions from the game's code, reading it in 64-byte blocks."""
+
+    def __init__(self, read: Read) -> None:
+        self._read = read
+        self._blocks: dict[int, bytes] = {}
+
+    def _bytes(self, ip: int) -> bytes:
+        out = b""
+        for block in (ip & ~(CONTEXT - 1), (ip & ~(CONTEXT - 1)) + CONTEXT):
+            if block not in self._blocks:
+                try:
+                    self._blocks[block] = self._read(block, CONTEXT)
+                except ReadFailed:
+                    self._blocks[block] = b""
+            out += self._blocks[block]
+            if len(self._blocks[block]) < CONTEXT:
+                break
+        start = ip - (ip & ~(CONTEXT - 1))
+        return out[start : start + MAX_INSN]
+
+    def decode(self, ip: int) -> ix.Instruction | None:
+        raw = self._bytes(ip)
+        insn = ix.Decoder(64, raw, ip=ip).decode()
+        return None if insn.code == ix.Code.INVALID else insn
+
+
 def find_writers(
     session: Session, address: int, size: int, timeout_s: float = 30.0
 ) -> list[Writer]:
-    """Watch ``address`` while the player makes the value change. Most hits first."""
+    """Watch ``address`` while the player makes the value change. Most hits first.
+
+    A writer whose flags the game reads right after it (``sub ... ; jle``) is marked
+    unsafe: switching it off leaves that branch looking at stale flags."""
     client = session.require_client()
     game = session.require_game()
     rips = client.watch_writes(game.pid, address, size, timeout_s)
@@ -191,16 +302,23 @@ def find_writers(
         start, code, text = found
         insn = decode_one(code, start)
         unsafe, shared = nop_unsafe(insn), bare_pointer(insn)
+        writer = Writer(start, code, text, hits, unsafe, shared)
+        flags = flags_read_after(lambda a, n: client.read(game.pid, a, n), writer)
+        if flags.used and unsafe is None:
+            unsafe = FLAGS_UNSAFE
         log.info(
-            "action=lock_watch writer=%#x code=%s text=%r hits=%d unsafe=%s shared=%s",
+            "action=lock_watch writer=%#x code=%s text=%r hits=%d unsafe=%s shared=%s "
+            "flags_read=%s flags_unknown=%s",
             start,
             code.hex(),
             text,
             hits,
             unsafe,
             shared,
+            ",".join(sorted(flags.read)) or "-",
+            flags.unknown,
         )
-        writers.append(Writer(start, code, text, hits, unsafe, shared))
+        writers.append(replace(writer, unsafe=unsafe, flags=flags))
     if not writers:
         raise LockFailed("couldn't work out which instruction changes the value")
     return writers
@@ -251,9 +369,13 @@ def patch_landed(session: Session, cheat: Cheat) -> bool:
 
 
 __all__ = [
+    "FLAGS_UNSAFE",
+    "FlagsUse",
+    "Read",
     "Writer",
     "bare_pointer",
     "find_writers",
+    "flags_read_after",
     "instruction_before",
     "make_lock_cheat",
     "nop_unsafe",
