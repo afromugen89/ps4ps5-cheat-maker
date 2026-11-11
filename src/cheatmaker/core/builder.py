@@ -2,24 +2,54 @@
 
 The pure part: which writers may be patched and how (``classify``, rules S1 to S4 and
 S7), in what order fixes are tried (``candidates``), and whether a test passed
-(``judge``, the B5 rules). No console here, so all of it is tested directly.
+(``judge``, the B5 rules). No console there, so all of it is tested directly.
+
+The console part, ``Builder``: one method per step the dialog runs as a background
+job (``real_check``, ``watch``, ``collect``, ``try_candidate``, ``finalize``). Every
+byte a test fix puts in the game is noted in one record under a lock, so ``rollback``
+can run from any thread (worker, Cancel, Disconnect) and runs once.
 """
 
 from __future__ import annotations
 
 import logging
 import math
-from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+import struct
+import threading
+import time
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass, field
 from enum import Enum
 
 import iced_x86 as ix
 
+from cheatmaker.core import anchor_hook as ah
+from cheatmaker.core import build_notes as notes
 from cheatmaker.core import cave as cv
+from cheatmaker.core import real_check as rc
 from cheatmaker.core.cave import Effect
-from cheatmaker.core.locker import FLAGS_UNSAFE, Writer, decode_one, writes_memory
+from cheatmaker.core.cheats import Cheat, Location, LocationKind, value_positions
+from cheatmaker.core.freezer import LiveCheats
+from cheatmaker.core.locker import (
+    FLAGS_UNSAFE,
+    NOP,
+    Writer,
+    decode_one,
+    find_writers,
+    writes_memory,
+)
+from cheatmaker.core.session import Session
 from cheatmaker.core.values import ValueType
-from cheatmaker.errors import LockFailed
+from cheatmaker.errors import (
+    BuildFailed,
+    CheatMakerError,
+    ConnectionLost,
+    LockFailed,
+    ProtocolError,
+    ReadFailed,
+    ScanCancelled,
+    WriteFailed,
+)
 
 log = logging.getLogger(__name__)
 
@@ -332,9 +362,767 @@ def _finite(v) -> bool:
     return not isinstance(v, float) or math.isfinite(v)
 
 
+# -- the console part -------------------------------------------------------------------
+WATCH_S = 30.0  # B2: how long the write watch runs at most
+EARLY_HITS = 3  # B2: this many writes caught ...
+EARLY_MORE_S = 5.0  # ... and this much longer, then the watch ends early
+COLLECT_S = 20.0  # B4: Only me's Collect step
+TEST_S = 20.0  # B5: one live test
+POLL_S = 0.25  # B5: read the value and the counter this often
+ALIVE_EVERY_S = 1.0  # B5: check the game is alive this often
+ALIVE_ANSWER_S = 2.0  # B5: a read slower than this means the PS5 isn't answering
+PROCESSES_EVERY_S = 3.0  # fallback when the PS5 can't say which app is in front
+PUT_BACK_WAIT_S = notes.PUT_BACK_WAIT_S  # B6: before routine and counter are zeroed
+MAX_OTHERS = 4  # Only me: other objects read during a test
+
+NOTHING_CHANGED = "Nothing changed it. Try again and make it change while the bar moves."
+NOTHING_WORKED = "None of the safe fixes worked for this value. Your game is unchanged."
+NOT_SURE_REAL = "Not sure this is the real one."
+ONLY_YOU_SEEN = "Only you were seen. Get hit and hit enemies while the bar moves."
+CANT_TELL_APART = "Couldn't tell you apart from enemies."
+NOT_TAKEN = "the PS5 didn't take the change"
+RESTART = "Restart the game: fixes only live in memory until then."
+
+
+class TryResult(Enum):
+    PASS = "pass"
+    FAIL = "fail"
+    NO_HIT = "no hit"
+    NEEDS_ANSWER = "needs answer"
+    LOST = "lost"  # the game stopped answering
+    CANCELLED = "cancelled"
+
+
+class Rollback(Enum):
+    RESTORED = "restored"
+    NOT_RESTORED = "not restored"  # the PS5 didn't answer: the bytes may still be there
+    NOTHING = "nothing"  # nothing was in the game
+
+
+@dataclass(frozen=True)
+class TestOutcome:
+    result: TryResult
+    hint: str = ""
+    question: Question | None = None
+    rollback: Rollback = Rollback.NOTHING
+
+
+@dataclass(frozen=True)
+class BuildResult:
+    cheat: Cheat
+    after_restart: str  # "Yes" or "Check after restart" (B8)
+    skipped: tuple[Skipped, ...] = ()
+
+
+@dataclass
+class _Room:
+    """One hooked writer's routine rooms (test, saved) and its jump."""
+
+    part: Part
+    test_room: int
+    saved_room: int
+    code: bytes  # the test routine (with counter lines)
+    jmp: bytes
+    span: list[ix.Instruction]
+    target: cv.Target
+
+
+@dataclass
+class _Installed:
+    candidate: Candidate
+    n: int
+    sites: list[tuple[int, bytes, bytes]]  # (address, original, ours) in the game's code
+    rooms: list[tuple[int, int]]  # (address, size) zeroed on put back, slot included
+    routines: list[tuple[int, bytes]]  # (address, bytes) written before the jumps
+    hooks: list[_Room] = field(default_factory=list)
+    slot: int | None = None
+    total: int = 0  # how many fixes this build tries, for the hint
+
+
+class Builder:
+    """Make it work for one value. ``sleep`` and ``clock`` are injected for tests.
+
+    ``release`` stops the app's own freeze on the value (else the watch only sees our
+    writes). ``extra_reserved``: module-offset rooms of open cheats' code lines that
+    a build must never reuse."""
+
+    def __init__(
+        self,
+        session: Session,
+        address: int,
+        vtype: ValueType,
+        effect: Effect,
+        *,
+        only_me: bool = False,
+        name: str = "",
+        full: float | int | None = None,
+        group: Sequence[rc.Target] = (),
+        release: Callable[[], None] | None = None,
+        live: LiveCheats | None = None,
+        extra_reserved: Iterable[tuple[int, int]] = (),
+        sleep: Callable[[float], None] = time.sleep,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        if vtype not in cv.EFFECT_TYPES:
+            raise BuildFailed(cv.UNSUPPORTED_TYPE)
+        self.session = session
+        self.address, self.vtype, self.effect, self.only_me = address, vtype, effect, only_me
+        self.name = name or "Value"
+        self.full = full
+        self.group = list(group)
+        self.release = release
+        self.live = live
+        self.extra_reserved = list(extra_reserved)
+        self.sleep, self.clock = sleep, clock
+        self.writers: list[Writer] = []
+        self.eligible: list[Eligible] = []
+        self.skipped: list[Skipped] = []
+        self.queue: list[Candidate] = []
+        self.tried: list[tuple[Candidate, TestOutcome]] = []
+        self.filter: cv.Filter | None = None
+        self.by_class = False
+        self.others: list[int] = []  # other objects' value addresses (Only me)
+        self.collect_tries = 0
+        self._lock = threading.Lock()
+        self._installed: _Installed | None = None
+        self._passed: _Installed | None = None
+        self._pending: tuple[_Installed, TestData] | None = None
+        self._answers: dict[Question, Answer] = {}
+        self._repeat: Candidate | None = None
+        self._repeated: set[int] = set()
+
+    # -- helpers -------------------------------------------------------------------
+    def _game(self):
+        return self.session.require_game()
+
+    def _client(self):
+        return self.session.require_client()
+
+    def _read_value(self, addr: int | None = None) -> float | int:
+        game = self._game()
+        raw = self._client().read(game.pid, self.address if addr is None else addr, self.vtype.size)
+        return self.vtype.decode(raw)
+
+    def _crashed(self, w: Writer, m: Method) -> bool:
+        game = self._game()
+        return notes.is_crashed(game.title_id, game.version, w.address - game.module_base, m.value)
+
+    # -- B1: which member of the group ----------------------------------------------
+    def real_check(self, cancel: threading.Event | None = None) -> str | None:
+        """Check which is real on the value's group (one group only) and use the member
+        it marks real. Returns a hint when it can't tell."""
+        if len(self.group) < 2:
+            return None
+        game = self._game()
+        checker = rc.RealChecker(self._client(), game.pid, [self.group], wait=self.sleep)
+        checker.run(cancel=cancel)
+        best = checker.best(self.group)
+        if best is None or best.vtype is not self.vtype:
+            log.info("action=build_real_check address=%#x real=none", self.address)
+            return NOT_SURE_REAL
+        log.info("action=build_real_check address=%#x real=%#x", self.address, best.address)
+        self.address = best.address
+        return None
+
+    # -- B2: watching for the code ----------------------------------------------------
+    def until(self, cancel: threading.Event | None = None) -> Callable[[list, float], bool]:
+        """End the watch on Cancel, or 5 s after the third write."""
+        enough_at: list[float] = []
+
+        def stop(hits: list, elapsed: float) -> bool:
+            if cancel is not None and cancel.is_set():
+                return True
+            if len(hits) >= EARLY_HITS and not enough_at:
+                enough_at.append(elapsed)
+            return bool(enough_at) and elapsed - enough_at[0] >= EARLY_MORE_S
+
+        return stop
+
+    def watch(self, cancel: threading.Event | None = None) -> list[Candidate]:
+        """Catch the writers, classify them and line up the fixes to try."""
+        game = self._game()
+        if self.release is not None:
+            self.release()
+        if self.effect is Effect.ALWAYS_FULL and self.full is None:
+            self.full = self._read_value()
+        log.info(
+            "action=build_start title=%s address=%#x type=%s effect=%s only_me=%s full=%s",
+            game.title_id,
+            self.address,
+            self.vtype.name,
+            self.effect.name,
+            self.only_me,
+            self.full,
+        )
+        try:
+            writers = find_writers(
+                self.session, self.address, self.vtype.size, WATCH_S, until=self.until(cancel)
+            )
+        except LockFailed as exc:
+            raise BuildFailed(NOTHING_CHANGED) from exc
+        if cancel is not None and cancel.is_set():
+            raise ScanCancelled("build cancelled")
+        self.writers = writers
+        now_full = self.full is not None and self._read_value() == self.full
+        self.eligible, self.skipped = classify(
+            writers, self.vtype, self.effect, self.only_me, self._crashed, now_full=now_full
+        )
+        self.queue = [c for c in candidates(self.eligible) if not self._all_crashed(c)]
+        if not self.queue:
+            raise BuildFailed(NOTHING_WORKED)
+        return list(self.queue)
+
+    def _all_crashed(self, c: Candidate) -> bool:
+        if len(c.parts) < 2:
+            return False
+        return self._crashed(c.parts[0].writer, c.method) or notes.is_crashed(
+            self._game().title_id,
+            self._game().version,
+            c.parts[0].writer.address - self._game().module_base,
+            _method_name(c),
+        )
+
+    # -- B4: Only me ----------------------------------------------------------------
+    def collect(self, cancel: threading.Event | None = None) -> str | None:
+        """Hook the busiest writer for 20 s and work out how to tell the player's object
+        from the others. Returns a hint to collect again, or None when done."""
+        hookable = [e.writer for e in self.eligible if Method.HOOK in e.methods]
+        if not hookable:
+            raise BuildFailed(NOTHING_WORKED)
+        writer = hookable[0]
+        target = cv.writer_target(writer)
+        player = self.address - target.disp
+        objs = cv.collect_objects(self.session, writer, COLLECT_S, cancel, self.sleep)
+        others = [o for o in objs if o != player]
+        if not others:
+            self.collect_tries += 1
+            if self.collect_tries >= 2:
+                raise BuildFailed(CANT_TELL_APART)
+            return ONLY_YOU_SEEN
+        base = self._game().module_base
+        mine = ah.object_vtable(self.session, player)
+        theirs = [ah.object_vtable(self.session, o) for o in others]
+        if mine is not None and all(t != mine for t in theirs):
+            self.filter, self.by_class = cv.Filter("vtable", vtable=base + mine), True
+        else:
+            try:
+                guesses = cv.compare_objects(self.session, player, objs)
+            except LockFailed as exc:
+                raise BuildFailed(CANT_TELL_APART) from exc
+            if not guesses:
+                raise BuildFailed(CANT_TELL_APART)
+            g = guesses[0]
+            self.filter = cv.Filter("field", field=g.offset, field_value=g.player_value)
+        offset = self.address - player
+        self.others = [o + offset for o in others[:MAX_OTHERS]]
+        log.info(
+            "action=build_collect objects=%d filter=%s others=%d",
+            len(objs),
+            self.filter.kind,
+            len(self.others),
+        )
+        return None
+
+    # -- B4/B5: one fix at a time -------------------------------------------------------
+    def next_candidate(self) -> Candidate | None:
+        """The fix to try next: the same one once more after "you didn't get hit"."""
+        if self._repeat is not None:
+            c, self._repeat = self._repeat, None
+            return c
+        return self.queue.pop(0) if self.queue else None
+
+    def try_candidate(
+        self,
+        c: Candidate,
+        cancel: threading.Event | None = None,
+        progress: Callable[[float, str], None] | None = None,
+    ) -> TestOutcome:
+        """Put the fix in, let the player play for 20 s, judge it. On anything but a pass
+        (or a question for the player) the game is put back before this returns."""
+        if self.only_me and self.filter is None:
+            raise BuildFailed(CANT_TELL_APART)
+        before = {id(t) for t, _o in self.tried} - {id(c)}
+        n, total = len(before) + 1, len(before) + 1 + len(self.queue)
+        self._answers = {}
+        try:
+            inst = self._prepare(c, n)
+            inst.total = total
+        except (LockFailed, ReadFailed) as exc:  # S6: nothing was written
+            return self._done(c, TestOutcome(TryResult.FAIL, str(exc)))
+        keep = False
+        try:
+            outcome = self._install_and_test(inst, cancel, progress)
+            keep = outcome.result in (TryResult.PASS, TryResult.NEEDS_ANSWER)
+            return self._done(c, outcome)
+        finally:
+            if not keep:
+                self.rollback("test ended")
+
+    def _done(self, c: Candidate, outcome: TestOutcome) -> TestOutcome:
+        self.tried.append((c, outcome))
+        if outcome.result is TryResult.NO_HIT and id(c) not in self._repeated:
+            self._repeated.add(id(c))
+            self._repeat = c
+        log.info(
+            "action=build_try_result n=%d method=%s result=%s hint=%r rollback=%s",
+            len(self.tried),
+            _method_name(c),
+            outcome.result.value,
+            outcome.hint,
+            outcome.rollback.value,
+        )
+        return outcome
+
+    def _prepare(self, c: Candidate, n: int) -> _Installed:
+        """S6 checks and the bytes to write. Writes nothing."""
+        game = self._game()
+        client = self._client()
+        read = lambda a, k: client.read(game.pid, a, k)  # noqa: E731
+        sites: list[tuple[int, bytes, bytes]] = []
+        hooks = [p for p in c.parts if p.method is Method.HOOK]
+        slot = rooms_at = None
+        if hooks:
+            rooms_at = cv.find_cave(
+                self.session,
+                2 * cv.CAVE_ROOM * len(hooks),
+                skip=cv.BUILD_CAVE_SKIP,
+                extra_reserved=self.extra_reserved,
+            )
+            slot = cv.find_slot(self.session)
+        full = self.vtype.encode(self.full) if self.full is not None else None
+        inst = _Installed(c, n, sites, [], [], slot=slot)
+        k = 0
+        for part in c.parts:
+            w = part.writer
+            if not (game.module_base <= w.address and w.address + w.length <= game.module_end):
+                raise LockFailed("the instruction is outside the game's own code")
+            if read(w.address, w.length) != w.code:
+                raise LockFailed("the game's code isn't what we expected; refusing to patch")
+            if part.method is Method.NOP:
+                sites.append((w.address, w.code, bytes([NOP]) * w.length))
+                continue
+            assert rooms_at is not None and slot is not None
+            span = cv.hook_span(read, w.address, single=True)
+            target = cv.writer_target(w)
+            test_room = rooms_at + 2 * cv.CAVE_ROOM * k
+            k += 1
+            code = cv.effect_code(
+                span,
+                target,
+                self.vtype,
+                self.effect,
+                test_room,
+                full=full,
+                counter=slot,
+                only_me=self.filter if self.only_me else None,
+                flags_fix=part.flags_fix,
+            )
+            jmp = cv.jmp_patch(w.address, test_room, w.length)
+            room = _Room(part, test_room, test_room + cv.CAVE_ROOM, code, jmp, span, target)
+            inst.hooks.append(room)
+            inst.routines.append((test_room, code))
+            inst.rooms.append((test_room, 2 * cv.CAVE_ROOM))
+            sites.append((w.address, w.code, jmp))
+        if slot is not None:
+            inst.rooms.append((slot, cv.SLOT_SIZE))
+        for addr, size in inst.rooms:
+            if not (game.module_base <= addr and addr + size <= game.module_end):
+                raise LockFailed("the patch would land outside the game's own code")
+        return inst
+
+    def _note(self, inst: _Installed) -> notes.OpenNote:
+        game = self._game()
+        base = game.module_base
+        return notes.OpenNote(
+            title_id=game.title_id,
+            version=game.version,
+            pid=game.pid,
+            site_off=inst.candidate.parts[0].writer.address - base,
+            method=_method_name(inst.candidate),
+            n=inst.n,
+            patches=tuple(notes.Patch(a - base, o.hex(), new.hex()) for a, o, new in inst.sites),
+            rooms=tuple((a - base, size) for a, size in inst.rooms),
+        )
+
+    def _install_and_test(
+        self,
+        inst: _Installed,
+        cancel: threading.Event | None,
+        progress: Callable[[float, str], None] | None,
+    ) -> TestOutcome:
+        game = self._game()
+        client = self._client()
+        notes.open_note(self._note(inst))  # before any byte goes in (B6)
+        with self._lock:
+            self._installed = inst
+        log.info(
+            "action=build_try n=%d method=%s writers=%s rooms=%s",
+            inst.n,
+            _method_name(inst.candidate),
+            ",".join(f"{p.writer.address:#x}" for p in inst.candidate.parts),
+            ",".join(f"{a:#x}" for a, _s in inst.rooms),
+        )
+        try:
+            for addr, code in inst.routines:  # the routine first, then the jump into it
+                client.write(game.pid, addr, code)
+            for addr, _orig, new in inst.sites:
+                client.write(game.pid, addr, new)
+            landed = all(
+                client.read(game.pid, a, len(code)) == code for a, code in inst.routines
+            ) and all(client.read(game.pid, a, len(new)) == new for a, _o, new in inst.sites)
+        except WriteFailed:
+            landed = False
+        if not landed:
+            return TestOutcome(TryResult.FAIL, NOT_TAKEN, rollback=self.rollback(NOT_TAKEN))
+        return self._live_test(inst, cancel, progress)
+
+    def _live_test(
+        self,
+        inst: _Installed,
+        cancel: threading.Event | None,
+        progress: Callable[[float, str], None] | None,
+    ) -> TestOutcome:
+        game = self._game()
+        client = self._client()
+        hint = f"Testing fix {inst.n} of {inst.total}: keep playing and take a hit."
+        nop = all(p.method is Method.NOP for p in inst.candidate.parts)
+        others_start: dict[int, float | int] = {}
+        try:
+            start_value = self._read_value()
+            for o in self.others:
+                try:
+                    others_start[o] = self._read_value(o)
+                except ReadFailed:
+                    continue
+        except (ConnectionLost, ReadFailed):
+            return self._lost(inst, game_gone=False)
+        samples = [Sample(start_value)]
+        others_down = False
+        alive = _AliveCheck(self, inst)
+        t0 = self.clock()
+        if progress is not None:
+            progress(0.0, hint)
+        while self.clock() - t0 < TEST_S:
+            if cancel is not None and cancel.is_set():
+                return TestOutcome(TryResult.CANCELLED, rollback=self.rollback("cancelled"))
+            if self._taken_back(inst):
+                return TestOutcome(TryResult.CANCELLED, rollback=Rollback.RESTORED)
+            self.sleep(POLL_S)
+            if self._taken_back(inst):
+                return TestOutcome(TryResult.CANCELLED, rollback=Rollback.RESTORED)
+            try:
+                value = self._read_value()
+                count, last = 0, None
+                if inst.slot is not None:
+                    raw = client.read(game.pid, inst.slot, cv.SLOT_SIZE)
+                    count = struct.unpack_from("<Q", raw)[0]
+                    last = self.vtype.decode(raw[8 : 8 + self.vtype.size])
+                for o, before in others_start.items():
+                    try:
+                        if self._read_value(o) < before:
+                            others_down = True
+                    except ReadFailed:
+                        continue
+                ok, gone = alive.check()
+            except (ConnectionLost, ReadFailed):
+                ok, gone = False, self._game_gone()
+            if not ok:
+                return self._lost(inst, game_gone=gone)
+            samples.append(Sample(value, count, last))
+            if progress is not None:
+                progress(min(1.0, (self.clock() - t0) / TEST_S), hint)
+        data = TestData(
+            self.effect,
+            self.vtype,
+            start_value,
+            tuple(samples),
+            full=self.full,
+            nop=nop,
+            only_me=self.only_me,
+            others_down=others_down if self.only_me else None,
+        )
+        self._pending = (inst, data)
+        return self._verdict(inst, data)
+
+    def _taken_back(self, inst: _Installed) -> bool:
+        """Another thread (Cancel, Disconnect) already put this fix back."""
+        with self._lock:
+            return self._installed is not inst
+
+    def _verdict(self, inst: _Installed, data: TestData) -> TestOutcome:
+        j = judge(data, self._answers)
+        log.info(
+            "action=build_judge n=%d outcome=%s reason=%r samples=%d last_count=%d",
+            inst.n,
+            j.outcome.value,
+            j.reason,
+            len(data.samples),
+            data.samples[-1].count,
+        )
+        if j.outcome is Outcome.PASS:
+            self._passed = inst
+            return TestOutcome(TryResult.PASS)
+        if j.outcome is Outcome.NEEDS_ANSWER:
+            return TestOutcome(TryResult.NEEDS_ANSWER, question=j.question)
+        rb = self.rollback(j.reason)
+        if j.outcome is Outcome.NO_HIT:
+            return TestOutcome(TryResult.NO_HIT, "You didn't get hit; trying again.", rollback=rb)
+        return TestOutcome(TryResult.FAIL, j.reason, rollback=rb)
+
+    def answer(self, question: Question, ans: Answer) -> TestOutcome:
+        """The player's answer to a NEEDS_ANSWER test; judges it again."""
+        if self._pending is None:
+            raise BuildFailed("There's no test waiting for an answer.")
+        inst, data = self._pending
+        self._answers[question] = ans
+        try:
+            outcome = self._verdict(inst, data)
+        except BaseException:
+            self.rollback("answer failed")
+            raise
+        c = inst.candidate
+        if self.tried and self.tried[-1][0] is c:
+            self.tried[-1] = (c, outcome)
+        if outcome.result is TryResult.NO_HIT and id(c) not in self._repeated:
+            self._repeated.add(id(c))
+            self._repeat = c
+        return outcome
+
+    def _game_gone(self) -> bool:
+        """The PS5 answers, but the game's process isn't listed any more."""
+        try:
+            pid = self._game().pid
+            return not any(p.pid == pid for p in self._client().processes())
+        except CheatMakerError:
+            return False
+
+    def _lost(self, inst: _Installed, game_gone: bool) -> TestOutcome:
+        """B6: put back at once. A game that is gone crashed with this fix (S7)."""
+        rb = self.rollback("the game stopped responding")
+        if game_gone:
+            game = self._game()
+            c = inst.candidate
+            notes.mark_crashed(
+                game.title_id,
+                game.version,
+                c.parts[0].writer.address - game.module_base,
+                _method_name(c),
+            )
+            notes.clear_note()
+            return TestOutcome(
+                TryResult.LOST,
+                f"The game stopped with fix {inst.n}. Restart the game: your game is "
+                "unchanged after a restart.",
+                rollback=rb,
+            )
+        if rb is Rollback.NOT_RESTORED:
+            return TestOutcome(TryResult.LOST, RESTART, rollback=rb)
+        return TestOutcome(
+            TryResult.LOST,
+            f"The game stopped responding with fix {inst.n}. Put back. Trying the next one.",
+            rollback=rb,
+        )
+
+    # -- B6: putting things back ----------------------------------------------------------
+    def rollback(self, reason: str = "") -> Rollback:
+        """Original bytes back at the sites, then after 2 s the routine rooms and the
+        counter zeroed, then the note cleared. Safe from any thread; the second call
+        does nothing. NOT_RESTORED when the PS5 doesn't answer (the note stays open)."""
+        with self._lock:
+            inst, self._installed = self._installed, None
+            if self._passed is inst:
+                self._passed = None
+        if inst is None:
+            return Rollback.NOTHING
+        self._pending = None
+        try:
+            game = self._game()
+            client = self._client()
+            for addr, orig, _new in reversed(inst.sites):
+                client.write(game.pid, addr, orig)
+            self.sleep(PUT_BACK_WAIT_S)  # a thread may still be inside a routine
+            for addr, size in inst.rooms:
+                client.write(game.pid, addr, bytes(size))
+        except CheatMakerError as exc:
+            log.warning(
+                "action=build_rollback n=%d reason=%r restored=False error=%s",
+                inst.n,
+                reason,
+                exc,
+            )
+            return Rollback.NOT_RESTORED
+        notes.clear_note()
+        log.info("action=build_rollback n=%d reason=%r restored=True", inst.n, reason)
+        return Rollback.RESTORED
+
+    def close(self) -> Rollback:
+        """The dialog closes, Disconnect, or the app quits: nothing of ours stays."""
+        return self.rollback("closed")
+
+    # -- B8: the result -------------------------------------------------------------------
+    def finalize(self) -> BuildResult:
+        """Swap the passed fix to the routine without the counter and make the cheat.
+        The new routine goes into the second room first, then the jump is re-aimed
+        with one write; after 2 s the test room and the counter are zeroed."""
+        inst = self._passed
+        if inst is None or self._installed is not inst:
+            raise BuildFailed("There's no passed fix to keep.")
+        game = self._game()
+        client = self._client()
+        base = game.module_base
+        full = self.vtype.encode(self.full) if self.full is not None else None
+        try:
+            saved: list[tuple[_Room, bytes, bytes]] = []
+            for room in inst.hooks:
+                code = self._saved_code(room, full)
+                jmp = cv.jmp_patch(
+                    room.part.writer.address, room.saved_room, room.part.writer.length
+                )
+                client.write(game.pid, room.saved_room, code)
+                client.write(game.pid, room.part.writer.address, jmp)
+                saved.append((room, code, jmp))
+            self.sleep(PUT_BACK_WAIT_S)
+            for room in inst.hooks:
+                client.write(game.pid, room.test_room, bytes(len(room.code)))
+            if inst.slot is not None:
+                client.write(game.pid, inst.slot, bytes(cv.SLOT_SIZE))
+        except CheatMakerError as exc:
+            rb = self.rollback("finalize failed")
+            if rb is Rollback.NOT_RESTORED:
+                raise BuildFailed(RESTART) from exc
+            raise BuildFailed(f"Couldn't keep the fix: {exc}. Your game is unchanged.") from exc
+        with self._lock:
+            self._installed = self._passed = None
+        notes.clear_note()
+        cheat = self._cheat(inst, saved, base, full)
+        if self.live is not None:
+            self.live.turn_on(cheat)  # the same bytes: marks it on in My cheats
+        else:
+            cheat.enabled = True
+        after = "Check after restart" if self.only_me and not self.by_class else "Yes"
+        log.info(
+            "action=build_result name=%r method=%s lines=%d after_restart=%r",
+            cheat.name,
+            _method_name(inst.candidate),
+            len(cheat.locations),
+            after,
+        )
+        # TODO(B7): a second address (a "likely real" neighbour that went down while the
+        # target held) is not built yet: the dialog offers Lock it for it instead.
+        return BuildResult(cheat, after, tuple(self.skipped))
+
+    def _saved_code(self, room: _Room, full: bytes | None) -> bytes:
+        """The routine kept in the cheat: the test one without the counter lines."""
+        return cv.effect_code(
+            room.span,
+            room.target,
+            self.vtype,
+            self.effect,
+            room.saved_room,
+            full=full,
+            counter=None,
+            only_me=self.filter if self.only_me else None,
+            flags_fix=room.part.flags_fix,
+        )
+
+    def _cheat(
+        self,
+        inst: _Installed,
+        saved: list[tuple[_Room, bytes, bytes]],
+        base: int,
+        full: bytes | None,
+    ) -> Cheat:
+        lines: list[Location] = []
+        for room, code, jmp in saved:
+            w = room.part.writer
+            # The routine line is the same on and off (as anchor_hook.hook_cheat): a game
+            # thread may be inside it when the jump goes back.
+            lines.append(Location(LocationKind.CODE_PATCH, room.saved_room - base, code, code))
+            lines.append(Location(LocationKind.CODE_PATCH, w.address - base, jmp, w.code))
+        for part in inst.candidate.parts:
+            if part.method is Method.NOP:
+                w = part.writer
+                lines.append(
+                    Location(
+                        LocationKind.CODE_PATCH, w.address - base, bytes([NOP]) * w.length, w.code
+                    )
+                )
+        value_at = None
+        if self.effect is Effect.ALWAYS_FULL and full is not None and saved:
+
+            def build(v: bytes) -> list[bytes]:
+                out = []
+                for room, _code, jmp in saved:
+                    out += [self._saved_code(room, v), jmp]
+                return out + [loc.on for loc in lines[2 * len(saved) :]]
+
+            value_at = value_positions(build, self.vtype.size)
+        name = f"{self.name}: {self.effect.value}" + (" (only me)" if self.only_me else "")
+        return Cheat(
+            name=name,
+            locations=lines,
+            template="lock",
+            hint=f"{self.effect.value}" + (" for you only." if self.only_me else "."),
+            value_type=self.vtype if value_at is not None else None,
+            value_at=value_at,
+        )
+
+
+class _AliveCheck:
+    """B5 Alive: the PS5 answers a read of our patch within 2 s and it's still there,
+    and the game is still the app in front (or, if the PS5 can't say, still listed)."""
+
+    def __init__(self, b: Builder, inst: _Installed) -> None:
+        self.b, self.inst = b, inst
+        self.next_at = b.clock() + ALIVE_EVERY_S
+        self.use_processes = False
+        self.next_processes = 0.0
+
+    def check(self) -> tuple[bool, bool]:
+        """(alive, the game is gone)."""
+        b = self.b
+        now = b.clock()
+        if now < self.next_at:
+            return True, False
+        self.next_at = now + ALIVE_EVERY_S
+        game = b._game()
+        client = b._client()
+        addr, _orig, new = self.inst.sites[0]
+        before = b.clock()
+        held = client.read(game.pid, addr, len(new)) == new
+        if b.clock() - before > ALIVE_ANSWER_S:
+            log.warning("action=build_alive slow_read=%.1fs", b.clock() - before)
+            return False, False
+        if not held:
+            log.warning("action=build_alive patch_gone site=%#x", addr)
+            return False, False
+        if not self.use_processes:
+            try:
+                fg = client.foreground_app()
+            except (NotImplementedError, ProtocolError):
+                self.use_processes = True
+            else:
+                if fg is None or fg.pid != game.pid or fg.title_id.upper() != game.title_id.upper():
+                    log.warning("action=build_alive game_not_in_front")
+                    return False, fg is None or fg.pid != game.pid
+                return True, False
+        if now >= self.next_processes:
+            self.next_processes = now + PROCESSES_EVERY_S
+            if not any(p.pid == game.pid for p in client.processes()):
+                log.warning("action=build_alive game_gone")
+                return False, True
+        return True, False
+
+
+def _method_name(c: Candidate) -> str:
+    return c.method.value + (":all" if len(c.parts) > 1 else "")
+
+
 __all__ = [
     "MAX_CANDIDATES",
     "Answer",
+    "BuildResult",
+    "Builder",
     "Candidate",
     "Eligible",
     "Judgement",
@@ -342,9 +1130,12 @@ __all__ = [
     "Outcome",
     "Part",
     "Question",
+    "Rollback",
     "Sample",
     "Skipped",
     "TestData",
+    "TestOutcome",
+    "TryResult",
     "candidates",
     "classify",
     "judge",

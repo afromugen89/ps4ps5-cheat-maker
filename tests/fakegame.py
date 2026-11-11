@@ -209,7 +209,7 @@ def build(
     code = bytearray(b"\xcc" * 0x1000) + bytearray(CODE_SIZE - 0x1000)
     code[0x100 : 0x100 + 10] = VMOVSS_W
     code[0x200 : 0x200 + 10] = VMOVSS_R
-    code[0x300 : 0x300 + 8] = SUB_W + JLE_DEAD
+    code[0x300 : 0x300 + 11] = SUB_W + JLE_DEAD + b"\xc3\x90\xc3"  # alive: ret; dead: ret
     code[0x400 : 0x400 + 7] = MOV64_W
     fake.add_region(PID, "executable", BASE, bytes(code), PROT_R | PROT_X)
     fake.add_region(PID, "executable", DATA, DATA_SIZE, PROT_R | PROT_W)
