@@ -220,6 +220,7 @@ class _Run:
     total: int = 1
     done: int = 0
     reading: bool = False  # holds the one code read (ctl.code_reading) for prepare
+    left_out: dict[str, str] = field(default_factory=dict)  # merge: cheat -> why not
 
 
 def decline_key(title_id: str, old: str, new: str) -> str:
@@ -242,6 +243,7 @@ class CarryOver(QObject):
         self.ctl, self.finder, self.bar, self.fingerprints = ctl, finder, bar, fingerprints
         self.offer: cr.Source | None = None
         self.run: _Run | None = None
+        self._run_lock = threading.Lock()  # self.run and run.installed (worker + UI thread)
         self.sleep: Callable[[float], None] = time.sleep  # tests: drive the game
         self.clock: Callable[[], float] = time.monotonic
         self.pick_version: Callable[[list[str]], str | None] = self._pick_version
@@ -384,8 +386,11 @@ class CarryOver(QObject):
         into = p if merge else None
         # object ids the notes or a hook still in the game use stay theirs
         empty = pj.Project(source.title_id, source.version, source.process)
-        project = cr.for_merge(source, into or empty, avoid=self.finder.installed_ids())
-        run = self.run = _Run(source, project, into, game.pid)
+        left_out: dict[str, str] = {}
+        project = cr.for_merge(
+            source, into or empty, avoid=self.finder.installed_ids(), left_out=left_out
+        )
+        run = self.run = _Run(source, project, into, game.pid, left_out=left_out)
         hooked = sum(1 for o in project.objects if o.hook is not None)
         parts = cr.has_code_parts(project)
         run.total = (
@@ -467,12 +472,15 @@ class CarryOver(QObject):
     def _rollback(self, text: str | None) -> None:
         """Every hook put in during this run comes out; nothing is saved; the offer is
         shown again."""
-        run, self.run = self.run, None
+        with self._run_lock:  # a worker's _note_install sees either the run or no run
+            run, self.run = self.run, None
+            installed = [] if run is None else list(run.installed)
         if run is None:
             return
+        run.cancel.set()  # before the read is given back: the run's worker stops first
         self._release_read(run)
         if self.ctl.session.connected:
-            for obj in run.installed:
+            for obj in installed:
                 self.finder.take_out(obj)
         self.finder.keep_rooms()
         self.finder.carrying = False
@@ -505,9 +513,11 @@ class CarryOver(QObject):
         self.finder.note_install(obj, state, run.pid)
         if not self.finder.is_ours(obj.id, run.pid):
             return
-        if self.run is run:
-            run.installed.append(obj)
-        else:
+        with self._run_lock:
+            current = self.run is run
+            if current:
+                run.installed.append(obj)
+        if not current:
             self.finder.take_out(obj)
 
     # -- steps -------------------------------------------------------------------------------
@@ -660,8 +670,12 @@ class CarryOver(QObject):
         if run.merge_into is not None:
             have = {o.id for o in run.merge_into.objects} - {o.id for o in run.project.objects}
         new, report = cr.assemble(plan, run.found, run.reasons, have)
+        report.failed.update(run.left_out)  # cheats the merge couldn't put on a value here
         learning = plan.image is not None
-        if learning:  # before the notes are saved: no second read of the game's code
+        # before the notes are saved: no second read of the game's code starts. Only
+        # hand the flag back later if this run took it (another learner may hold it).
+        took = learning and not self.ctl.code_reading
+        if took:
             self.ctl.code_reading = True
         self.finder.adopt_carried(new, run.found, merge_into=run.merge_into)
         version = new.version
@@ -684,7 +698,8 @@ class CarryOver(QObject):
         )
         # The bring-over is over (its hooks are the notes' now): nothing can roll it
         # back, and the rest of the app works again while the fingerprints are learned.
-        self.run = None
+        with self._run_lock:
+            self.run = None
         self.offer = None
         self.finder.carrying = False
         summary = report.summary(version)
@@ -692,7 +707,7 @@ class CarryOver(QObject):
         self.ctl.cheats_changed.emit()
         target = self.ctl.project
         if not learning or target is None:
-            self.ctl.code_reading = False
+            self._learned(summary, took)
             self.bar.show_mode("done", summary)
             return
         # The new version's fingerprints from the code already read (AC-U7, AC-U2).
@@ -719,15 +734,16 @@ class CarryOver(QObject):
                 if self.fingerprints is not None:
                     self.fingerprints.mark_learned(game, target.version)
                 self.finder.save()
-            self._learned(summary)
+            self._learned(summary, took)
 
         def failed(exc: BaseException) -> None:
             log.warning("action=learn_signatures source=carry reason=%s", exc)
-            self._learned(summary)
+            self._learned(summary, took)
 
         self.ctl.tasks.run(work, learned, failed)
 
-    def _learned(self, summary: str) -> None:
-        self.ctl.code_reading = False
+    def _learned(self, summary: str, took: bool) -> None:
+        if took:
+            self.ctl.code_reading = False
         if self.run is None and self.bar.mode == "learning":
             self.bar.show_mode("done", summary)

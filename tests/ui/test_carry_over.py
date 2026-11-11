@@ -575,6 +575,36 @@ def test_the_bring_over_holds_the_one_code_read_and_stops_the_learner(make, monk
     assert stopped and app.bar.mode == "done" and not app.ctl.code_reading
 
 
+def test_the_run_never_hands_back_a_code_read_it_didnt_take(make):
+    tc.learned_v1(3)
+    app = make(Console(run=3))
+    app.connect()
+    real = app._sleep
+
+    def sleep(s):  # after the run's own read: another learner takes the one read
+        if app.w.carry.run is not None and app.w.carry.run.plan is not None:
+            app.ctl.code_reading = True
+        real(s)
+
+    app.w.carry.sleep = sleep
+    app.bring()
+    assert app.bar.mode == "done" and app.ctl.code_reading, "still the other learner's"
+
+
+def test_a_rollback_stops_the_run_before_it_hands_back_the_read(make, monkeypatch):
+    tc.learned_v1(3)
+    app = make(Console(run=3))
+    app.connect()
+    carry, seen = app.w.carry, []
+    real = carry._release_read
+    monkeypatch.setattr(
+        carry, "_release_read", lambda run: seen.append(run.cancel.is_set()) or real(run)
+    )
+    monkeypatch.setattr(cr.up, "read_code_image", lambda *_a, **_k: carry._rollback(None))
+    app.bring()
+    assert seen and seen[0] is True and not app.ctl.code_reading
+
+
 def test_needs_the_game_in_front(make):
     tc.learned_v1(3)
     app = make(Console(run=3))

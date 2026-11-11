@@ -301,6 +301,8 @@ def test_tc15_merge_keeps_new_named_cheats_on_values_already_here(make):
     app.w.carry.open_advanced()
     names = [c.name for c in pj.load(new_path()).cheats]
     assert "Health 500" in names or any("Health 500" in t for t in texts)
+    shown = [c.name for c in app.w.cheats.cheats]
+    assert "Health 500" in shown and "Infinite health" in shown, "a row for each cheat"
 
 
 def test_tc16_merged_values_question_names_their_own_version(make):
@@ -816,11 +818,6 @@ def test_tc38_make_old_notes_never_stops_half_way(monkeypatch, capsys):
 
 
 # == new bugs found in the re-test ===========================================================
-@pytest.mark.xfail(
-    reason="BUG-11: Advanced puts a cheat on a value already here that lacks its field; "
-    "counted as brought over but missing from My cheats",
-    strict=True,
-)
 def test_tc39_merge_onto_a_value_without_the_cheats_field(make):
     """TC-39 (BUG-03 fix, new edge): the new notes' Health has only the "Health" field; the
     old "HP32 max" cheat is on "Health 32". Advanced may add the field, or leave the cheat

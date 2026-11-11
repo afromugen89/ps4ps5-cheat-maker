@@ -282,7 +282,17 @@ class FindAgain(QObject):
         if p is None:
             return
         cf = self.ctl.ensure_file()
-        have = {c.anchor for c in cf.cheats if c.anchor}
+        # Single cheats by value and number: several cheats may share one (e.g. Infinite
+        # health and Health 500), so a row is matched by name, then a renamed row by its
+        # value and number alone.
+        singles: dict[tuple[str, str], list[str]] = {}
+        for c in cf.cheats:
+            if c.anchor is not None:
+                singles.setdefault(c.anchor, []).append(c.name)
+        noted_singles: dict[tuple[str, str], set[str]] = {}
+        for pc in p.cheats:
+            if not pc.parts:
+                noted_singles.setdefault((pc.object, pc.field), set()).add(pc.name)
         rows = [c for c in cf.cheats if c.learned_parts]
         have_parts = {self._key(c.name, self._anchors(c)) for c in rows}
         noted = {self._key(pc.name, pc.anchors) for pc in p.cheats if pc.parts}
@@ -307,11 +317,25 @@ class FindAgain(QObject):
                     cf.cheats.append(cheat)
                     have_parts.add(self._key(pc.name, pc.anchors))
                 continue
-            if (pc.object, pc.field) in have:
+            key = (pc.object, pc.field)
+            names = singles.get(key, [])
+            if pc.name in names:
+                names.remove(pc.name)
+                continue
+            free = [n for n in names if n not in noted_singles[key]]
+            if free:  # a row renamed while the notes weren't loaded is this entry
+                names.remove(free[0])
                 continue
             try:
                 f = p.object(pc.object).field(pc.field)
             except KeyError:
+                log.warning(
+                    "action=notes_cheat name=%s object=%s field=%s result=skipped "
+                    "reason=no such value or number in the notes",
+                    pc.name,
+                    pc.object,
+                    pc.field,
+                )
                 continue
             raw = f.vtype.encode(pc.value)
             cf.cheats.append(
