@@ -575,7 +575,18 @@ def _move(
             walk.cur = ValueType.INT32
             return _from(walk, insn, i, srci, size)
         raise _Stop(End.NOT_FOLLOWED, f"the value isn't all in {_where(insn)}")
+    if src_mem:
+        _truncate(walk, size)
     return _from(walk, insn, i, srci, size)
+
+
+def _truncate(walk: _Walk, size: int) -> None:
+    """A whole number loaded wider than the copy keeps (``mov rax,[m] ; mov [d],eax``):
+    the source is the whole wide number, and the copy holds its low bytes."""
+    if walk.cur.is_float or walk.lane or size <= walk.cur.size or size not in _INT_TYPES:
+        return
+    walk.steps.append(Step(Kind.TRUNCATE, walk.cur))
+    walk.cur = _int_type(size)
 
 
 def _extend(walk: _Walk, insn: ix.Instruction, i: int, signed: bool, srci: int) -> Path | None:
@@ -589,6 +600,8 @@ def _extend(walk: _Walk, insn: ix.Instruction, i: int, signed: bool, srci: int) 
     if size < walk.cur.size:
         walk.steps.append(Step(Kind.EXTEND, walk.cur, signed=signed))
         walk.cur = _int_type(size)
+    elif src_mem:
+        _truncate(walk, size)  # movzx eax,word [m] ; mov [d],al
     return _from(walk, insn, i, srci, size)
 
 

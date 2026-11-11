@@ -29,6 +29,7 @@ MaxNow = float | int | Mapping[int, float | int] | None
 
 class Kind(Enum):
     EXTEND = "extend"  # movzx/movsx/movsxd, 32-bit mov zero-extends
+    TRUNCATE = "truncate"  # a wider whole number of which only the low bytes are stored
     TO_DECIMAL = "to decimal"  # cvtsi2ss / cvtsi2sd
     TO_WHOLE = "to whole"  # cvttss2si/cvttsd2si (cut) | cvtss2si/cvtsd2si (round)
     WIDEN = "widen"  # cvtss2sd
@@ -60,6 +61,8 @@ class Step:
             return f"share of max{at}"
         if self.kind is Kind.EXTEND:
             return f"{'sign' if self.signed else 'zero'}-extend to {self.to.size} bytes"
+        if self.kind is Kind.TRUNCATE:
+            return f"low {self.to.size} bytes"
         return f"{self.kind.value} ({self.to.size} bytes)"
 
 
@@ -185,6 +188,8 @@ class Way:
             if not s.signed and n < 0:
                 n += 1 << (8 * t.size)
             return _wrap(n, s.to)
+        if k is Kind.TRUNCATE:  # wraps going forward; going back the value is kept as is
+            return _wrap(int(x), s.to)
         if k is Kind.TO_WHOLE:
             return _to_whole(float(x), s.to, s.rounding)
         if k in (Kind.TO_DECIMAL, Kind.WIDEN, Kind.NARROW):

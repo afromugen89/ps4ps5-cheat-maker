@@ -136,6 +136,23 @@ def test_int_copy():
     assert r.value == 40
 
 
+def test_copy_of_the_low_half_of_an_8_byte_count():
+    """``mov rax,[rcx+8] ; mov [rdx],eax``: the real one is the 8-byte number."""
+    g = TraceGame()
+    obj, hud = g.alloc(0x40), g.alloc(0x40)
+    g.set(obj + 8, I64, 51)
+    g.routine(
+        ins("MOV_R64_RM64", "rax", mem("rcx", 8)),
+        ins("MOV_RM32_R32", mem("rdx"), "eax"),
+        regs={"rcx": obj, "rdx": hud},
+    )
+    r, _t, _c = run(g, hud, I32, Player(setter(g, obj + 8, I64, 40)))
+    assert r.outcome is Outcome.FOUND, r.reason
+    assert r.address == obj + 8 and r.vtype is I64 and r.verdict is Verdict.REAL
+    assert [s.kind for s in r.way.steps] == [Kind.TRUNCATE] and r.value == 40
+    no_test_value_left(g, (obj + 8, I64, 40), (hud, I32, 40))
+
+
 def test_cut_conversion():
     g = TraceGame()
     obj, hud = g.alloc(0x40), g.alloc(0x40)

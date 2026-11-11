@@ -20,7 +20,7 @@ from cheatmaker.core.values import ValueType
 from tests.asm import asm, call, ends, ins, jcc, listing, mem, rep_movsb, ret, rip
 
 F, D = ValueType.FLOAT, ValueType.DOUBLE
-I16, I32, I64 = ValueType.INT16, ValueType.INT32, ValueType.INT64
+I8, I16, I32, I64 = ValueType.INT8, ValueType.INT16, ValueType.INT32, ValueType.INT64
 CODE = 0x400100
 RODATA = 0x404000
 DATA = 0x405000
@@ -243,6 +243,29 @@ def test_widen_and_extend():
         ins("MOV_R32_RM32", "eax", mem("rbx")), ins("MOV_RM64_R64", mem("rdi"), "rax"), shown=I64
     )
     assert p.way.real is I32 and p.way.steps[0].kind is Kind.EXTEND
+
+
+def test_wider_whole_number_load_is_the_source_and_the_copy_its_low_bytes():
+    p = trace(
+        ins("MOV_R64_RM64", "rax", mem("rbx", 0x10)),
+        ins("MOV_RM32_R32", mem("rdi"), "eax"),
+        shown=I32,
+    )
+    assert p.end is End.SOURCE and p.load.mem.size == 8
+    assert p.way.real is I64 and [s.kind for s in p.way.steps] == [Kind.TRUNCATE]
+    assert p.way.to_screen(2**32 + 87) == 87 and p.way.to_real(87) == 87
+    assert p.way.label() == "as shown" and p.way.rounding == "exact"
+    p = trace(
+        ins("MOVZX_R32_RM16", "eax", mem("rbx")), ins("MOV_RM8_R8", mem("rdi"), "al"), shown=I8
+    )
+    assert p.way.real is I16 and [s.kind for s in p.way.steps] == [Kind.TRUNCATE]
+    p = trace(  # a register move doesn't decide it: the load further back does
+        ins("MOV_R64_RM64", "rcx", mem("rbx")),
+        ins("MOV_R64_RM64", "rax", "rcx"),
+        ins("MOV_RM32_R32", mem("rdi"), "eax"),
+        shown=I32,
+    )
+    assert p.way.real is I64 and len(p.way.steps) == 1
 
 
 def test_conversion_that_doesnt_fit_the_copy_type():
