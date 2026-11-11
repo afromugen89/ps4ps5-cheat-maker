@@ -196,3 +196,21 @@ def test_guide_percent_search_counts_its_ways_as_tried():
     s = g.after_scan(Scan.PERCENT, 0)
     assert {"shown", "fraction", "x10"} <= set(g.tried)
     assert s.fallback == "x100"
+
+
+# -- Find the real one behind it (spec-trace AC-T1) ----------------------------------------
+def test_guide_suggests_tracing_when_every_checked_row_is_a_copy():
+    from cheatmaker.core.guide import TRACE_HINT, Action, Guide
+    from cheatmaker.core.real_check import Verdict
+
+    g = Guide()
+    s = g.after_check([Verdict.COPY, Verdict.COPY])
+    assert s is not None and s.action is Action.TRACE and s.text == TRACE_HINT
+    assert g.after_check([Verdict.COPY, Verdict.REAL]) is None
+    assert g.after_check([Verdict.COPY, Verdict.FAILED]) is None
+    assert g.after_check([]) is None
+    put_back = g.after_put_back()
+    assert put_back.action is Action.TRACE
+    assert put_back.text == (
+        "These look like copies the screen uses. Press Find the real one behind it."
+    )

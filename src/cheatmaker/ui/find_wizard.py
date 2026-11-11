@@ -498,6 +498,7 @@ class FindWizard(QWidget):
             Action.START_OVER: self.try_btn,
             Action.FULL: self.full_btn,
             Action.PERCENT: self.search_btn,
+            Action.TRACE: self.check_btn,  # the trace button comes with its dialog
         }[action]
 
     def _suggest(self, tip: Suggestion | None, show_text: bool = True) -> None:

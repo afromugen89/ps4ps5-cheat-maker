@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 from cheatmaker.core.hit_tester import TEST_LIMIT
+from cheatmaker.core.real_check import Verdict
 
 
 class Shows(Enum):
@@ -31,6 +32,7 @@ class Action(Enum):
     START_OVER = "start over"
     FULL = "full"  # fill it up, It's full now
     PERCENT = "percent"  # type the % the game shows, or About 75 / 50 / 25%
+    TRACE = "trace"  # Find the real one behind it (spec-trace)
 
 
 class Scan(Enum):
@@ -60,6 +62,10 @@ GO_DOWN = (
     "Make it go down, then type the % if the game shows it anywhere (pause or stats "
     "screen), or pick About 75 / 50 / 25%."
 )
+
+
+TRACE_HINT = "These look like copies the screen uses. Press Find the real one behind it."
+PUT_BACK_S = 2.0  # a Set/Freeze the game undid within this long counts as put back
 
 
 @dataclass(frozen=True)
@@ -134,6 +140,17 @@ class Guide:
                 Action.TEST_HITS,
             )
         return self._narrow()
+
+    def after_check(self, verdicts: list[Verdict]) -> Suggestion | None:
+        """Check which is real marked every checked row a copy: the real value isn't in
+        the list, so trace it from a copy (spec-trace AC-T1)."""
+        if verdicts and all(v is Verdict.COPY for v in verdicts):
+            return Suggestion(TRACE_HINT, Action.TRACE)
+        return None
+
+    def after_put_back(self) -> Suggestion:
+        """A Set/Freeze on the selected row was put back by the game (AC-T1)."""
+        return Suggestion(TRACE_HINT, Action.TRACE)
 
     def _nothing(self, scan: Scan) -> Suggestion:
         nxt = self.next_fallback()
