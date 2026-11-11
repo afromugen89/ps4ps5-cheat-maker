@@ -187,3 +187,38 @@ repeated runs. ruff check and ruff format are clean.
 - A float part whose value is NaN would be saved as `NaN` and make the notes unreadable on load (`_number` rejects it). This is the same as the existing single-cheat path. Not filed.
 - Renaming a combined cheat isn't written to the notes. Single found-again cheats behave the same today.
 - The cancel reason with *Also look for a memory path*: if Cancel is pressed during the memory-path search of a part with no other anchor, the hint shows the learn notes ("…The memory path search was cancelled.") instead of "you pressed Cancel". Acceptable wording, not filed.
+
+## Retest (2026-11-11, after bc18f4e, f312ee8, aeb9adb, f945f42)
+
+Branch HEAD `f945f42`. Full suite: **1666 passed, 2 skipped, 1 xfailed** (the xfail is the
+new BUG-06). The QA file has 53 tests: 52 pass, 1 strict xfail.
+
+| Bug | Fix | Retest | Changed expectation reasonable? |
+|---|---|---|---|
+| BUG-01 | `_seed_objects` copies the learned parts' objects (vtable and start known), so a new part joins them; clashing field names get " (2)" | **Fixed.** `test_tc11_*` passes. New: `test_rt01_*` (one object and hook, survives a fresh-app restart, both parts written), `test_rt02_*` (a failed Start leaves the seeded object and notes untouched), `test_rt03_*` (field-name clash: "fraction (2)", the other cheat's field untouched) | Test body unchanged |
+| BUG-02 | Combine is refused for found-again or learned cheats while no notes are loaded (button off, tooltip and message `COMBINE_NEEDS_NOTES`); the guide says to connect first | **Fixed.** `test_tc09_*` | Yes. The spec doesn't require offline combine, refusing loses nothing, and the user is told why. Combining fixed or session cheats offline still works |
+| BUG-03 | `combine(..., module_base=)` puts every part in absolute addresses; the UI passes the base when connected | **Fixed.** `test_tc05c_*`. New: `test_rt08_*` refuses it in the UI | Yes. Without a known module base (offline) it can't be told; session parts only exist while connected anyway |
+| BUG-04 | `except BaseException` rolls back. A hook that won't come out stays recorded (taken out on close), its rooms stay kept, and the hint says to close the game (`LEARN_PART_STUCK`) | **Fixed.** `test_tc16_*`. New: `test_rt04_*` covers the stuck-hook path | Test body unchanged |
+| BUG-05 | `PART_COUNT` gives "1 part" / "n parts" | **Fixed.** `test_tc33_*` | Test body unchanged |
+
+Other changes checked: combining cheats that are on now runs the confirm and before_on
+first. `test_rt07_*`: already-confirmed sources give no new question and the combined cheat
+stays on with every part written. Renaming a combined cheat while connected updates its
+notes entry: `test_rt05_*`.
+
+### BUG-06: Renaming a combined found-again cheat while disconnected gives a second row on reconnect (new, regression from aeb9adb/f312ee8)
+- Severity: Medium
+- Priority: P2
+- Related test case: RT-06 | Automated test: `tests/qa/test_qa_restart_combined.py::test_rt06_rename_while_disconnected_no_second_row` (strict xfail)
+- Steps to reproduce:
+  1. Connect, learn "Infinite Health", combine it with a fixed cheat ("Infinite Health + god", saved in the notes).
+  2. Disconnect (or the game closes).
+  3. Rename the row to "Health".
+  4. Start the game again and Connect, in the same app.
+- Expected result: one row "Health" (AC-3: "The combined cheat comes back as one row"). The notes entry follows the new name, or the rename is refused offline like Combine.
+- Actual result: rows are `['Health', 'Infinite Health + god']` and the notes keep the old name. Ticking both writes the same parts from two cheats.
+- Suspected cause: notes entries are now keyed by `(name, learned anchors)`: `src/cheatmaker/ui/find_again.py:249` (`ensure_cheats`) and `_key`. `renamed()` returns early when `ctl.project is None` (`find_again.py:688`), so the offline rename never reaches the notes, and on reconnect the old-name entry no longer matches the renamed row. Before this fix, entries were keyed by anchors only and no duplicate appeared.
+- Impact for the product owner: a player who renames a combined cheat after closing the game sees it twice next time.
+
+Retest verdict: BUG-01..05 verified fixed. One new Medium regression (BUG-06). The
+recommendation stays **Ready with known issues**.

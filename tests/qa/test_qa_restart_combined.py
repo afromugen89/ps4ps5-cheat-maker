@@ -867,3 +867,153 @@ def test_tc62_single_found_again_cheat_unchanged(win, console):  # TC-62
         "action": "freeze",
         "value": 999.0,
     }
+
+
+# == Retest 2026-11-11: regression cases for the fixes (bc18f4e..f945f42) ===================
+def rename(w, row, name):
+    from cheatmaker.ui.cheats_view import COL_NAME
+
+    w.cheats.table.item(row, COL_NAME).setText(name)
+
+
+def test_rt01_merge_with_a_learned_part_survives_restart(win, console):  # BUG-01 retest
+    connect(win)
+    learn(win, add_health_cheat(win, console.game))
+    session_part(win, "fraction", fraction_in_player(console.game), ValueType.INT32, 77)
+    win.ctl.cheats_changed.emit()
+    learn(win, combine_picked(win))
+    assert list(win.cheats.finder.installed) == ["obj1"]
+    win.ctl.shutdown()
+    win.ctl.cheat_file.cheats.clear()  # a fresh app
+    run2 = console.restart(2)
+    connect(win)
+    assert [c.name for c in win.ctl.cheat_file.cheats] == ["Infinite Health + fraction"]
+    assert list(win.ctl.live.trackers) == ["obj1"]
+    tick(win)
+    assert run2.health() == 999.0 and run2.value(run2.player, "int32") == 77
+
+
+def test_rt02_merge_failure_leaves_the_learned_object_alone(win, console, monkeypatch):
+    # BUG-01 retest: the seed object is a copy: a failed Start changes nothing
+    connect(win)
+    learn(win, add_health_cheat(win, console.game))
+    session_part(win, "fraction", fraction_in_player(console.game), ValueType.INT32, 77)
+    win.ctl.cheats_changed.emit()
+    c = combine_picked(win)
+    before = pj.dumps(win.ctl.project)
+
+    def boom(*a, **k):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(rf, "learn", boom)
+    dlg = LearnDialog(win.ctl, win.cheats.finder, c, win)
+    dlg.start_btn.click()
+    assert pj.dumps(win.ctl.project) == before
+    assert [f.name for f in win.ctl.live.trackers["obj1"].obj.fields] == ["Infinite Health"]
+    assert len(c.moving_parts) == 1
+
+
+def test_rt03_merge_into_an_object_with_the_same_field_name(win, console):
+    # BUG-01 retest: obj1 already has a "fraction" field (a single found-again cheat)
+    connect(win)
+    learn(win, add_health_cheat(win, console.game))
+    single = add_found_fraction(win)
+    session_part(win, "fraction", fraction_in_player(console.game), ValueType.INT32, 55)
+    win.ctl.cheats_changed.emit()
+    from PySide6.QtCore import QItemSelectionModel
+
+    t = win.cheats.table
+    t.clearSelection()
+    for r in (0, 2):
+        t.selectionModel().select(
+            t.model().index(r, 0),
+            QItemSelectionModel.SelectionFlag.Select | QItemSelectionModel.SelectionFlag.Rows,
+        )
+    win.cheats.combine_btn.click()
+    c = next(x for x in win.ctl.cheat_file.cheats if x.combined)
+    learn(win, c)
+    [obj] = win.ctl.project.objects
+    assert [f.name for f in obj.fields] == ["Infinite Health", "fraction", "fraction (2)"]
+    assert single.anchor == ("obj1", "fraction"), "the other cheat's field is untouched"
+    assert [loc.anchor for loc in c.locations][1] == ("obj1", "fraction (2)")
+
+
+def test_rt04_a_hook_that_wont_come_out_is_kept_and_said(win, console, monkeypatch):
+    # BUG-04 retest: rollback can't take a hook out: it stays recorded, its rooms kept
+    connect(win)
+    c = two_moving(win, console.game, money_in_enemy, ValueType.INT64, "money")
+    rooms = list(win.ctl.session.reserved_rooms)
+    finder = win.cheats.finder
+    dlg = LearnDialog(win.ctl, finder, c, win)
+    real = ah.install
+
+    def install_then_cancel(session, obj):
+        state = real(session, obj)
+        dlg.do_cancel()
+        return state
+
+    def cant_remove(*a, **k):
+        raise rf.FindFailed("the game is using it")
+
+    monkeypatch.setattr(ah, "install", install_then_cancel)
+    monkeypatch.setattr(ah, "remove", cant_remove)
+    dlg.start_btn.click()
+    assert "close the game before you play on" in dlg.hint.text()
+    assert list(finder.installed) == ["obj1"], "taken out on close"
+    assert len(win.ctl.session.reserved_rooms) > len(rooms), "its rooms stay kept"
+
+
+def test_rt05_rename_while_connected_is_kept(win, console):  # retest: renamed()
+    connect(win)
+    learn(win, add_health_cheat(win, console.game))
+    fixed_cheat(win)
+    combine_picked(win)
+    rename(win, 0, "Health")
+    assert [c.name for c in saved().cheats] == ["Health"]
+    win.ctl.shutdown()
+    win.ctl.cheat_file.cheats.clear()
+    console.restart(2)
+    connect(win)
+    assert [c.name for c in win.ctl.cheat_file.cheats] == ["Health"]
+
+
+@pytest.mark.xfail(
+    reason="BUG-06: renaming a combined found-again cheat while disconnected brings back "
+    "a second row under the old name on the next connect",
+    strict=True,
+)
+def test_rt06_rename_while_disconnected_no_second_row(win, console):  # BUG-06
+    connect(win)
+    learn(win, add_health_cheat(win, console.game))
+    fixed_cheat(win)
+    combine_picked(win)
+    win.ctl.shutdown()
+    rename(win, 0, "Health")
+    console.restart(2)
+    connect(win)
+    assert [c.name for c in win.ctl.cheat_file.cheats] == ["Health"]
+
+
+def test_rt07_combine_while_on_stays_on_without_a_new_question(win, console):  # f312ee8
+    connect(win)
+    learn(win, add_health_cheat(win, console.game))
+    fixed_cheat(win)
+    tick(win, 0)
+    tick(win, 1)
+    asked = []
+    win.cheats.finder.ask_confirm = lambda text: asked.append(text) or True
+    c = combine_picked(win)
+    assert c.enabled and asked == []
+    assert console.game.fake.peek(fg.PID, GOD_AT, 1) == b"\x01"
+    assert console.game.health() == 999.0
+
+
+def test_rt08_module_part_vs_session_same_byte_refused_in_the_ui(win, console):  # BUG-03
+    connect(win)
+    fixed_cheat(win, "a", GOD_OFF)
+    session_part(win, "b", GOD_AT, ValueType.INT8, 2)
+    win.ctl.cheats_changed.emit()
+    win.cheats.table.selectAll()
+    win.cheats.combine_btn.click()
+    assert len(win.ctl.cheat_file.cheats) == 2
+    assert "a and b overlap in memory." in win.status.text()
