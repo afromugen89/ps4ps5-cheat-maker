@@ -147,12 +147,11 @@ CONFIRM_MOVED = (
 PART_SECONDS = 70  # one part: watch 10 s, check the spare memory 60 s
 FIND_NEXT_START_PARTS = (
     "Find it next time: press Start and play normally (take a hit if you can). Cheat "
-    "Maker learns the {n} parts of {name} one after another: about {secs} s per part, "
-    "so about {total} in all (longer with a memory path, which is looked for for every "
-    "part). Then it finds them again by itself after a restart or a new area."
+    "Maker learns how the game keeps {parts}, one after another: about {secs} s per "
+    "part, about {total} s in all (longer with a memory path, which is looked for for "
+    "every part). Then it finds {name} again by itself after a restart or a new area."
 )
 FIND_NEXT_PART = "Part {k} of {n}: {part}."
-FIND_NEXT_PART_PLAY = "Play normally and take a hit if you can."
 READY_PART = {
     "static": "{name} doesn't move",
     "hook_slot": "{name} will be found by the game's code",
