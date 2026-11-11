@@ -305,6 +305,16 @@ def test_every_fail_path_leaves_the_module_as_it_was(path, monkeypatch):
     g.fake.drop_code_writes = False
     assert module(g) == before, path
     assert notes.current_note() is None and bl.close() is b.Rollback.NOTHING
+    assert not notes.is_crashed(fg.TITLE, fg.VERSION, 0x100, "hook"), "still listed: no crash"
+
+
+def test_no_app_in_front_but_the_game_still_listed_is_no_crash():
+    g, clock, bl = setup()
+    bl.watch()
+    clock.events.extend(hits(lambda: setattr(g.fake, "foreground_pid", None)))
+    out = bl.try_candidate(bl.next_candidate())
+    assert out.result is TR.LOST and out.rollback is b.Rollback.RESTORED
+    assert not notes.is_crashed(fg.TITLE, fg.VERSION, 0x100, "hook")
 
 
 def test_no_hit_repeats_the_same_fix_once():

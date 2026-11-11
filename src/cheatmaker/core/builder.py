@@ -1295,8 +1295,11 @@ class _AliveCheck:
                 self.use_processes = True
             else:
                 if fg is None or fg.pid != game.pid or fg.title_id.upper() != game.title_id.upper():
-                    log.warning("action=build_alive game_not_in_front")
-                    return False, fg is None or fg.pid != game.pid
+                    # Put back, but only a game no longer listed counts as a crash: the
+                    # player may just have pressed the PS button.
+                    gone = b._game_gone()
+                    log.warning("action=build_alive game_not_in_front gone=%s", gone)
+                    return False, gone
                 return True, False
         if now >= self.next_processes:
             self.next_processes = now + PROCESSES_EVERY_S
