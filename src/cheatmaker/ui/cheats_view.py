@@ -22,8 +22,9 @@ from PySide6.QtWidgets import (
 from cheatmaker import formats
 from cheatmaker.core import cave as cv
 from cheatmaker.core import updater as up
-from cheatmaker.core.cheats import Cheat, LocationKind, combine, versions_differ
+from cheatmaker.core.cheats import Cheat, Location, LocationKind, combine, versions_differ
 from cheatmaker.core.values import parse_number
+from cheatmaker.errors import CheatMakerError
 from cheatmaker.ui import hints
 from cheatmaker.ui.controller import Controller
 from cheatmaker.ui.find_again import FindAgain, LearnDialog
@@ -37,7 +38,7 @@ CHECK_AFTER_RESTART = "Check after restart"
 
 
 def keeps_text(c: Cheat) -> str:
-    if c.anchor is not None:
+    if c.found_again:  # one found-again value, or a combined cheat with nothing moving
         return FOUND_AGAIN
     if c.check_after_restart:  # Make it work, Only me by a field (spec-cheat-builder B8)
         return CHECK_AFTER_RESTART
@@ -56,10 +57,15 @@ def single_value(c: Cheat | None) -> bool:
 
 
 def details(c: Cheat) -> str:
-    return "; ".join(
-        f"{loc.kind.value} +{loc.offset:X}: {loc.off.hex(' ').upper()} -> {loc.on.hex(' ').upper()}"
-        for loc in c.locations
-    )
+    return "; ".join(_line_details(loc) for loc in c.locations)
+
+
+def _line_details(loc: Location) -> str:
+    bytes_ = f"{loc.off.hex(' ').upper()} -> {loc.on.hex(' ').upper()}"
+    if loc.anchor is not None:  # a learned part: its offset is unused
+        return f"{loc.part}: found again {loc.anchor[0]}/{loc.anchor[1]}: {bytes_}"
+    where = f"{loc.kind.value} +{loc.offset:X}"
+    return f"{loc.part}: {where}: {bytes_}" if loc.part else f"{where}: {bytes_}"
 
 
 class CheatsView(QWidget):
@@ -219,7 +225,7 @@ class CheatsView(QWidget):
         c = self.selected()
         picked = self.selected_all()
         self.delete_btn.setEnabled(bool(picked))
-        self.combine_btn.setEnabled(len(picked) > 1 and all(ch.anchor is None for ch in picked))
+        self.combine_btn.setEnabled(len(picked) > 1)
         up = self.ctl.session.connected and self.ctl.session.game is not None
         located = c is not None and (c.anchor is None or c.anchor[0] in self.ctl.live.trackers)
         self.lock_btn.setEnabled(
@@ -234,10 +240,25 @@ class CheatsView(QWidget):
         self.build_btn.setToolTip(
             hints.BUILD_PICK_SINGLE if c is not None and not single else hints.BUILD_BUTTON_TIP
         )
-        self.learn_btn.setEnabled(up and located and c.session_only and c.value_type is not None)
+        self.learn_btn.setEnabled(up and self._can_learn(c, located))
         p = self.ctl.project
         self.again_btn.setEnabled(up and p is not None and bool(p.objects))
         self.save_btn.setEnabled(any(ch.saveable for ch in self.cheats))
+
+    def _can_learn(self, c: Cheat | None, located: bool) -> bool:
+        """Find it next time: one value, or a combined cheat whose moving parts all
+        have a number type and whose learned parts are all found this run."""
+        if c is None:
+            return False
+        if not c.combined:
+            return located and c.session_only and c.value_type is not None
+        moving = c.moving_parts
+        trackers = self.ctl.live.trackers
+        return (
+            bool(moving)
+            and all(loc.vtype is not None for loc in moving)
+            and all(obj_id in trackers for obj_id in c.objects)
+        )
 
     def _item_changed(self, item: QTableWidgetItem) -> None:
         if self._filling or item.row() >= len(self.cheats):
@@ -302,7 +323,7 @@ class CheatsView(QWidget):
         """Replace the selected cheats with one cheat that does all of them."""
         picked = self.selected_all()
         try:
-            combined = combine(picked)
+            combined = combine(picked, addr_of=self._part_address)
         except ValueError as exc:
             self.ctl.fail(exc, "combine")
             return
@@ -322,6 +343,16 @@ class CheatsView(QWidget):
                 self.ctl.fail(exc, "toggle")
         self.ctl.cheats_changed.emit()
         self.ctl.message.emit(f'Combined into "{combined.name}". One tick turns them all on.')
+
+    def _part_address(self, loc: Location) -> int | None:
+        """Where a learned part is right now (to spot parts that overlap), or None."""
+        if loc.anchor is None:
+            return None
+        tracker = self.ctl.live.trackers.get(loc.anchor[0])
+        try:
+            return tracker.field_address(loc.anchor[1]) if tracker is not None else None
+        except (CheatMakerError, KeyError):
+            return None
 
     def _pick_file(self) -> str:
         path, _ = QFileDialog.getOpenFileName(

@@ -777,3 +777,86 @@ def test_combine_two_cheats_into_one(win, fake):
     assert not view.lock_btn.isEnabled()  # Lock it watches one address
     view.delete_btn.click()
     assert t.rowCount() == 0
+
+
+def test_combine_is_on_with_a_found_again_cheat(win, fake):  # spec-restart-combined AC-1
+    from cheatmaker.core import project as pj
+    from cheatmaker.core import refind as rf
+    from cheatmaker.core.cheats import Cheat, Location, LocationKind
+    from cheatmaker.ui.cheats_view import FOUND_AGAIN
+
+    connect(win)
+    obj = pj.ObjectSpec("obj1", "Health", None, [pj.Field("health", 0x40, ValueType.INT32)])
+    win.ctl.live.trackers["obj1"] = rf.Tracker(win.ctl.session, obj, HEALTH_ADDR - 0x40)
+    raw = struct.pack("<i", 500)
+    found = Cheat(
+        "health",
+        [Location(LocationKind.SESSION_ADDRESS, 0, raw, raw)],
+        freeze=True,
+        value_type=ValueType.INT32,
+        anchor=("obj1", "health"),
+    )
+    gold = struct.pack("<i", 7000)
+    fraction = Cheat(
+        "fraction",
+        [Location(LocationKind.SESSION_ADDRESS, GOLD_ADDR, gold, gold)],
+        value_type=ValueType.INT32,
+    )
+    win.ctl.ensure_file().cheats.extend([found, fraction])
+    win.ctl.cheats_changed.emit()
+    view, t = win.cheats, win.cheats.table
+    t.selectAll()
+    assert view.combine_btn.isEnabled()
+    view.combine_btn.click()
+    [c] = win.ctl.cheat_file.cheats
+    assert c.name == "health + fraction" and [p.part for p in c.locations] == [
+        "health",
+        "fraction",
+    ]
+    assert t.item(0, COL_KEEPS).text() == "This session only"
+    from cheatmaker.ui.cheats_view import details
+
+    assert details(c) == (
+        "health: found again obj1/health: F4 01 00 00 -> F4 01 00 00; "
+        f"fraction: session_address +{GOLD_ADDR:X}: 58 1B 00 00 -> 58 1B 00 00"
+    )
+    t.selectRow(0)
+    assert view.learn_btn.isEnabled(), "Find it next time is on for it"
+    assert not view.lock_btn.isEnabled() and not view.build_btn.isEnabled()
+    c.locations = c.learned_parts  # once every part is learned
+    win.ctl.cheats_changed.emit()
+    assert t.item(0, COL_KEEPS).text() == FOUND_AGAIN
+    t.selectRow(0)
+    assert not view.learn_btn.isEnabled(), "nothing left to learn"
+
+
+def test_combine_refuses_parts_that_overlap(win, fake):  # AC-1
+    connect(win)
+    search(win, "100")
+    win.find.table.selectRow(0)
+    win.find.template.setCurrentIndex(0)
+    win.find.make_btn.click()
+    win.find.make_btn.click()  # the same value twice
+    view = win.cheats
+    view.table.selectAll()
+    view.combine_btn.click()
+    assert len(win.ctl.cheat_file.cheats) == 2, "nothing combined"
+    assert "overlap in memory" in win.status.text()
+
+
+def test_save_counts_a_found_again_combined_cheat_as_app_only(win, fake):  # AC-6
+    from cheatmaker.core.cheats import Cheat, Location, LocationKind, combine
+
+    connect(win)
+    raw = struct.pack("<i", 1)
+
+    def found(name):
+        loc = Location(LocationKind.SESSION_ADDRESS, 0, raw, raw)
+        return Cheat(name, [loc], value_type=ValueType.INT32, anchor=("obj1", name))
+
+    patch = Cheat("nop", [Location(LocationKind.CODE_PATCH, 0x100, b"\x90\x90", b"\x89\x08")])
+    win.ctl.ensure_file().cheats.extend([combine([found("a"), found("b")]), patch])
+    dlg = SaveDialog(win.ctl, win)
+    assert hints.SAVE_APP_ONLY.format(n=1) in dlg.skipped.text()
+    assert "This session only" not in dlg.skipped.text()
+    assert [c.name for c in win.ctl.cheat_file.saveable_cheats()] == ["nop"]

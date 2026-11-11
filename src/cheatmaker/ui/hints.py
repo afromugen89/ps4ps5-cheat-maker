@@ -142,6 +142,37 @@ CONFIRM_MOVED = (
     "it stopped changing it. It shows {value} now.\n\nTake a hit and watch this number. "
     "Press Yes only if it changes with your {name}."
 )
+
+# -- combined cheats that survive restarts (spec-restart-combined) ---------------------
+PART_SECONDS = 70  # one part: watch 10 s, check the spare memory 60 s
+FIND_NEXT_START_PARTS = (
+    "Find it next time: press Start and play normally (take a hit if you can). Cheat "
+    "Maker learns the {n} parts of {name} one after another: about {secs} s per part, "
+    "so about {total} in all (longer with a memory path, which is looked for for every "
+    "part). Then it finds them again by itself after a restart or a new area."
+)
+FIND_NEXT_PART = "Part {k} of {n}: {part}."
+FIND_NEXT_PART_PLAY = "Play normally and take a hit if you can."
+READY_PART = {
+    "static": "{name} doesn't move",
+    "hook_slot": "{name} will be found by the game's code",
+    "chain": "{name} will be found by a memory path",
+    "vtable_scan": "{name} will be found by a memory search (up to 3 minutes)",
+}
+READY_PARTS = "Ready: {parts}."
+LEARN_PART_FAILED = "Couldn't learn {part} (part {k} of {n}): {reason} Nothing was changed."
+LEARN_PART_CANCELLED = "you pressed Cancel."
+COMBINED_FOUND = "Ready: {name} found again ({n} parts, {secs:.1f} s). Tick it to use it."
+COMBINED_NOT_FOUND = (
+    "Couldn't find {part} (part of {name}) this time. Delete {name} and make it again, "
+    "or search for {part}."
+)
+PART_OF = "{part} (part of {name})"
+CONFIRM_PARTS = (
+    "Is this your {name}? {values} right now.\n\n"
+    "Take a hit and watch these numbers change. Press Yes only if they do."
+)
+CONFIRM_PART_VALUE = "{part} shows {value}"
 TEST_HITS_WARNING = (
     "This writes to the game's memory. Save your game first; a wrong address can crash it."
 )

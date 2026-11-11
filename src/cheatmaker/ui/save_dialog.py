@@ -97,8 +97,8 @@ class SaveDialog(QDialog):
     def _refresh(self) -> None:
         cf = self.ctl.ensure_file()
         self.file_label.setText(f"File: {cf.file_name(self.format)}")
-        n = sum(1 for c in cf.cheats if not c.saveable and c.anchor is None)
-        found = sum(1 for c in cf.cheats if c.anchor is not None)
+        n = sum(1 for c in cf.cheats if not c.saveable and not c.found_again)
+        found = sum(1 for c in cf.cheats if c.found_again)
         lines = []
         if n:
             lines.append(
