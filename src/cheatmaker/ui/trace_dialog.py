@@ -425,16 +425,8 @@ class TraceDialog(QDialog):
 
 
 def _find_freezes(freezer: Freezer) -> dict[str, list[tuple[int, int, bytes]]]:
-    """Find's freezes (``find:<address>``) with the bytes each one holds, listed or
-    not. The Freezer has no public view of its entries and core/freezer.py is owned
-    by another branch for now, so they are read under its lock here."""
-    with freezer._lock:
-        entries = dict(freezer._entries)
-    return {
-        key: list(writes)
-        for key, writes in entries.items()
-        if key.startswith("find:") and not callable(writes)
-    }
+    """Find's freezes (``find:<address>``) with the bytes each one holds, listed or not."""
+    return freezer.fixed_writes("find:")
 
 
 __all__ = ["TraceDialog", "details", "result_text"]

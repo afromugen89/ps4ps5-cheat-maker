@@ -300,3 +300,15 @@ def test_a_tick_after_turn_off_leaves_no_paused_part_behind(session, fake):  # r
     resolve()  # a tick that was already running when the cheat went off
     assert live._part_paused == {}
     live.freezer.stop()
+
+
+def test_fixed_writes_lists_fixed_entries_by_prefix(session):
+    fz = Freezer(session)
+    fz.freeze("find:0x10", [(0x10, 4, b"\x01\x00\x00\x00")])
+    fz.freeze("cheat:1", [(0x20, 4, b"\x02\x00\x00\x00")])
+    fz.freeze_tracked("find:0x30", lambda: None)
+    try:
+        assert fz.fixed_writes("find:") == {"find:0x10": [(0x10, 4, b"\x01\x00\x00\x00")]}
+        assert set(fz.fixed_writes()) == {"find:0x10", "cheat:1"}
+    finally:
+        fz.stop()

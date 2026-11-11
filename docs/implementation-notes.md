@@ -299,8 +299,7 @@ QA and re-review round (2026-11-11, qa/reports/2026-11-11-trace-shown-number.md)
 - Find's rows are told apart by (address, type) for "added", "frozen", Freeze and Remove;
   the type each Find freeze was made as is kept in `FindWizard._frozen_type`.
 - `TraceDialog.release` pauses Find's freezes from the Freezer's own entries and resumes
-  them with the same bytes. The Freezer has no public view of its entries and
-  core/freezer.py belongs to another branch for now, so `_find_freezes` reads
-  `_entries` under its lock: worth a public accessor when that branch lands.
+  them with the same bytes, read through the Freezer's public `fixed_writes(prefix)`
+  (added once the restarts branch landed on main).
 - A share of a max of 0 shows "(screen: ?)". TOO_FAR says "1 step", and "ran out of time"
   when TOTAL_S ended it.
