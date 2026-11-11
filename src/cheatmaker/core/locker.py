@@ -178,7 +178,12 @@ def instruction_before(
         if end in votes:
             votes[end] += n - start
     best = max(valid, key=lambda off: (votes[off], -off))
-    return ip0 + best, bytes(code_before[best:]), _formatter.format(valid[best])
+    return ip0 + best, bytes(code_before[best:]), insn_text(valid[best])
+
+
+def insn_text(insn: ix.Instruction) -> str:
+    """The instruction as the app shows it under Advanced ("vmovss [r12+2ACh],xmm1")."""
+    return _formatter.format(insn)
 
 
 def decode_one(code: bytes, ip: int) -> ix.Instruction:
@@ -404,6 +409,7 @@ __all__ = [
     "find_writers",
     "flags_read_after",
     "flags_use",
+    "insn_text",
     "instruction_before",
     "make_lock_cheat",
     "nop_unsafe",
