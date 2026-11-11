@@ -77,7 +77,32 @@ def test_make_old_notes_forward_and_undo_are_byte_identical(monkeypatch, capsys)
     assert old_notes.read_text() == "my real old notes" and not old_sigs.exists()
     carried = cur_notes.with_name(cur_notes.name + ".carried")
     assert carried.read_text() == "made by the dry run", "kept, never deleted"
+    copy = old_notes.with_name(old_notes.name + ".carried")
+    assert json.loads(copy.read_text())["version"] == "03.000.004", "the tool's copy, set aside"
+    assert old_sigs.with_name(old_sigs.name + ".carried").exists()
     assert not list(cur_notes.parent.glob("*.keep")) and not list(cur_sigs.parent.glob("*.keep"))
+    assert not list(cur_notes.parent.glob("*make_old_notes*")), "the dry run record is gone"
+
+
+def test_make_old_notes_undo_needs_the_dry_runs_own_values(monkeypatch, capsys):
+    notes_b, _ = _setup_cur()
+    cur_notes, _ = _notes_files(fg.VERSION)
+    real_old, _ = _notes_files("03.000.003")
+    real_old.write_text("real notes for 03.000.003")
+    assert _run(monkeypatch, fg.TITLE, fg.VERSION, "03.000.004", "--undo") == 1
+    assert "No dry run was made" in capsys.readouterr().out
+    assert _run(monkeypatch, fg.TITLE, fg.VERSION, "03.000.004") == 0
+    capsys.readouterr()
+    # a typo in OLD: refused, the real 03.000.003 notes are untouched
+    assert _run(monkeypatch, fg.TITLE, fg.VERSION, "03.000.003", "--undo") == 1
+    out = capsys.readouterr().out
+    assert "Nothing was changed" in out and "made for PPSA01285 03.000.005 03.000.004" in out
+    assert real_old.read_text() == "real notes for 03.000.003"
+    assert not cur_notes.exists(), "still set up for the dry run"
+    assert _run(monkeypatch, fg.TITLE, fg.VERSION, "03.000.004") == 1, "one dry run at a time"
+    assert "run with --undo first" in capsys.readouterr().out
+    assert _run(monkeypatch, fg.TITLE, "3.0.5", "3.0.4", "--undo") == 0, "same versions, any form"
+    assert cur_notes.read_bytes() == notes_b
 
 
 def test_make_old_notes_refuses_plainly(monkeypatch, capsys):

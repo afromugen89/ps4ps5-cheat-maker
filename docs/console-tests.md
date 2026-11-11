@@ -249,7 +249,9 @@ Spec: docs/spec-game-update.md. Needs C10 (and C19 for combined cheats) to pass 
 Save your game first. `tools/make_old_notes.py` copies the notes and fingerprints
 of the running version as if they were from an older version (it sets the real ones
 aside as `.keep` and puts them back with `--undo`), so C21b to C21g can run before a real
-update. Close Cheat Maker before you run it, both ways.
+update. Close Cheat Maker before you run it, both ways. `--undo` needs the same title and
+versions as the dry run (it refuses otherwise, changing nothing); the copies it made are
+kept as `.carried`.
 
 | # | Test | Steps | Pass when | Send back |
 |---|---|---|---|---|
