@@ -15,7 +15,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QTimer
+from PySide6.QtCore import QObject, QTimer, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QDialog,
@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
 )
 
 from cheatmaker.core import anchor_hook as ah
+from cheatmaker.core import carry as cr
 from cheatmaker.core import project as pj
 from cheatmaker.core import refind as rf
 from cheatmaker.core.cheats import Cheat, Location, LocationKind
@@ -126,6 +127,9 @@ class FindAgain(QObject):
     """Loads the game's notes on connect, puts the hooks in, finds every value again,
     and keeps the live cheats tied to where the values are now."""
 
+    notes_changed = Signal()  # the notes were saved (fingerprints may need learning)
+    carrying_changed = Signal(bool)  # a bring-over started or ended
+
     def __init__(self, ctl: Controller) -> None:
         super().__init__(ctl)
         self.ctl = ctl
@@ -146,12 +150,25 @@ class FindAgain(QObject):
         self._unreadable: Path | None = None  # a .cmproj that failed to load: kept on save
         self.by_chain: set[str] = set()  # found by a memory path: no hook needed
         self._pid: int | None = None  # the game process the bookkeeping is for
+        self._carrying = False
         ctl.game_changed.connect(self.on_game)
         ctl.before_disconnect.append(self.remove_hooks)
         self.pending_timer = QTimer(self)
         self.pending_timer.setInterval(1000)
         self.pending_timer.timeout.connect(self.check_pending)
         self.pending_timer.start()
+
+    @property
+    def carrying(self) -> bool:
+        """Notes are being brought over from another version: Find it next time,
+        Combine, Find it again, Lock it and Make it work wait (spec AC-U3)."""
+        return self._carrying
+
+    @carrying.setter
+    def carrying(self, on: bool) -> None:
+        if on != self._carrying:
+            self._carrying = on
+            self.carrying_changed.emit(on)
 
     # -- hooks we put in ----------------------------------------------------------
     def record(self, obj: pj.ObjectSpec, pid: int) -> None:
@@ -189,13 +206,15 @@ class FindAgain(QObject):
     def keep_rooms(self) -> None:
         """New caves and slots never go where the notes' hooks live (even unused), nor
         where a hook of ours still is that the notes don't hold (one that couldn't be
-        taken out after a failed Find it next time)."""
+        taken out after a failed Find it next time), nor where the notes' combined
+        cheats keep new code over spare zeros."""
         p = self.ctl.project
         objects = list(p.objects) if p else []
         in_notes = {o.id for o in objects}
         with self._lock:
             objects += [o for i, o in self.installed.items() if i not in in_notes]
-        self.ctl.session.reserved_rooms = ah.reserved_rooms(objects)
+        parts = cr.part_rooms(p) if p else []
+        self.ctl.session.reserved_rooms = ah.reserved_rooms(objects) + parts
 
     def save(self) -> None:
         self.keep_rooms()
@@ -212,6 +231,8 @@ class FindAgain(QObject):
             pj.save(path, p)
         except OSError as exc:
             log.warning("action=project_save reason=%s", exc)
+            return
+        self.notes_changed.emit()
 
     def on_game(self, game: GameInfo | None) -> None:
         # A Refresh that sees the same game process (e.g. from the PS home screen,
@@ -293,8 +314,42 @@ class FindAgain(QObject):
                     anchor=(pc.object, pc.field),
                 )
             )
+        self.mark_carried()
         if renamed:
             self.save()
+
+    def _entry(self, cheat: Cheat) -> pj.ProjectCheat | None:
+        """The notes entry ``cheat`` comes from, if any."""
+        p = self.ctl.project
+        if p is None:
+            return None
+        if cheat.learned_parts:
+            key = self._key(cheat.name, self._anchors(cheat))
+            return next(
+                (pc for pc in p.cheats if pc.parts and self._key(pc.name, pc.anchors) == key), None
+            )
+        if cheat.anchor is not None:
+            return next(
+                (pc for pc in p.cheats if not pc.parts and (pc.object, pc.field) == cheat.anchor),
+                None,
+            )
+        return None
+
+    def mark_carried(self) -> None:
+        """Each cheat's "brought over" state from the notes (spec AC-U8): "test" until
+        its brought-over code parts were ticked once, "check" until every object it
+        uses was confirmed."""
+        p = self.ctl.project
+        cheats = self.ctl.cheat_file.cheats if self.ctl.cheat_file else []
+        checking = {o.id for o in p.objects if o.check} if p is not None else set()
+        for c in cheats:
+            pc = self._entry(c)
+            if pc is not None and pc.test:
+                c.carried = "test"
+            elif pc is not None and any(o in checking for o in c.objects):
+                c.carried = "check"
+            else:
+                c.carried = ""
 
     @staticmethod
     def _combined_from(p: pj.Project, pc: pj.ProjectCheat) -> Cheat | None:
@@ -414,12 +469,7 @@ class FindAgain(QObject):
             if p is not None:
                 rf.remember(p, out)
             if out.found and out.address is not None:
-                tracker = rf.Tracker(self.ctl.session, obj, out.address)
-                tracker.confirmed = out.method == "picked"
-                tracker.on_lost = lambda o=obj: self.path_lost(o)
-                self.ctl.live.trackers[obj.id] = tracker
-                for f in obj.fields:
-                    f.last = read_field(self.ctl, obj, out.address, f.name)
+                self._track(obj, out.address, confirmed=out.method == "picked")
                 seconds[obj.id] = out.seconds
                 if obj.id in in_combined:
                     continue
@@ -437,6 +487,90 @@ class FindAgain(QObject):
         self.ctl.cheats_changed.emit()
         if lines:
             self.ctl.message.emit(" ".join(lines))
+
+    def _track(self, obj: pj.ObjectSpec, addr: int, confirmed: bool) -> rf.Tracker:
+        """Follow ``obj`` from ``addr`` for the live cheats. A brought-over object
+        (``check``) is never confirmed here, even after a pick: its question asks
+        about the version it came from (spec AC-U8)."""
+        tracker = rf.Tracker(self.ctl.session, obj, addr)
+        tracker.confirmed = confirmed and not obj.check
+        tracker.on_lost = lambda o=obj: self.path_lost(o)
+        self.ctl.live.trackers[obj.id] = tracker
+        for f in obj.fields:
+            f.last = read_field(self.ctl, obj, addr, f.name)
+        return tracker
+
+    def adopt_carried(
+        self,
+        project: pj.Project,
+        found: dict[str, int | None],
+        merge_into: pj.Project | None = None,
+    ) -> None:
+        """Notes brought over from another version become this version's notes (or,
+        with ``merge_into``, are added to them): their cheats come back in My cheats
+        (unticked, "check it"), found objects are followed unconfirmed, and the notes
+        are saved. Hooks put in during the bring-over were recorded with note_install."""
+        if merge_into is not None:
+            merge_into.objects += project.objects
+            merge_into.cheats += project.cheats
+            if merge_into.carried_from is None:
+                merge_into.carried_from = project.carried_from
+            self.ctl.project = merge_into
+        else:
+            self.ctl.project = project
+        self.ensure_cheats()
+        for obj in project.objects:
+            addr = found.get(obj.id)
+            if not addr:
+                continue
+            self._track(obj, addr, confirmed=False)
+            if obj.hook is None and obj.anchors_of(pj.ChainAnchor):
+                with self._lock:
+                    self.by_chain.add(obj.id)
+        self.save()
+        self.ctl.cheats_changed.emit()
+
+    def carried_yes(self, obj: pj.ObjectSpec, addr: int) -> None:
+        """The player said Yes to a brought-over object: it is confirmed, and its class
+        is learned again from its first 8 bytes when they point into the game's module
+        (memory search and the wide ranges come back, spec AC-U5). Saved."""
+        obj.check = False
+        if obj.relearn_class:
+            obj.relearn_class = False
+            try:
+                vt = ah.object_vtable(self.ctl.session, addr)
+            except CheatMakerError as exc:
+                log.warning("action=carry_confirm object=%s reason=%s", obj.id, exc)
+                vt = None
+            if vt is not None:
+                obj.vtable = vt
+                if not obj.anchors_of(pj.VtableAnchor):
+                    obj.anchors.append(pj.VtableAnchor())
+                for f in obj.fields:
+                    if f.range is not None:
+                        f.range = rf.class_range(f.vtype, f.last if f.last is not None else 0)
+        log.info(
+            "action=carry_confirm object=%s class=%s",
+            obj.id,
+            "-" if obj.vtable is None else f"{obj.vtable:#x}",
+        )
+        self.mark_carried()
+        self.save()
+
+    def tested(self, cheat: Cheat) -> None:
+        """A cheat with brought-over code parts was ticked and turned on: it no longer
+        says "test it"; the player is told to check it in the game."""
+        pc = self._entry(cheat)
+        if pc is None or not pc.test:
+            return
+        pc.test = False
+        self.mark_carried()
+        self.save()
+        self.ctl.message.emit(hints.CARRY_TEST_HINT)
+
+    def _carried_version(self) -> str:
+        p = self.ctl.project
+        return p.carried_from if p is not None and p.carried_from else "?"
 
     def _combined_line(self, cheat: Cheat, seconds: dict[str, float]) -> str:
         """One status line for a combined cheat: all its parts found, or the first part
@@ -573,6 +707,9 @@ class FindAgain(QObject):
                 continue
             if ok:
                 tracker.accept_pending(pend)
+                if tracker.obj.check and tracker.address == pend:
+                    self.carried_yes(tracker.obj, pend)
+                    self.ctl.cheats_changed.emit()
                 continue
             kept = tracker.pending_both
             tracker.reject_pending(pend)
@@ -599,10 +736,20 @@ class FindAgain(QObject):
         if addr is None:
             return True
         value = read_field(self.ctl, tracker.obj, addr, name)
-        if self.ask_confirm(hints.CONFIRM.format(name=tracker.obj.label, value=fmt(value))):
+        obj = tracker.obj
+        if obj.check:  # brought over from another version (spec AC-U8)
+            text = hints.CONFIRM_CARRIED.format(
+                name=obj.label, version=self._carried_version(), value=fmt(value)
+            )
+        else:
+            text = hints.CONFIRM.format(name=obj.label, value=fmt(value))
+        if self.ask_confirm(text):
             tracker.confirmed = True
+            if obj.check:
+                self.carried_yes(obj, addr)
             return True
-        self.ctl.message.emit(hints.CONFIRM_NO.format(name=tracker.obj.label))
+        no = hints.CONFIRM_NO_CARRIED if obj.check else hints.CONFIRM_NO
+        self.ctl.message.emit(no.format(name=obj.label))
         return False
 
     def _confirm_parts(self, cheat: Cheat) -> bool:
@@ -613,20 +760,29 @@ class FindAgain(QObject):
         if any(t is None for t in trackers) or all(t.confirmed for t in trackers if t):
             return True
         values = []
+        where: dict[str, int] = {}
         for loc in cheat.learned_parts:
             assert loc.anchor is not None
             tracker = self.ctl.live.trackers[loc.anchor[0]]
             addr = tracker.current()
             if addr is None:
                 return True
+            where[tracker.obj.id] = addr
             value = read_field(self.ctl, tracker.obj, addr, loc.anchor[1])
             values.append(hints.CONFIRM_PART_VALUE.format(part=loc.part, value=fmt(value)))
-        if self.ask_confirm(hints.CONFIRM_PARTS.format(name=cheat.name, values=", ".join(values))):
+        text = hints.CONFIRM_PARTS.format(name=cheat.name, values=", ".join(values))
+        carried = [t.obj for t in trackers if t is not None and t.obj.check]
+        if carried:  # one question for the whole cheat, naming the old version
+            text = hints.CARRIED_FROM.format(version=self._carried_version()) + " " + text
+        if self.ask_confirm(text):
             for t in trackers:
                 if t is not None:
                     t.confirmed = True
+            for obj in carried:
+                self.carried_yes(obj, where[obj.id])
             return True
-        self.ctl.message.emit(hints.CONFIRM_NO.format(name=cheat.name))
+        no = hints.CONFIRM_NO_CARRIED if carried else hints.CONFIRM_NO
+        self.ctl.message.emit(no.format(name=cheat.name))
         return False
 
     def _ask_confirm(self, text: str) -> bool:

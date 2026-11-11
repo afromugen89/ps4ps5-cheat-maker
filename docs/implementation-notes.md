@@ -303,3 +303,41 @@ QA and re-review round (2026-11-11, qa/reports/2026-11-11-trace-shown-number.md)
   (added once the restarts branch landed on main).
 - A share of a max of 0 shows "(screen: ?)". TOO_FAR says "1 step", and "ran out of time"
   when TOTAL_S ended it.
+
+## Bring notes to a new game version, steps 1-6 (2026-11-11)
+
+Design: docs/architecture-game-update.md. Steps 7-12 (NoteFingerprints, CarryOver/CarryBar,
+the run driver, AC-U9 in do_update, tools/make_old_notes.py, docs) come in a later pass.
+Small changes against the design, each keeping the spec's behaviour:
+
+- **Golden notes file is format 4.** `tests/fixtures/golden/...cmproj` now says
+  `"format_version": 4` (nothing else changed), so its byte-for-byte round trip still
+  holds. Formats 1-3 load as before (test covers 1, 2 and 3). The QA tests TC-50/TC-51
+  compare with `pj.FORMAT_VERSION` instead of a literal 3 (same rule, one step up).
+- **Reset the class before locate, not in settle.** `rf.verify` checks the saved class,
+  which moved with the update, so a static or chain object would never verify. `prepare`
+  calls `reset_class` on every object without a hook (and `drop_hook` on a hook that can't
+  come over); `settle` still resets an object that ends up with no hook.
+- **`choose(session, classes, item)`** takes the session (the Player-only route reads the
+  ident dword and calls `cv.compare_objects`) and raises `CarryFailed` instead of
+  returning it. A pick is answered with `answer(session, classes, need, address)`;
+  "None of these" fails the hook with "none of the places was picked".
+- **Steps take an `Item`** (new copy, old object, hook site, shift) instead of
+  `(obj, site)`; `collect_classes` and `place_hook` take `reserved=` (the plan's rooms,
+  which `place_hook` extends with the new hook's rooms).
+- **The hook's own capture rooms are laid over with zeros** in `learn_note_signatures`
+  (as well as `(hook, orig)` and the code parts), since the routine holds a copy of the
+  hooked instruction.
+- **Reasons use "it"** ("the game's code changed where it was found") to fit the summary
+  line `Not brought over: Shield (...)`; `find_hook_site(..., label=)` can name the value.
+  A failed part reads "part jump couldn't be found (...); make it again".
+- **`CarryReport.summary`** says "Brought over N of M values" when the notes have no cheats.
+- **`list_sources`** lists older versions (closest first), then newer ones.
+- **Fake game:** `build(static=True)` puts Obolites at `layout.static_off` (off by default,
+  so no existing search sees an extra value); `fight()` also runs the reader
+  (`Game.show`), so a collect on a reader hook sees objects. In run 1 the two enemies
+  share one sampler table entry (hashed by address), as on a console.
+- **`carried_yes` doesn't emit `cheats_changed`** (it runs inside the tick handler, which
+  refills the table itself); `check_pending` emits it after a Yes there.
+- **`FindAgain.carrying`** is a property with a `carrying_changed` signal so CheatsView
+  refreshes its buttons the moment a bring-over starts or ends.

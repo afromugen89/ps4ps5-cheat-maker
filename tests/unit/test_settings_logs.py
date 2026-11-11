@@ -103,3 +103,12 @@ def test_trace_exec_breakpoint_setting():
     assert Settings.load().trace_exec_breakpoint is True
     Settings.path().write_text('{"trace_exec_breakpoint": 1}', encoding="utf-8")
     assert Settings.load().trace_exec_breakpoint is False
+
+
+def test_settings_carry_declined_round_trips_and_bad_values_reset():  # spec-game-update AC-U1
+    Settings(carry_declined=["PPSA01285 03.000.005>03.001.000"]).save()
+    assert Settings.load().carry_declined == ["PPSA01285 03.000.005>03.001.000"]
+    p = Settings.path()
+    for bad in ('"PPSA01285"', "[1, 2]", "null", '{"a": 1}'):
+        p.write_text('{"carry_declined": ' + bad + "}", encoding="utf-8")
+        assert Settings.load().carry_declined == []

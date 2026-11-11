@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 
 from cheatmaker.core.cheats import Cheat
 from cheatmaker.logs import read_latest_log
+from cheatmaker.ui import hints
 from cheatmaker.ui.build_dialog import MakeItWorkDialog
 from cheatmaker.ui.cheats_view import CheatsView
 from cheatmaker.ui.connect_view import ConnectView
@@ -83,11 +84,22 @@ class MainWindow(QMainWindow):
         QGuiApplication.clipboard().setText(read_latest_log())
         self.status.setText("Log copied. Paste it into your bug report.")
 
+    def _carry_busy(self) -> bool:
+        """Notes are being brought over: Lock it and Make it work wait (spec AC-U3)."""
+        if self.cheats.finder.carrying:
+            self.ctl.message.emit(hints.CARRY_BUSY)
+            return True
+        return False
+
     def open_lock(self, cheat: Cheat) -> None:
+        if self._carry_busy():
+            return
         LockWizard(self.ctl, cheat, self).exec()
 
     def open_build(self, **kw) -> None:
         """Make it work (spec-cheat-builder) from Find or My cheats."""
+        if self._carry_busy():
+            return
         self.make_build_dialog(**kw).exec()
 
     def make_build_dialog(self, **kw) -> MakeItWorkDialog:

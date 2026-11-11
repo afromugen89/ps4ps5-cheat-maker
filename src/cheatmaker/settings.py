@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
 from cheatmaker.paths import app_data_dir
@@ -30,6 +30,8 @@ class Settings:
     build_notice_hidden: bool = False  # Make it work's "Save your game first" notice
     trace_exec_breakpoint: bool = False  # Find the real one: execute breakpoint fallback (C20d)
     trace_notice_hidden: bool = False  # Find the real one's "Save your game first" notice
+    # Bring them over: "Not now" pairs, "PPSA01285 03.000.005>03.001.000" (never offered again)
+    carry_declined: list[str] = field(default_factory=list)
 
     @classmethod
     def path(cls) -> Path:
@@ -71,6 +73,10 @@ class Settings:
             s.trace_exec_breakpoint = False
         if not isinstance(s.trace_notice_hidden, bool):
             s.trace_notice_hidden = False
+        if not isinstance(s.carry_declined, list) or not all(
+            isinstance(x, str) for x in s.carry_declined
+        ):
+            s.carry_declined = []
         return s
 
     def save(self) -> None:

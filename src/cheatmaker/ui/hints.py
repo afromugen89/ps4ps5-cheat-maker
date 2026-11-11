@@ -181,6 +181,21 @@ CONFIRM_PARTS = (
     "Take a hit and watch these numbers change. Press Yes only if they do."
 )
 CONFIRM_PART_VALUE = "{part} shows {value}"
+
+# -- bring your notes to a new game version (spec-game-update) -------------------------
+CONFIRM_CARRIED = (
+    "Is this your {name}? It was brought over from version {version} and shows {value} "
+    "right now.\n\nTake a hit and watch it change. Press Yes only if it does."
+)
+CARRIED_FROM = "It was brought over from version {version}."
+CONFIRM_NO_CARRIED = "OK, nothing was changed. Search for {name} to find it in this version."
+CARRY_TEST_HINT = "Test it in the game; untick it if it doesn't work."
+KEEPS_CHECK = "Found again each run (check it)"
+KEEPS_TEST = "Brought over: test it"
+CARRY_BUSY = (
+    "Cheat Maker is bringing your notes to this game version. Wait until it's done, or "
+    "press Cancel."
+)
 TEST_HITS_WARNING = (
     "This writes to the game's memory. Save your game first; a wrong address can crash it."
 )

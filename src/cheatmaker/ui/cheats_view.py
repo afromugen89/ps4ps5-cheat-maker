@@ -39,8 +39,10 @@ CHECK_AFTER_RESTART = "Check after restart"
 
 
 def keeps_text(c: Cheat) -> str:
+    if c.carried == "test":  # brought-over code parts, not ticked yet (spec AC-U8)
+        return hints.KEEPS_TEST
     if c.found_again:  # one found-again value, or a combined cheat with nothing moving
-        return FOUND_AGAIN
+        return hints.KEEPS_CHECK if c.carried == "check" else FOUND_AGAIN
     if c.check_after_restart:  # Make it work, Only me by a field (spec-cheat-builder B8)
         return CHECK_AFTER_RESTART
     return "This session only" if c.session_only else "Yes"
@@ -159,6 +161,7 @@ class CheatsView(QWidget):
         self.open_btn.clicked.connect(self.do_open)
         self.save_btn.clicked.connect(lambda: self.open_save())
         self.update_btn.clicked.connect(self.do_update)
+        self.finder.carrying_changed.connect(lambda _on: self._update_buttons())
         ctl.cheats_changed.connect(self.fill)
         ctl.cheats_changed.connect(self._maybe_learn)
         ctl.game_changed.connect(lambda _g: self._check_version())
@@ -225,7 +228,8 @@ class CheatsView(QWidget):
         picked = self.selected_all()
         self.delete_btn.setEnabled(bool(picked))
         needs_notes = self._needs_notes(picked)
-        self.combine_btn.setEnabled(len(picked) > 1 and not needs_notes)
+        carrying = self.finder.carrying  # bringing notes over: these wait (spec AC-U3)
+        self.combine_btn.setEnabled(len(picked) > 1 and not needs_notes and not carrying)
         self.combine_btn.setToolTip(hints.COMBINE_NEEDS_NOTES if needs_notes else COMBINE_TIP)
         up = self.ctl.session.connected and self.ctl.session.game is not None
         located = c is not None and (c.anchor is None or c.anchor[0] in self.ctl.live.trackers)
@@ -241,9 +245,9 @@ class CheatsView(QWidget):
         self.build_btn.setToolTip(
             hints.BUILD_PICK_SINGLE if c is not None and not single else hints.BUILD_BUTTON_TIP
         )
-        self.learn_btn.setEnabled(up and self._can_learn(c, located))
+        self.learn_btn.setEnabled(up and not carrying and self._can_learn(c, located))
         p = self.ctl.project
-        self.again_btn.setEnabled(up and p is not None and bool(p.objects))
+        self.again_btn.setEnabled(up and not carrying and p is not None and bool(p.objects))
         self.save_btn.setEnabled(any(ch.saveable for ch in self.cheats))
 
     def _can_learn(self, c: Cheat | None, located: bool) -> bool:
@@ -280,6 +284,8 @@ class CheatsView(QWidget):
                     if self.finder.confirm(c):  # AC-12.2: ask once per run
                         self.finder.before_on(c)
                         self.ctl.live.turn_on(c)
+                        if c.carried == "test" and c.enabled:
+                            self.finder.tested(c)
                 elif not want and c.enabled:
                     self.ctl.live.turn_off(c)
                     self.finder.after_off(c)
