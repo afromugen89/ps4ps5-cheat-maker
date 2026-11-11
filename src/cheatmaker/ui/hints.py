@@ -156,7 +156,7 @@ TEST_HITS_FOUND = (
 )
 TEST_HITS_STOPPING = "Stopping: putting the values back first..."
 TEST_HITS_STOPPED = "Stopped. Every value was put back."
-FIND_TEST_HITS = "Not sure which row is real? Press Test the hits."
+FIND_TEST_HITS = "Not sure which row is real? Press Check which is real, or Test the hits."
 
 # -- percent search and groups (spec-health-finding) ----------------------------------
 FIND_PERCENT_TOO_MANY = (
@@ -183,3 +183,26 @@ FIND_GROUPS = (
     'Rows that change together are one group. "likely real" sits next to the same value '
     "at another scale; press the arrow to see every copy."
 )
+
+# -- check which is real (spec-real-check) ----------------------------------------------
+CHECK_REAL_TIP = (
+    "Writes a test value to each listed match for about a second, then puts it back. "
+    "Copies get put back by the game; the real one keeps it and its copies follow."
+)
+CHECK_REAL_RUNNING = (
+    "Checking... keep playing (don't pause) and keep the value steady for a few seconds. "
+    "Each match gets a test value for about a second, then its own value back."
+)
+CHECK_REAL_FOUND = (
+    "Found the real one at {addr}: {n} {copies} followed it. It's at the top of the "
+    "list: make a cheat, set it, or freeze it."
+)
+CHECK_REAL_KEPT = (
+    'Nothing followed a test value, so no copies were found. Rows marked "kept the test '
+    'value" are the best bets: try Set or Freeze on them.'
+)
+CHECK_REAL_NONE = (
+    "The game put every test value back, so these look like copies of a value that isn't "
+    "listed. Search again, or try Advanced > another number type."
+)
+CHECK_REAL_STOPPED = "Stopped. Everything that was checked has its own value back."

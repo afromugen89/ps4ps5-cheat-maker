@@ -171,3 +171,14 @@ Spec: docs/spec-health-finding.md. Save your game first. Copy the log after each
 |---|---|---|---|---|
 | C16a | Health groups at once (Returnal) | Set **Show up to** to 100. **It's full now**, then take hits and press **Went down** (or type the pause-screen %) until the list shows (about 30 to 70 matches). | The first time the list shows, health is already folded into a group (health / 100, its fraction, the percent and the raw value together), with no extra Same / Went down scans. Baseline: scans 56 to 60 showed 73 rows, no groups. | Number of scans, and the `action=scan_results n=... secs=...` and `action=groups` lines. |
 | C16b | When it can't group yet | **Start over**, search a typed number that finds 11 to 100 matches at once. | The hint says how many more changes it needs (not "Found it!"); **Same** doesn't lower that; after that many changes and searches the groups show. | Say if the hint and the list ever disagree. |
+
+## C17 Check which is real (added 2026-11-11)
+
+Spec: docs/spec-real-check.md. Save your game first. Keep playing (not paused) while it runs.
+
+| # | Test | Steps | Pass when | Send back |
+|---|---|---|---|---|
+| C17a | Real health in a group (Returnal) | Find health as in C16a until it's grouped. Press **Check which is real** and keep still for ~10 s. | A health address (`health / 100` or the fraction, not a HUD copy like `...5C10`) is marked **checked: real** at the top, with copies that followed it. Health on screen dips for a moment, then is back where it was. Freeze on that row keeps health up. | The hint text, the `action=check_real_start` and `action=real_check` lines, and which rows got which mark. |
+| C17b | Nothing breaks | Run C17a twice, then press **Cancel** half way through a third run. | The game doesn't crash or freeze; health is back to its own value each time; Cancel stops within a couple of seconds. | Say if health ever stayed at the test value (about 3/4 of what it was). |
+| C17c | A plain value (any game) | Gold or ammo: search the number until 2 to 10 rows are listed (before groups show). Press **Check which is real**. | The row the game really uses is marked **checked: real** or **kept the test value**; HUD copies are marked **copy**. Gold is back to what it was. | The marks per row and the log lines. |
+| C17d | Settle time | If C17a marks the real one as **copy**, or a HUD copy as **kept**: tell us. | | The log lines; we may need a longer wait than 1 s for that game. |

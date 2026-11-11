@@ -218,8 +218,16 @@ just percent ones: a plain number or Went up / Went down search shows the groupe
 different ways (say a fraction and a whole number), it tests only those stored the most
 common way, so one test value means the same to all of them.
 
-Two ways to find the real one:
+Three ways to find the real one:
 
+- **Check which is real** (easiest, no questions): keep playing (don't pause) and press
+  it. The app writes a test value to each listed match for about a second, one per group
+  at a time, and watches what the game does. A copy gets put back by the game; the real
+  value keeps the test value and its copies change with it. The row the others followed
+  is marked **checked: real** and moves to the top of its group (so Set, Freeze and Make
+  a cheat use it); others show **checked: copy** or **checked: kept the test value**.
+  Every value the game didn't put back itself gets its own value back. A group of 5
+  takes about 8 seconds.
 - **Set test**: pick a row, type a new value, press **Set**. If the number on screen
   jumps back the next time it changes, that row was a copy.
 - **Test the hits** (easier): the app writes a test value to half of the matches for a
@@ -228,7 +236,7 @@ Two ways to find the real one:
   questions. Every value is put back after each question. When it's done, the real
   address is added to the list.
 
-> Test the hits writes to the game's memory. Save your game first.
+> Check which is real and Test the hits write to the game's memory. Save your game first.
 
 ### 5.8 Try it, then make a cheat
 
