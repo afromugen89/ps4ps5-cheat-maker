@@ -112,6 +112,7 @@ class Game:
     player: int
     enemies: tuple[int, ...]
     touched: list[int] = field(default_factory=list)  # objects the hooked code sees
+    capture_ticks: bool = True  # run_routines before each read (capture routines only)
     script: deque[tuple[int, float | int, str]] = field(default_factory=deque)
     last_cpu: Cpu | None = None  # the CPU after the last hit (registers, flags)
 
@@ -198,7 +199,11 @@ class _GameMemory:
             raise CpuFault(str(exc)) from None
 
 
-def build(run: int = 1, *, chain: bool = False, connect: bool = True) -> Game:
+def build(
+    run: int = 1, *, chain: bool = False, connect: bool = True, capture_ticks: bool = True
+) -> Game:
+    """``capture_ticks=False``: only ``hit``/``play`` run hooked code (for routines
+    ``run_routines`` doesn't understand, like the builder's)."""
     fake = FakeConsole()
     fake.add_process(PID, "eboot.bin", TITLE, "Returnal", VERSION)
     code = bytearray(b"\xcc" * 0x1000) + bytearray(CODE_SIZE - 0x1000)
@@ -223,13 +228,15 @@ def build(run: int = 1, *, chain: bool = False, connect: bool = True) -> Game:
     if connect:
         session.connect("1.2.3.4")
         session.refresh_game()
-    game = Game(fake, session, run, player, tuple(enemies), [*enemies, player])
+    game = Game(
+        fake, session, run, player, tuple(enemies), [*enemies, player], capture_ticks=capture_ticks
+    )
     fake.read_hits[game.health_addr] = [
         WatchHit(READER + 10, {"r12": player, "rip": READER + 10}),
         WatchHit(READER + 10, {"r12": player, "rip": READER + 10}),
     ]
     fake.write_hits[game.health_addr] = [WatchHit(WRITER + 10, {"r12": player})]
-    fake.game_ticks.append(lambda: run_routines(game))
+    fake.game_ticks.append(lambda: game.capture_ticks and run_routines(game))
     fake.game_ticks.append(game._play_tick)
     return game
 
