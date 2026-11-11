@@ -147,3 +147,19 @@ def test_scale_apply():  # AC-H3
 def test_exact_float_one_unit_away_is_out():  # review finding 4
     assert not matches(ValueType.FLOAT, Compare.EXACT, struct.pack("<f", 88.0), target=87)
     assert matches(ValueType.FLOAT, Compare.EXACT, struct.pack("<f", 87.99), target=87)
+
+
+@pytest.mark.parametrize(
+    ("vtype", "value", "text"),
+    [
+        (ValueType.FLOAT, 1234567.0, "1234567"),
+        (ValueType.FLOAT, 100.0, "100"),
+        (ValueType.FLOAT, struct.unpack("<f", struct.pack("<f", 0.1))[0], "0.1"),
+        (ValueType.FLOAT, struct.unpack("<f", struct.pack("<f", 16777217.0))[0], "16777216"),
+        (ValueType.DOUBLE, 0.1 + 0.2, "0.30000000000000004"),
+        (ValueType.INT32, -5, "-5"),
+    ],
+)
+def test_text_stores_the_same_bytes(vtype, value, text):
+    assert vtype.text(value) == text
+    assert vtype.encode(float(text) if vtype.is_float else int(text)) == vtype.encode(value)

@@ -477,7 +477,8 @@ class Builder:
         self.session = session
         self.address, self.vtype, self.effect, self.only_me = address, vtype, effect, only_me
         self.name = name or "Value"
-        self.full = full
+        # What the game will store: a typed 99.9 compares equal to the value read back.
+        self.full = None if full is None else vtype.decode(vtype.encode(vtype.clamp(full)))
         self.group = list(group)
         self.release = release
         self.live = live
@@ -1076,6 +1077,16 @@ class Builder:
         notes.clear_note()
         log.info("action=build_rollback n=%d reason=%r restored=True", inst.n, reason)
         return Rollback.RESTORED
+
+    def log_end(self, hint: str) -> None:
+        """B9: the result line for a build that ends without a cheat."""
+        log.info(
+            "action=build_result name=%r result=none tried=%d not_restored=%s hint=%r",
+            self.name,
+            len(self.tried),
+            self.not_restored,
+            hint,
+        )
 
     def close(self, wait: float = CLOSE_WAIT_S) -> Rollback:
         """The dialog closes, Disconnect, or the app quits: nothing of ours stays.

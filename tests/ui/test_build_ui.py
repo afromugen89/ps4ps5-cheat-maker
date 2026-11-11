@@ -7,6 +7,7 @@ from __future__ import annotations
 import struct
 
 import pytest
+from PySide6.QtTest import QTest
 
 from cheatmaker.console.client import WatchHit
 from cheatmaker.core import build_notes as notes
@@ -204,6 +205,12 @@ def test_nothing_changed_it(win, game, h):
     )
 
 
+def type_full(d: MakeItWorkDialog, text: str) -> None:
+    """As the player types it (a plain setText isn't an edit)."""
+    d.full.selectAll()
+    QTest.keyClicks(d.full, text)
+
+
 def test_always_full_field(win, game, h, clock):
     add_and_select(win, health_cheat(game))
     game.set_health(80.0)
@@ -212,7 +219,7 @@ def test_always_full_field(win, game, h, clock):
         d.effect_btns[Effect.ALWAYS_FULL].setChecked(True)
         assert d.full.isVisibleTo(d) and d.full.text() == "80"
         assert d.hint.text() == hints.BUILD_FILL_UP
-        d.full.setText("250")
+        type_full(d, "250")
 
     h.setup = pick
     clock.events.extend([lambda: game.hit(game.player, 10.0)])
@@ -226,7 +233,7 @@ def test_always_full_needs_a_number(win, game, h):
 
     def pick(d):
         d.effect_btns[Effect.ALWAYS_FULL].setChecked(True)
-        d.full.setText("lots")
+        type_full(d, "lots")
 
     h.setup = pick
     win.cheats.build_btn.click()
@@ -378,3 +385,64 @@ def test_notice_not_shown_when_hidden_in_settings(win, game, h):
     add_and_select(win, health_cheat(game))
     win.cheats.build_btn.click()
     assert h.notices == 0
+
+
+# -- closing, a put back not taken, the source row (review 3, 15; QA BUG-02, 03) -------
+def test_close_while_a_job_runs_leaves_the_put_back_to_the_worker(win, game, h, monkeypatch):
+    add_and_select(win, health_cheat(game))
+    jobs = []
+    monkeypatch.setattr(win.ctl.tasks, "run", lambda fn, ok, bad: jobs.append((fn, ok, bad)))
+    win.cheats.build_btn.click()  # Start: the watch is queued on a "worker"
+    d = h.last
+    [(fn, ok, bad)] = jobs
+    closes = []
+    real_close = d.builder.close
+    monkeypatch.setattr(d.builder, "close", lambda: closes.append(1) or real_close())
+    d.reject()
+    assert closes == [], "no put back (and no 2 s wait) on the UI thread"
+    assert d._close_builder in win.ctl.before_disconnect, "Disconnect still waits for it"
+    try:
+        value = fn()
+    except BaseException as exc:
+        bad(exc)
+    else:
+        ok(value)
+    assert closes == [1] and d._close_builder not in win.ctl.before_disconnect
+    assert d.hint.text() == hints.BUILD_CANCELLED
+
+
+def test_cancel_after_a_put_back_not_taken_says_restart(win, game, h, clock):
+    add_and_select(win, health_cheat(game))
+
+    def cancel_with_writes_refused():
+        game.fake.fail_writes = True
+        h.last._cancel.set()
+
+    clock.events.extend([None, cancel_with_writes_refused])
+    win.cheats.build_btn.click()
+    d = h.last
+    game.fake.fail_writes = False
+    assert d.hint.text() == bd.RESTART
+    assert game.fake.peek(fg.PID, fg.WRITER, 1) == b"\xe9", "the fix is still in"
+
+
+def test_source_row_is_switched_back_on_when_no_cheat_is_made(win, game, h):
+    src = health_cheat(game)
+    add_and_select(win, src)
+    win.ctl.live.turn_on(src)
+    win.cheats.build_btn.click()  # nobody gets hit: none worked
+    assert h.last.hint.text() == hints.BUILD_NONE_WORKED
+    assert src.enabled and id(src) in win.ctl.live.active
+
+
+def test_full_field_shows_what_start_read(win, game, h, clock):
+    add_and_select(win, health_cheat(game))
+    game.set_health(80.0)
+
+    def pick(d):
+        d.effect_btns[Effect.ALWAYS_FULL].setChecked(True)
+        game.set_health(123.5)
+
+    h.setup = pick
+    win.cheats.build_btn.click()
+    assert h.last.full.text() == "123.5"

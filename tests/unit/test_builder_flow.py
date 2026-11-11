@@ -679,3 +679,10 @@ def test_collect_puts_the_sampler_back_when_done():
     clock.events.extend(_fight(g, 3))
     assert bl.collect() is None
     assert module(g) == before and notes.current_note() is None
+
+
+def test_typed_full_is_what_the_game_stores_so_the_nop_is_offered():
+    g, _clock, bl = setup("float", Effect.ALWAYS_FULL, full=99.9)
+    assert bl.full == struct.unpack("<f", struct.pack("<f", 99.9))[0]
+    g.set_health(bl.full)
+    assert any(c.method is b.Method.NOP for c in bl.watch()), "it is Full right now"

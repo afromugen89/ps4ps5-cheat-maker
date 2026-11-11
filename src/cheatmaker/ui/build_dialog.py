@@ -3,7 +3,10 @@
 The dialog drives a core.builder.Builder one step at a time: each step (Check which
 is real, watch, collect, one fix's test, keeping the fix) is one background job, and
 questions for the player are asked here between jobs, so no worker waits on the UI.
-Whatever happens (Cancel, closing, Disconnect), the Builder puts the game back.
+Whatever happens (Cancel, closing, Disconnect), the Builder puts the game back:
+Cancel and closing only stop the running job, whose worker puts back (no 2 s wait on
+the UI thread); Disconnect waits for it, as the link must still work. The player is
+never told "unchanged" after a put back the PS5 didn't take.
 """
 
 from __future__ import annotations
@@ -79,6 +82,11 @@ class MakeItWorkDialog(QDialog):
         self._cancel: threading.Event | None = None
         self._sure_hint = ""  # "Not sure this is the real one." when Check found none
         self._current: bd.Candidate | None = None
+        self._step_running = False  # a job of ours is on a worker thread
+        self._rejected = False  # the dialog was closed while a job ran
+        self._full_edited = False  # Full typed by the player; else read at Start
+        self._released = False  # the source cheat was switched off for the watch
+        self._skipped_shown = 0
         # Questions and the one-time notice; tests replace these.
         self.ask: Callable[[bd.Question], bd.Answer] = self._ask
         self.notice: Callable[[], bool] = self._notice
@@ -129,6 +137,7 @@ class MakeItWorkDialog(QDialog):
 
         self.effects.buttonToggled.connect(lambda _b, _on: self._effect_changed())
         self.show_advanced.toggled.connect(self.advanced.setVisible)
+        self.full.textEdited.connect(self._full_typed)
         self.start_btn.clicked.connect(self.do_start)
         self.cancel_btn.clicked.connect(self.reject)
         self._prefill_full()
@@ -153,14 +162,18 @@ class MakeItWorkDialog(QDialog):
             self.hint.setText(hints.BUILD_FILL_UP if full else hints.BUILD_READY)
 
     def _prefill_full(self) -> None:
+        """Show the value now. Only a guide: unless the player types in Full, the
+        Builder reads it again at Start (after Check which is real)."""
         try:
             g = self.ctl.session.require_game()
             raw = self.ctl.session.require_client().read(g.pid, self.address, self.vtype.size)
         except Exception as exc:  # shown empty; the player can type it
             log.info("action=build_read_full reason=%s", exc)
             return
-        v = self.vtype.decode(raw)
-        self.full.setText(f"{v:g}" if self.vtype.is_float else str(v))
+        self.full.setText(self.vtype.text(self.vtype.decode(raw)))
+
+    def _full_typed(self, _text: str) -> None:
+        self._full_edited = True
 
     def _set_busy(self, busy: bool) -> None:
         self._cancel = threading.Event() if busy else None
@@ -231,7 +244,7 @@ class MakeItWorkDialog(QDialog):
 
     def do_start(self) -> None:
         full = None
-        if self.effect() is Effect.ALWAYS_FULL:
+        if self.effect() is Effect.ALWAYS_FULL and self._full_edited:
             try:
                 full = self.vtype.clamp(parse_number(self.full.text()))
             except ValueError:
@@ -258,6 +271,7 @@ class MakeItWorkDialog(QDialog):
             return
         self.ctl.before_disconnect.append(self._close_builder)
         self.advanced.clear()
+        self._skipped_shown = 0
         self._set_busy(True)
         if len(self.group) > 1:
             self.hint.setText(hints.BUILD_CHECKING)
@@ -268,7 +282,23 @@ class MakeItWorkDialog(QDialog):
     def _run(self, step, done: Callable) -> None:
         b, cancel = self.builder, self._cancel
         assert b is not None and cancel is not None
-        self.ctl.tasks.run(lambda: step(b, cancel), done, self._failed)
+        self._step_running = True
+
+        def ok(value) -> None:
+            self._step_running = False
+            if self._rejected:
+                self._closed_meanwhile()
+            else:
+                done(value)
+
+        def bad(exc: BaseException) -> None:
+            self._step_running = False
+            if self._rejected:
+                self._closed_meanwhile()
+            else:
+                self._failed(exc)
+
+        self.ctl.tasks.run(lambda: step(b, cancel), ok, bad)
 
     def _checked(self, hint: str | None) -> None:
         b = self.builder
@@ -283,6 +313,7 @@ class MakeItWorkDialog(QDialog):
         """Stop the app's own freeze on the value, or the watch would see our writes."""
         if self.source is not None and self.source.enabled:
             self.ctl.live.turn_off(self.source, restore=False)
+            self._released = True
             self.ctl.cheats_changed.emit()
         if self.address in self.ctl.frozen_addresses:
             self.ctl.freezer.unfreeze(f"find:{self.address}")
@@ -299,16 +330,13 @@ class MakeItWorkDialog(QDialog):
     def _watched(self, _cands) -> None:
         b = self.builder
         assert b is not None
+        if b.full is not None and not self._full_edited:
+            self.full.setText(self.vtype.text(b.full))  # what Start read
         for w in b.writers:
             self._add(
                 hints.BUILD_ADV_WRITER.format(addr=f"{w.address:#x}", text=w.text, hits=w.hits)
             )
-        for s in b.skipped:
-            self._add(
-                hints.BUILD_ADV_SKIPPED.format(
-                    addr=f"{s.writer.address:#x}", text=s.writer.text, reason=s.reason
-                )
-            )
+        self._show_skipped()
         if self.only_me.isChecked():
             self._collect()
         else:
@@ -320,7 +348,19 @@ class MakeItWorkDialog(QDialog):
         self.hint.setText(hints.BUILD_COLLECTING)
         self._run(lambda b, cancel: b.collect(cancel), self._collected)
 
+    def _show_skipped(self) -> None:
+        b = self.builder
+        assert b is not None
+        for s in b.skipped[self._skipped_shown :]:
+            self._add(
+                hints.BUILD_ADV_SKIPPED.format(
+                    addr=f"{s.writer.address:#x}", text=s.writer.text, reason=s.reason
+                )
+            )
+        self._skipped_shown = len(b.skipped)
+
     def _collected(self, hint: str | None) -> None:
+        self._show_skipped()
         if hint:  # only the player was seen: once more (the Builder stops the second time)
             self.hint.setText(hint)
             self._collect()
@@ -350,14 +390,16 @@ class MakeItWorkDialog(QDialog):
         if outcome.result is not R.NEEDS_ANSWER:
             result = outcome.result.value + (f": {outcome.hint}" if outcome.hint else "")
             self._add(hints.BUILD_ADV_TRIED.format(n=n, label=c.label, result=result))
-        if outcome.result is R.PASS:
+        if outcome.rollback is bd.Rollback.NOT_RESTORED or b.not_restored:
+            self._end(bd.RESTART)  # the fix may still be in: try nothing more
+        elif outcome.result is R.PASS:
             self.hint.setText(hints.BUILD_FINISHING)
-            self.ctl.tasks.run(b.finalize, self._finished, self._failed)
+            self._run(lambda b, cancel: b.finalize(cancel), self._finished)
         elif outcome.result is R.NEEDS_ANSWER:
             assert outcome.question is not None
             q = outcome.question
             answer = self.ask(q)
-            self.ctl.tasks.run(lambda: b.answer(q, answer), self._tried, self._failed)
+            self._run(lambda b, _cancel: b.answer(q, answer), self._tried)
         elif outcome.result is R.CANCELLED:
             self._end(hints.BUILD_CANCELLED)
         elif outcome.result is R.LOST and outcome.rollback is not bd.Rollback.RESTORED:
@@ -389,7 +431,7 @@ class MakeItWorkDialog(QDialog):
 
     def _failed(self, exc: BaseException) -> None:
         if self.builder is not None:
-            self.builder.close()
+            self.builder.close()  # nothing left in after a step fails; said by _end
         if isinstance(exc, ScanCancelled):
             self._end(hints.BUILD_CANCELLED)
         elif isinstance(exc, BuildFailed):
@@ -407,29 +449,66 @@ class MakeItWorkDialog(QDialog):
         return False
 
     def _end(self, text: str) -> None:
+        b = self.builder
+        if b is not None and self.result_cheat is None:
+            if b.not_restored:
+                text = bd.RESTART
+            b.log_end(text)
+            self._give_back_source()
         if text:
             self.hint.setText(text)
         self._unregister()
         self._set_busy(False)
 
+    def _give_back_source(self) -> None:
+        """No new cheat: switch the My cheats row back on as it was before Start."""
+        src = self.source
+        if not self._released or src is None or not self.ctl.session.connected:
+            return
+        self._released = False
+        if self.builder is not None and self.builder.not_restored:
+            return  # don't write more over a fix that may still be in
+        try:
+            self.ctl.live.turn_on(src)
+        except Exception as exc:  # the row stays off; the reason is logged
+            report(exc, "build")
+        self.ctl.cheats_changed.emit()
+
     # -- closing ----------------------------------------------------------------------
-    def _close_builder(self) -> None:
-        if self.builder is not None:
-            self.builder.close()
+    def _close_builder(self) -> bd.Rollback:
+        """Put back now (Disconnect, or nothing is running): waits for the job's writes."""
+        if self.builder is None:
+            return bd.Rollback.NOTHING
+        rb = self.builder.close()
+        if rb is bd.Rollback.NOT_RESTORED:
+            self.ctl.message.emit(bd.RESTART)
+        return rb
+
+    def _closed_meanwhile(self) -> None:
+        """The job that ran when the dialog closed has ended (and put back)."""
+        try:
+            self._close_builder()
+        except Exception as exc:  # closing must go on; the reason is logged
+            report(exc, "build")
+        self._end(hints.BUILD_CANCELLED)
 
     def _unregister(self) -> None:
         if self._close_builder in self.ctl.before_disconnect:
             self.ctl.before_disconnect.remove(self._close_builder)
 
     def reject(self) -> None:
-        """Cancel or close: stop the running step and put the game back."""
+        """Cancel or close: stop the running step and put the game back. A job on a
+        worker puts back itself; Disconnect still waits for it until it has ended."""
         if self._cancel is not None:
             self._cancel.set()
-        try:
-            self._close_builder()
-        except Exception as exc:  # closing must go on; the reason is logged
-            report(exc, "build")
-        self._unregister()
+        if self._step_running:
+            self._rejected = True
+        else:
+            try:
+                self._close_builder()
+            except Exception as exc:  # closing must go on; the reason is logged
+                report(exc, "build")
+            self._unregister()
         super().reject()
 
 

@@ -450,11 +450,6 @@ def test_bug02_not_restored_is_never_called_unchanged(bwin, bgame, bh, bclock):
     assert b.RESTART in d.hint.text()
 
 
-@pytest.mark.xfail(
-    reason="BUG-03: Always full uses the value from when the dialog opened, not when Start "
-    "was pressed",
-    strict=True,
-)
 def test_bug03_full_is_read_at_start(bwin, bgame, bh, bclock):
     add_and_select(bwin, health_cheat(bgame))
     bgame.set_health(80.0)  # hurt when opening the dialog
@@ -472,19 +467,12 @@ def test_bug03_full_is_read_at_start(bwin, bgame, bh, bclock):
     assert made.value == 100.0, f"Full is {made.value}"
 
 
-@pytest.mark.xfail(
-    reason="BUG-08: Full is prefilled with 6 significant digits ('1.23457e+06')", strict=True
-)
 def test_bug08_full_prefill_keeps_the_decimal_exactly(bwin, bgame, bh):
     bgame.set_health(1234567.0)
     d = bh.make(address=bgame.health_addr, vtype=FLOAT, name="Gold")
     assert float(d.full.text()) == 1234567.0, d.full.text()
 
 
-@pytest.mark.xfail(
-    reason="BUG-09: no action=build_result log line when a build ends without a cheat",
-    strict=True,
-)
 def test_bug09_build_result_logged_when_nothing_worked(bwin, bgame, bh, caplog):
     caplog.set_level(logging.INFO)
     add_and_select(bwin, health_cheat(bgame))
