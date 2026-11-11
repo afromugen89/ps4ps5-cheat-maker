@@ -111,6 +111,7 @@ def test_check_all_copies(win, fake):
     # spec-trace AC-T1: the guide's next step replaces CHECK_REAL_NONE
     assert f.hint.text() == TRACE_HINT
     assert f.suggestion.action is Action.TRACE and "bold" in f.trace_btn.styleSheet()
+    assert f.advanced.isChecked(), "the button is in Advanced"
 
 
 def test_check_on_a_flat_list(win, fake):

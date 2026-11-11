@@ -60,6 +60,7 @@ def win(qtbot, game):
     w.connect_view.ip.setText("1.2.3.4")
     w.connect_view.connect_btn.click()
     assert ctl.session.game is not None
+    w.find.advanced.setChecked(True)  # the button is in Advanced until C20a passes
     yield w
     ctl.shutdown()
 
@@ -105,6 +106,10 @@ def test_button_sits_under_advanced_and_needs_one_row(win, game):
     assert not f.trace_btn.isEnabled() and f.trace_btn.toolTip() == "Pick one row in the list."
     add_row(win, game.hud, I32)
     assert f.trace_btn.isEnabled() and f.trace_btn.toolTip() == hints.TRACE_BUTTON_TIP
+    f.advanced.setChecked(False)
+    assert not f.trace_btn.isEnabled() and f.trace_btn.toolTip() == hints.TRACE_PICK_ONE
+    f.advanced.setChecked(True)
+    assert f.trace_btn.isEnabled()
     win.ctl.tasks._running = 1  # Lock it / Make it work / Find it next time collecting
     win.ctl.tasks.busy_changed.emit(True)
     assert not f.trace_btn.isEnabled()
@@ -424,3 +429,60 @@ def test_traced_row_in_the_grouped_list_uses_the_columns(win, game):
     assert item.text(1) == "x0.01 of the screen"
     assert item.text(2) == f"found behind {game.hud:#x}, checked: real"
     assert item.text(0).startswith("0.50 (screen: 50)")
+
+
+# -- review follow-ups ------------------------------------------------------------------
+X100_CUT = Way(F, I32, (Step(Kind.MUL, F, const=100.0), Step(Kind.TO_WHOLE, I32, rounding="cut")))
+
+
+def test_a_search_match_of_another_type_at_a_traced_address_is_not_converted(win, game):
+    """Review finding 2: the match row (INT32) and the traced row (FLOAT) at one
+    address are two rows; Set on the match writes the typed number as a whole number."""
+    f = win.find
+    f.vtype.setCurrentIndex(f.vtype.findData(I32))
+    f.number.setText("87")
+    f.search_btn.click()
+    assert any(m.address == game.hud for m in f.rows[: f._n_matches])
+    f.use_traced(R(tr.Outcome.FOUND, 1, game.hud, F, X100_CUT, Verdict.REAL, value=0.87))
+    rows = [(i, f.row_types[i]) for i, m in enumerate(f.rows) if m.address == game.hud]
+    assert [vt for _i, vt in rows] == [I32, F], "both rows listed"
+    match_row = rows[0][0]
+    assert "screen" not in f._row_text(match_row)
+    f._select_row(match_row)
+    f.set_value.setText("87")
+    f.set_btn.click()
+    assert game.g.fake.writes[-1][1:] == (game.hud, I32.encode(87)), "not 0.87 as a whole"
+    f._select_row(rows[1][0])
+    assert f.selected().address == game.hud and f._row_type() is F
+    f.set_value.setText("87")
+    f.set_btn.click()
+    assert game.g.fake.writes[-1][1] == game.hud
+    assert F.decode(game.g.fake.writes[-1][2]) == pytest.approx(0.87)
+
+
+def test_set_tells_the_player_when_only_the_nearest_value_fits(win, game):
+    f = win.find
+    real = game.obj + 0x10
+    x10 = Way(I32, I32, (Step(Kind.MUL, I32, const=10),))
+    game.g.set(real, I32, 5)
+    f.use_traced(R(tr.Outcome.FOUND, 1, real, I32, x10, Verdict.REAL, value=5))
+    said = []
+    win.ctl.message.connect(said.append)
+    f.set_value.setText("87")
+    f.set_btn.click()
+    assert game.g.get(real, I32) == 9
+    assert said == [hints.TRACE_NEAREST.format(typed="87", shows="90")]
+    said.clear()
+    f.set_value.setText("90")
+    f.set_btn.click()
+    assert said == []
+
+
+def test_suggesting_the_trace_turns_advanced_on(win, game):
+    f = win.find
+    f.advanced.setChecked(False)
+    add_row(win, game.hud, I32)
+    assert not f.trace_btn.isEnabled()
+    f._suggest(f.guide.after_put_back())
+    assert f.advanced.isChecked() and f.trace_btn.isEnabled()
+    assert "bold" in f.trace_btn.styleSheet()

@@ -253,6 +253,7 @@ class FindWizard(QWidget):
             trace_row.addWidget(self.trace_btn)
             trace_row.addStretch(1)
         self.advanced.toggled.connect(lambda _on: self._fill_table())
+        self.advanced.toggled.connect(lambda _on: self._update_buttons())
 
         self.add_addr = QLineEdit()
         self.add_addr.setPlaceholderText("Address, e.g. 0x12e0ea60ac")
@@ -446,6 +447,8 @@ class FindWizard(QWidget):
             w.setEnabled(sel)
         # one debugger job at a time: not while Lock it / Make it work / a check runs
         can_trace = sel and not self.ctl.tasks.busy
+        if not hints.TRACE_TESTED:  # in the Advanced box: only with Advanced on
+            can_trace = can_trace and self.advanced.isChecked()
         self.trace_btn.setEnabled(can_trace)
         self.trace_btn.setToolTip(hints.TRACE_BUTTON_TIP if can_trace else hints.TRACE_PICK_ONE)
         self.add_btn.setEnabled(ready)
@@ -558,6 +561,9 @@ class FindWizard(QWidget):
             return
         if show_text:
             self.hint.setText(tip.text)
+        if tip.action is Action.TRACE and not hints.TRACE_TESTED and not self.advanced.isChecked():
+            self.advanced.setChecked(True)  # the button is in there
+            self._guide_set_advanced = True  # Start over takes Advanced back off
         if tip.action is not Action.START_OVER or has_try:
             self._action_widget(tip.action).setStyleSheet("font-weight: bold")
 
@@ -793,10 +799,12 @@ class FindWizard(QWidget):
             rows = (sc.matches(sc.count) if groups else sc.matches()) if show_matches else []
             self._n_matches = len(rows)
             types = [m.vtype or self._vtype() for m in rows]
-            seen = {m.address for m in rows}
+            # by address and type: a match read as another type doesn't hide a typed-in
+            # (or traced) row, which converts screen units with its own type
+            seen = {(m.address, t) for m, t in zip(rows, types, strict=True)}
             chains: list[Chain | None] = [None] * len(rows)
             for addr, vt in self.manual.items():
-                if addr not in seen:
+                if (addr, vt) not in seen:
                     rows.append(self._read_match(addr, vt))
                     types.append(vt)
                     chains.append(None)
@@ -870,7 +878,7 @@ class FindWizard(QWidget):
     def _row_text(self, i: int) -> str:
         m = self.rows[i]
         frozen = " (frozen)" if m.address in self.ctl.frozen_addresses else ""
-        t = self.traced.get(m.address) if m.address in self.manual else None
+        t = self._traced_for(m.address, self.row_types[i])
         if m.address in self.manual:
             frozen += f" (added, {self.manual[m.address].label})"
         if t is not None and not self.grouped:  # the tree says these in its columns
@@ -883,11 +891,19 @@ class FindWizard(QWidget):
         r = self.verdicts.get((m.address, self.row_types[i])) if i < self._n_matches else None
         if r is not None and not self.grouped:  # the tree says it in Notes
             frozen += f" ({r.verdict.short})"
-        return self._value_text(m.address, m.value) + frozen
+        return self._value_text(m.address, self.row_types[i], m.value) + frozen
 
-    def _value_text(self, addr: int, value: float | int) -> str:
+    def _traced_for(self, addr: int, vt: ValueType) -> TracedRow | None:
+        """The trace behind a row, only for a row of the traced type: a search match
+        at the same address read as another type is not converted."""
+        t = self.traced.get(addr)
+        if t is None or addr not in self.manual or t.way.real is not vt:
+            return None
+        return t
+
+    def _value_text(self, addr: int, vt: ValueType, value: float | int) -> str:
         """Value now; a traced row also shows the screen value: ``0.87 (screen: 87)``."""
-        t = self.traced.get(addr) if addr in self.manual else None
+        t = self._traced_for(addr, vt)
         if t is None or (isinstance(value, float) and not math.isfinite(value)):
             return fmt_value(value)
         try:
@@ -986,7 +1002,7 @@ class FindWizard(QWidget):
         item.setText(1, way_label(m.way) if self.ctl.scanner.has_ways else "")
         item.setText(3, f"{m.address:#x}")
         checked = self.verdicts.get((m.address, self.row_types[i]))
-        traced = self.traced.get(m.address) if g is None and m.address in self.manual else None
+        traced = self._traced_for(m.address, self.row_types[i]) if g is None else None
         if traced is not None:
             item.setText(1, traced.way.label())
             item.setText(2, traced.notes())
@@ -1360,7 +1376,9 @@ class FindWizard(QWidget):
         if m is None:
             return
         try:
-            value = self._real_value(m.address, parse_number(self.set_value.text()))
+            value = self._real_value(
+                m.address, self._row_type(), parse_number(self.set_value.text())
+            )
             data = self._row_type().encode(value)
             g = self.ctl.session.require_game()
             log.info(
@@ -1379,14 +1397,22 @@ class FindWizard(QWidget):
         if m.address not in self.ctl.frozen_addresses:
             self._watch_put_back(m.address, data)
 
-    def _real_value(self, addr: int, typed: float | int) -> float | int:
+    def _real_value(self, addr: int, vt: ValueType, typed: float | int) -> float | int:
         """A traced row's typed number is what the screen shows: turn it into the real
-        value with the row's way (87 -> 0.87). Other rows: as typed."""
-        t = self.traced.get(addr) if addr in self.manual else None
+        value with the row's way (87 -> 0.87). Other rows: as typed. When the game
+        can't show exactly that number, the nearest is used and the player told."""
+        t = self._traced_for(addr, vt)
         if t is None:
             return typed
-        real = t.way.to_real(typed, self._read_maxes(t.way))
-        log.info("action=trace_set addr=%#x screen=%s real=%s", addr, typed, real)
+        max_now = self._read_maxes(t.way)
+        real, exact = t.way.real_for(typed, max_now)
+        log.info("action=trace_set addr=%#x screen=%s real=%s exact=%s", addr, typed, real, exact)
+        if not exact:
+            try:
+                shows = fmt_value(t.way.to_screen(real, max_now))
+            except (ValueError, OverflowError):
+                shows = "?"
+            self.ctl.message.emit(hints.TRACE_NEAREST.format(typed=fmt_value(typed), shows=shows))
         return real
 
     def _watch_put_back(self, addr: int, data: bytes) -> None:
@@ -1441,7 +1467,7 @@ class FindWizard(QWidget):
             kind, offset = self.ctl.session.classify(m.address)
             value = parse_number(self.set_value.text()) if self.set_value.text().strip() else None
             if value is not None:
-                value = self._real_value(m.address, value)
+                value = self._real_value(m.address, self._row_type(), value)
             cheat = make_cheat(template, kind, offset, self._row_type(), m.raw, value)
         except Exception as exc:
             self.ctl.fail(exc, "make_cheat")
@@ -1487,7 +1513,11 @@ class FindWizard(QWidget):
             check = result.verdict.short if result.verdict is not None else "not sure"
             self.traced[result.address] = TracedRow(result.way, result.behind, check, result.sure)
         self.refresh_live()
-        rows = [i for i, m in enumerate(self.rows) if m.address == result.address]
+        rows = [
+            i
+            for i, m in enumerate(self.rows)
+            if (m.address, self.row_types[i]) == (result.address, result.vtype)
+        ]
         if rows:
             self._select_row(rows[-1])
         self.hint.setText(trace_result_text(result))

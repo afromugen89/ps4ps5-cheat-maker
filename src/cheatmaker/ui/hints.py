@@ -296,6 +296,7 @@ TRACE_LOST = "Lost connection to the PS5."
 TRACE_FAILED = (
     "The PS5 refused a step of the check. Try again; if it keeps happening, press Copy log."
 )
+TRACE_NEAREST = "The game can't show exactly {typed}: wrote the nearest it can, {shows}."
 TRACE_NOT_RESTORED = "These may still hold a test value; restart the game to be safe: {addrs}"
 TRACE_KINDS = {
     "FLOAT": "a decimal",
