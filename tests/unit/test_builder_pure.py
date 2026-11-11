@@ -84,6 +84,15 @@ def test_methods_per_effect():
     assert methods(VM, FLOAT, Effect.HALF) == (b.Method.HOOK,)
 
 
+def test_a_writer_the_routine_refuses_falls_back_to_the_switch_off():
+    """mov [rax+100h],rsp: effect_code refuses writers that use the stack. classify
+    knows it up front, so Never goes down still gets the switch-off (review 14)."""
+    rsp = _w("4889a000010000", flags=NONE)
+    assert methods(rsp, ValueType.INT64) == (b.Method.NOP,)
+    assert methods(rsp, ValueType.INT64, Effect.HALF) == b.NO_METHOD
+    assert methods(rsp, ValueType.INT64, only_me=True) == b.NO_METHOD
+
+
 def test_flags_the_hook_can_fix():
     eligible, _ = b.classify([SUBW], INT32, Effect.NEVER_DOWN, False)
     assert eligible[0].methods == (b.Method.HOOK,) and eligible[0].flags_fix

@@ -753,3 +753,18 @@ def test_finalize_notes_the_re_aimed_jump_before_writing_it(monkeypatch):
     monkeypatch.setattr(g.fake, "write", write)
     bl.finalize()
     assert noted == [True]
+
+
+def test_only_me_skips_writers_that_reach_the_value_another_way():
+    g, clock, bl = setup(only_me=True)
+    other = fg.BASE + 0x700
+    g.fake.poke(fg.PID, other, bytes.fromhex("C4C17A118C24A0010000"))  # [r12+1A0h]
+    g.fake.write_hits[bl.address] += [WatchHit(other + 10)] * 2
+    cands = bl.watch()
+    assert len(cands) == 3, "both writers, then all of them"
+    clock.events.extend(_fight(g, 3))
+    assert bl.collect() is None
+    assert [c.parts[0].writer.address for c in bl.queue] == [fg.WRITER]
+    assert [len(c.parts) for c in bl.queue] == [1]
+    [s] = [s for s in bl.skipped if s.writer.address == other]
+    assert s.reason == b.OTHER_PLACE_ONLY_ME

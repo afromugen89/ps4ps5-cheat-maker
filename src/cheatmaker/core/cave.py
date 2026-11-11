@@ -423,7 +423,7 @@ def effect_code(
         raise LockFailed(UNSUPPORTED_TYPE)
     if effect is Effect.ALWAYS_FULL and (full is None or len(full) != vtype.size):
         raise LockFailed("Always full needs the full value")
-    _check_effect_writer(span[0], target, vtype)
+    check_effect_writer(span[0], target, vtype)
     C, Ins, R = ix.Code, ix.Instruction, ix.Register
     labels = iter(range(0xFFFF_0000, 0xFFFF_1000))
     back = span[-1].next_ip
@@ -507,7 +507,7 @@ def effect_code(
     return code
 
 
-def _check_effect_writer(insn: ix.Instruction, target: Target, vtype: ValueType) -> None:
+def check_effect_writer(insn: ix.Instruction, target: Target, vtype: ValueType) -> None:
     """The routine runs the writer and then reads ``[obj+disp]`` back with the stack
     moved, so the writer must store exactly the value, through ``target``, and change
     no register (rsp included)."""
@@ -818,6 +818,7 @@ __all__ = [
     "FieldGuess",
     "Filter",
     "capture_code",
+    "check_effect_writer",
     "collect_objects",
     "compare_objects",
     "effect_code",

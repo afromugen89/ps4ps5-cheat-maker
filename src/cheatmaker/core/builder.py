@@ -77,6 +77,7 @@ FLAGS_BEFORE = "the game checks a flag from before it right after it"
 CRASHED = "it crashed the game last time"
 NO_METHOD = "no safe way to change it with this effect"
 TOO_SHORT_ONLY_ME = "it's too short for a jump, and Only me needs one"
+OTHER_PLACE_ONLY_ME = "it reaches the value another way, so Only me can't tell you apart there"
 
 
 class Method(Enum):
@@ -132,12 +133,16 @@ def _memory_writes(insn: ix.Instruction) -> int:
     return sum(1 for m in _info.info(insn).used_memory() if m.access in writes)
 
 
-def _hookable(writer: Writer) -> bool:
-    """A 5-byte jump fits over the writer alone, and it writes through ``[reg+disp]``."""
+def _hookable(writer: Writer, vtype: ValueType) -> bool:
+    """A 5-byte jump fits over the writer alone, it writes through ``[reg+disp]``, and
+    effect_code takes it (the store is the value, no stack use): so a refusal shows
+    here, where the switch-off can still be offered, not when the fix is prepared."""
     if writer.length < cv.JMP_LEN:
         return False
     try:
-        cv.writer_target(writer)
+        target = cv.writer_target(writer)
+        cv.hook_span(lambda _a, _n: writer.code, writer.address, single=True)
+        cv.check_effect_writer(decode_one(writer.code, writer.address), target, vtype)
     except LockFailed:
         return False
     return True
@@ -168,7 +173,7 @@ def classify(
         read = flags.read if flags is not None else frozenset()
         flags_fix = bool(read)
         methods: list[Method] = []
-        if _hookable(w):
+        if _hookable(w, vtype):
             methods.append(Method.HOOK)
         nop_ok = ok and not read and not only_me
         if nop_ok and (
@@ -645,6 +650,7 @@ class Builder:
                 raise BuildFailed(CANT_TELL_APART)
             g = guesses[0]
             self.filter = cv.Filter("field", field=g.offset, field_value=g.player_value)
+        self._only_where_learned(target.disp)
         offset = self.address - player
         self.others = [o + offset for o in others[:MAX_OTHERS]]
         log.info(
@@ -654,6 +660,24 @@ class Builder:
             len(self.others),
         )
         return None
+
+    def _only_where_learned(self, disp: int) -> None:
+        """The filter checks the object the collected writer wrote through: a writer
+        with another displacement holds another pointer there, so it is skipped."""
+        keep: list[Eligible] = []
+        for e in self.eligible:
+            if cv.writer_target(e.writer).disp == disp:  # Only me: hooks only
+                keep.append(e)
+            else:
+                self.skipped.append(Skipped(e.writer, OTHER_PLACE_ONLY_ME))
+                log.info(
+                    "action=build_writer writer=%#x skipped=%r",
+                    e.writer.address,
+                    OTHER_PLACE_ONLY_ME,
+                )
+        if len(keep) != len(self.eligible):
+            self.eligible = keep
+            self.queue = [c for c in candidates(keep) if not self._all_crashed(c)]
 
     def _collect_objects(
         self, writer: Writer, target: cv.Target, cancel: threading.Event
