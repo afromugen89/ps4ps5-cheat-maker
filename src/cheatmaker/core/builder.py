@@ -379,6 +379,7 @@ ALIVE_ANSWER_S = 2.0  # B5: a read slower than this means the PS5 isn't answerin
 PROCESSES_EVERY_S = 3.0  # fallback when the PS5 can't say which app is in front
 PUT_BACK_WAIT_S = notes.PUT_BACK_WAIT_S  # B6: before routine and counter are zeroed
 MAX_OTHERS = 4  # Only me: other objects read during a test
+SAMPLE_TRIES = 3  # B5: readings with a hit in the middle are taken again this often
 CLOSE_WAIT_S = 10.0  # close(): how long to wait for writes in progress on another thread
 
 NOTHING_CHANGED = "Nothing changed it. Try again and make it change while the bar moves."
@@ -875,8 +876,6 @@ class Builder:
         cancel: threading.Event,
         progress: Callable[[float, str], None] | None,
     ) -> TestOutcome:
-        game = self._game()
-        client = self._client()
         hint = f"Testing fix {inst.n} of {inst.total}: keep playing and take a hit."
         nop = all(p.method is Method.NOP for p in inst.candidate.parts)
         others_start: dict[int, float | int] = {}
@@ -903,12 +902,7 @@ class Builder:
             if taken is not None:
                 return TestOutcome(TryResult.CANCELLED, rollback=taken)
             try:
-                value = self._read_value()
-                count, last = 0, None
-                if inst.slot is not None:
-                    raw = client.read(game.pid, inst.slot, cv.SLOT_SIZE)
-                    count = struct.unpack_from("<Q", raw)[0]
-                    last = self.vtype.decode(raw[8 : 8 + self.vtype.size])
+                sample = self._sample(inst)
                 for o, before in others_start.items():
                     try:
                         if self._read_value(o) < before:
@@ -923,7 +917,8 @@ class Builder:
                 if taken is not None:
                     return TestOutcome(TryResult.CANCELLED, rollback=taken)
                 return self._lost(inst, game_gone=gone)
-            samples.append(Sample(value, count, last))
+            if sample is not None:
+                samples.append(sample)
             if progress is not None:
                 progress(min(1.0, (self.clock() - t0) / TEST_S), hint)
         data = TestData(
@@ -938,6 +933,25 @@ class Builder:
         )
         self._pending = (inst, data)
         return self._verdict(inst, data)
+
+    def _sample(self, inst: _Installed) -> Sample | None:
+        """The value with the counter around it: counter, value, counter. A run of the
+        routine between two reads changes the counter, so the reading is taken again
+        (and dropped after SAMPLE_TRIES); judge sees the value and count of one moment."""
+        if inst.slot is None:
+            return Sample(self._read_value())
+        game = self._game()
+        client = self._client()
+        raw = client.read(game.pid, inst.slot, cv.SLOT_SIZE)
+        for _ in range(SAMPLE_TRIES):
+            value = self._read_value()
+            after = client.read(game.pid, inst.slot, cv.SLOT_SIZE)
+            if after == raw:
+                count = struct.unpack_from("<Q", raw)[0]
+                return Sample(value, count, self.vtype.decode(raw[8 : 8 + self.vtype.size]))
+            raw = after
+        log.info("action=build_sample dropped=True")
+        return None
 
     def _taken_back(self, inst: _Installed) -> Rollback | None:
         """None while the fix is in; else how its put back (by Cancel or Disconnect on

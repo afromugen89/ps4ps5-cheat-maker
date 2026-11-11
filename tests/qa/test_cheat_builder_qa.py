@@ -346,11 +346,6 @@ def test_bug01_rollback_during_install_leaves_the_jump(monkeypatch):
     assert module(g) == before
 
 
-@pytest.mark.xfail(
-    reason="BUG-04: value read before the counter: a hit between the two reads fails a "
-    "correct Half damage fix",
-    strict=True,
-)
 def test_bug04_hit_between_value_and_counter_reads(monkeypatch):
     g, _clock, bl = setup("float", Effect.HALF)
     bl.watch()

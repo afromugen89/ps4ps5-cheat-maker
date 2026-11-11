@@ -686,3 +686,42 @@ def test_typed_full_is_what_the_game_stores_so_the_nop_is_offered():
     assert bl.full == struct.unpack("<f", struct.pack("<f", 99.9))[0]
     g.set_health(bl.full)
     assert any(c.method is b.Method.NOP for c in bl.watch()), "it is Full right now"
+
+
+def test_hit_during_the_value_read_is_read_again(monkeypatch):
+    g, _clock, bl = setup("float", Effect.HALF)
+    bl.watch()
+    real_read = g.fake.read
+    seen, done = [], []
+
+    def read(pid, addr, size):
+        hooked = g.fake.peek(fg.PID, fg.WRITER, 1) == b"\xe9"
+        if addr == bl.address and hooked:
+            seen.append(1)
+            if len(seen) == 2:  # the first poll (the first read is the start value)
+                done.append(1)
+                out = real_read(pid, addr, size)  # the value before the hit ...
+                g.hit(g.player, 40.0)  # ... then the counter moves
+                return out
+        return real_read(pid, addr, size)
+
+    monkeypatch.setattr(g.fake, "read", read)
+    out = bl.try_candidate(bl.next_candidate())
+    assert done and g.health() == 70.0
+    assert out.result is TR.PASS, out
+
+
+def test_a_reading_that_never_settles_is_dropped(monkeypatch):
+    g, _clock, bl = setup()
+    bl.watch()
+    inst = bl._prepare(bl.next_candidate(), 1)
+    real_read = g.fake.read
+    count = iter(range(1, 100))
+
+    def read(pid, addr, size):
+        if addr == inst.slot:
+            return struct.pack("<Q", next(count)) + bytes(8)
+        return real_read(pid, addr, size)
+
+    monkeypatch.setattr(g.fake, "read", read)
+    assert bl._sample(inst) is None
