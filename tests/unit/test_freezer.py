@@ -288,3 +288,15 @@ def test_learned_parts_never_write_to_0_or_their_offset(session, fake):  # desig
     assert addrs and 0 not in addrs and 0x40 not in addrs and 8 not in addrs
     learned = {OBJ_AT + 0x10, OBJ_AT + 0x14, OBJ_AT + 0x108}
     assert addrs <= learned | {MODULE_BASE + 0x100}
+
+
+def test_a_tick_after_turn_off_leaves_no_paused_part_behind(session, fake):  # review 7
+    c, trackers = _parts_cheat(fake)
+    live = _live_with(session, trackers)
+    live.turn_on(c)
+    resolve = live.freezer._entries[str(id(c))]
+    live.turn_off(c)
+    trackers["obj2"].address = None
+    resolve()  # a tick that was already running when the cheat went off
+    assert live._part_paused == {}
+    live.freezer.stop()

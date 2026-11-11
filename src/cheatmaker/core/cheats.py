@@ -187,13 +187,14 @@ def combine(
     cheats: list[Cheat],
     name: str | None = None,
     addr_of: Callable[[Location], int | None] | None = None,
+    module_base: int | None = None,
 ) -> Cheat:
     """One cheat that writes all of ``cheats``' lines (e.g. two health values that must
     both be kept). It keeps writing if any of them did. Its value can't be edited, since
     the parts usually hold different numbers. Each line becomes a named part that keeps
     its number type, and a found-again cheat becomes a learned part. ``addr_of`` gives
-    where a learned part is right now (to spot overlaps). Raises ValueError if it can't
-    combine them."""
+    where a learned part is right now and ``module_base`` where the game's module is (to
+    spot overlaps across them). Raises ValueError if it can't combine them."""
     if len(cheats) < 2:
         raise ValueError("pick at least two cheats to combine")
     parts = [p for c in cheats for p in _parts_of(c)]
@@ -201,7 +202,7 @@ def combine(
     moving = sum(1 for p in parts if p.kind is LocationKind.SESSION_ADDRESS)
     if moving > MAX_MOVING:
         raise ValueError(f"Combine up to {MAX_MOVING} values that move; these have {moving}.")
-    _refuse_overlap(parts, addr_of)
+    _refuse_overlap(parts, addr_of, module_base)
     return Cheat(
         name=name or " + ".join(c.name for c in cheats),
         locations=parts,
@@ -267,22 +268,30 @@ def _name_parts(parts: list[Location]) -> None:
 
 
 def _span(
-    loc: Location, addr_of: Callable[[Location], int | None] | None
+    loc: Location,
+    addr_of: Callable[[Location], int | None] | None,
+    module_base: int | None,
 ) -> tuple[str, int, int] | None:
-    """(space, first byte, end) of a part, or None if it can't be told."""
+    """(space, first byte, end) of a part, or None if it can't be told. With the
+    module base known every part is in one space: the running game's addresses."""
     if loc.anchor is not None:
         addr = addr_of(loc) if addr_of is not None else None
         return None if addr is None else ("", addr, addr + len(loc.on))
     if loc.kind is LocationKind.SESSION_ADDRESS:
         return ("", loc.offset, loc.offset + len(loc.on))
+    if module_base is not None:
+        at = loc.address(module_base)
+        return ("", at, at + len(loc.on))
     return (loc.module, loc.offset, loc.offset + len(loc.on))
 
 
 def _refuse_overlap(
-    parts: list[Location], addr_of: Callable[[Location], int | None] | None
+    parts: list[Location],
+    addr_of: Callable[[Location], int | None] | None,
+    module_base: int | None,
 ) -> None:
     """Two parts that share a byte would fight over it: refuse them."""
-    spans = [_span(p, addr_of) for p in parts]
+    spans = [_span(p, addr_of, module_base) for p in parts]
     for i, a in enumerate(parts):
         for j in range(i + 1, len(parts)):
             b, sa, sb = parts[j], spans[i], spans[j]

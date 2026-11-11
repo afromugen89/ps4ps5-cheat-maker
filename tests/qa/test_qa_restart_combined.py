@@ -236,16 +236,12 @@ def test_tc05b_overlap_fixed_and_learned_parts():  # TC-05
     )
 
 
-@pytest.mark.xfail(
-    reason="BUG-03: a fixed module part and a session part on the same byte aren't refused",
-    strict=True,
-)
-def test_tc05c_overlap_module_value_and_session_same_byte():  # TC-05
+def test_tc05c_overlap_module_value_and_session_same_byte():  # TC-05, BUG-03 fixed
     a = Cheat("a", [Location(LocationKind.MODULE_VALUE, 0x4040, b"\x01", b"\x00")])
     b = sess("b", fg.BASE + 0x4040, ValueType.INT8, 2)  # the very same byte in this run
     with pytest.raises(ValueError, match=r"a and b overlap in memory\."):
-        combine([a, b], addr_of=lambda _loc: None)
-    raise AssertionError("unreachable")  # pragma: no cover
+        combine([a, b], addr_of=lambda _loc: None, module_base=fg.BASE)
+    assert combine([a, b]), "module base not known: can't tell"
 
 
 def test_tc05d_overlap_in_the_ui_with_a_found_again_part(win, console):  # TC-05

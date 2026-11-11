@@ -242,3 +242,12 @@ def test_combine_refuses_parts_that_share_a_byte():  # AC-1
         combine([_found("health"), _session("fraction", 0x1003)], addr_of=addr_of)
     assert combine([_found("health"), _session("fraction", 0x1004)], addr_of=addr_of)
     assert combine([_found("health"), _session("fraction", 0x1000)]), "not found: can't tell"
+
+
+def test_combine_compares_module_and_session_parts_with_the_module_base():  # QA BUG-03
+    from cheatmaker.core.cheats import combine
+
+    god = Cheat("god", [Location(LocationKind.MODULE_VALUE, 0x40, b"\x01\x00", b"\x00\x00")])
+    with pytest.raises(ValueError, match="god and copy overlap in memory"):
+        combine([god, _session("copy", 0x400041)], module_base=0x400000)
+    assert combine([god, _session("copy", 0x400042)], module_base=0x400000)

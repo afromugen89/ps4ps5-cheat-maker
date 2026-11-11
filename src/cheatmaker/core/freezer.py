@@ -208,6 +208,8 @@ class LiveCheats:
     def _note_paused(self, cheat: Cheat, lost: list[str], found: list[str]) -> None:
         key = str(id(cheat))
         with self._parts_lock:
+            if id(cheat) not in self.active:  # turned off meanwhile: leave nothing behind
+                return
             paused = self._part_paused.setdefault(id(cheat), set())
             for name in lost:
                 if name not in paused:
