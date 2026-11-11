@@ -7,6 +7,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 from tests import fakegame as fg
 
 TOOLS = Path(__file__).resolve().parents[2] / "tools"
@@ -122,3 +124,46 @@ def test_make_old_notes_refuses_plainly(monkeypatch, capsys):
     cur_notes.write_text("{")
     assert _run(monkeypatch, fg.TITLE, fg.VERSION, "03.000.004") == 1
     assert "can't be read" in capsys.readouterr().out
+
+
+def test_make_old_notes_reads_everything_before_moving_anything(monkeypatch, capsys):
+    _setup_cur()
+    cur_notes, cur_sigs = _notes_files(fg.VERSION)
+    old_notes, _ = _notes_files("03.000.004")
+    old_notes.write_text("my real old notes")
+    cur_sigs.write_text("{")
+    before = sorted(p.name for p in cur_notes.parent.iterdir())
+    assert _run(monkeypatch, fg.TITLE, fg.VERSION, "03.000.004") == 1
+    assert "The fingerprints for 03.000.005 can't be read" in capsys.readouterr().out
+    assert sorted(p.name for p in cur_notes.parent.iterdir()) == before
+    assert old_notes.read_text() == "my real old notes"
+
+
+def test_make_old_notes_undo_again_after_a_stop_half_way(monkeypatch, capsys):
+    notes_b, sigs_b = _setup_cur()
+    cur_notes, cur_sigs = _notes_files(fg.VERSION)
+    old_notes, _ = _notes_files("03.000.004")
+    old_notes.write_text("my real old notes")
+    tool = _load("make_old_notes")
+    tool.forward(fg.TITLE, fg.VERSION, "03.000.004", say=lambda _t: None)
+    cur_notes.write_text("made by the dry run")
+    real = tool._keep_aside
+
+    def stop_at_the_copy(p, say, what):
+        if p == old_notes:
+            raise OSError("disk full")
+        real(p, say, what)
+
+    monkeypatch.setattr(tool, "_keep_aside", stop_at_the_copy)
+    with pytest.raises(OSError):
+        tool.undo(fg.TITLE, fg.VERSION, "03.000.004", say=lambda _t: None)
+    assert cur_notes.read_bytes() == notes_b, "the current notes were already put back"
+    monkeypatch.setattr(tool, "_keep_aside", real)
+    tool.undo(fg.TITLE, fg.VERSION, "03.000.004", say=lambda _t: None)
+    assert cur_notes.read_bytes() == notes_b and cur_sigs.read_bytes() == sigs_b
+    assert old_notes.read_text() == "my real old notes"
+    carried = cur_notes.with_name(cur_notes.name + ".carried")
+    assert (
+        carried.read_text() == "made by the dry run"
+        and not carried.with_name(carried.name + "2").exists()
+    ), "the put-back notes weren't set aside a second time"

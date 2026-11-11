@@ -787,11 +787,6 @@ def test_tc37_make_old_notes_undo_after_a_real_bring_over(make, monkeypatch, cap
     assert _files(fg.VERSION) == cur
 
 
-@pytest.mark.xfail(
-    reason="BUG-10: make_old_notes stops half-way on an unreadable fingerprints file; "
-    "--undo and a new dry run are both refused",
-    strict=True,
-)
 def test_tc38_make_old_notes_never_stops_half_way(monkeypatch, capsys):
     """TC-38: the current version's fingerprints file is broken. The dry run must refuse
     before changing anything ("Nothing was changed"), or finish so --undo works. Today it

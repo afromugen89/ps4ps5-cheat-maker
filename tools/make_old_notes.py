@@ -88,11 +88,21 @@ def _read_marker(title: str, cur: str, old: str) -> dict:
     return doc
 
 
-def _copy_as(src: Path, dst: Path, version: str) -> None:
-    doc = json.loads(src.read_text(encoding="utf-8"))
+def _as_version(path: Path, version: str, what: str) -> str:
+    """``path``'s JSON document with its version set, as text. Raises Refused (nothing
+    is moved before every document was read)."""
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise Refused(f"{what} can't be read ({exc}).") from exc
+    if not isinstance(doc, dict):
+        raise Refused(f"{what} can't be read (not a document).")
     doc["version"] = version
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    dst.write_text(json.dumps(doc, indent=1) + "\n", encoding="utf-8")
+    return json.dumps(doc, indent=1) + "\n"
+
+
+def _save_record(title: str, record: dict) -> None:
+    _marker(title).write_text(json.dumps(record, indent=1) + "\n", encoding="utf-8")
 
 
 def forward(title: str, cur: str, old: str, say=print) -> None:
@@ -111,51 +121,83 @@ def forward(title: str, cur: str, old: str, say=print) -> None:
     for p in (cur_notes, cur_sigs, old_notes, old_sigs):
         if _keep(p).exists():
             raise Refused(f"{_keep(p).name} already exists: run with --undo first.")
+    # Read everything first: nothing is moved unless the whole dry run can be made.
+    copies = [(old_notes, _as_version(cur_notes, old, f"The notes for {cur}"), "notes")]
+    if cur_sigs.exists():
+        try:
+            up.load_signatures(cur_sigs)
+        except (OSError, ValueError) as exc:
+            raise Refused(f"The fingerprints for {cur} can't be read ({exc}).") from exc
+        copies.append((old_sigs, _as_version(cur_sigs, old, "The fingerprints"), "fingerprints"))
+    # The record is written first and kept up to date, so --undo always knows what to
+    # put back, even after a stop half-way.
+    record: dict = {"title": title, "current": cur, "old": old, "made": [], "aside": []}
+    _save_record(title, record)
     for p in (old_notes, old_sigs):
         if p.exists():
             p.replace(_keep(p))
+            record["aside"].append(p.name)
+            _save_record(title, record)
             say(f"Set aside {p.name} as {_keep(p).name}")
-    made = [old_notes.name]
-    _copy_as(cur_notes, old_notes, old)
-    say(f"Wrote {old_notes.name} (a copy of the {cur} notes, marked {old})")
-    if cur_sigs.exists():
-        _copy_as(cur_sigs, old_sigs, old)
-        made.append(old_sigs.name)
-        say(f"Wrote {old_sigs.name} (a copy of the {cur} fingerprints)")
-    record = {"title": title, "current": cur, "old": old, "made": made}
-    _marker(title).write_text(json.dumps(record, indent=1) + "\n", encoding="utf-8")
+    old_notes.parent.mkdir(parents=True, exist_ok=True)
+    for dst, text, what in copies:
+        record["made"].append(dst.name)
+        _save_record(title, record)
+        dst.write_text(text, encoding="utf-8")
+        say(f"Wrote {dst.name} (a copy of the {cur} {what}, marked {old})")
     for p in (cur_notes, cur_sigs):
         if p.exists():
             p.replace(_keep(p))
+            record["aside"].append(p.name)
+            _save_record(title, record)
             say(f"Set aside {p.name} as {_keep(p).name}")
     say(f"Done. Start Cheat Maker and Connect: it offers to bring {old} over to {cur}.")
 
 
+def _keep_aside(p: Path, say, what: str) -> None:
+    dst = _aside(p, ".carried")
+    p.replace(dst)
+    say(f"Kept {what} {p.name} as {dst.name}")
+
+
 def undo(title: str, cur: str, old: str, say=print) -> None:
-    doc = _read_marker(title, cur, old)
-    cur, old = doc["current"], doc["old"]  # as written then (the file names use them)
+    """Puts back what the record says was set aside, and keeps what the dry run made
+    as ``.carried``. Each step is recorded as done, so a second --undo after a stop
+    half-way only does what is left."""
+    record = _read_marker(title, cur, old)
+    cur, old = record["current"], record["old"]  # as written then (the file names use them)
     cur_notes, cur_sigs = _files(title, cur)
     old_notes, old_sigs = _files(title, old)
-    if not _keep(cur_notes).exists():
-        raise Refused(f"{_keep(cur_notes).name} is missing, so there is nothing to put back.")
+    if not isinstance(record.get("aside"), list):  # a record from before it was kept
+        record["aside"] = [
+            p.name for p in (cur_notes, cur_sigs, old_notes, old_sigs) if _keep(p).exists()
+        ]
+    made, aside = record["made"], record["aside"]
+    for p in (cur_notes, cur_sigs, old_notes, old_sigs):
+        if p.name in aside and not _keep(p).exists():
+            raise Refused(f"{_keep(p).name} is missing, so {p.name} can't be put back.")
     for p in (old_notes, old_sigs):
-        if p.exists() and p.name not in doc["made"] and _keep(p).exists():
+        if p.exists() and p.name not in made and p.name in aside:
             raise Refused(f"{p.name} isn't the dry run's copy and {_keep(p).name} exists too.")
     for p in (cur_notes, cur_sigs):
+        if p.name not in aside:
+            continue
         if p.exists():  # made or changed by the dry run: kept, never deleted
-            dst = _aside(p, ".carried")
-            p.replace(dst)
-            say(f"Kept the dry run's {p.name} as {dst.name}")
-        if _keep(p).exists():
-            _keep(p).replace(p)
-            say(f"Put back {p.name}")
+            _keep_aside(p, say, "the dry run's")
+        _keep(p).replace(p)
+        aside.remove(p.name)
+        _save_record(title, record)
+        say(f"Put back {p.name}")
     for p in (old_notes, old_sigs):
-        if p.exists() and p.name in doc["made"]:  # the copies this tool wrote: kept aside
-            dst = _aside(p, ".carried")
-            p.replace(dst)
-            say(f"Kept the copy {p.name} as {dst.name}")
-        if _keep(p).exists():
+        if p.name in made:
+            if p.exists():  # the copies this tool wrote: kept aside
+                _keep_aside(p, say, "the copy")
+            made.remove(p.name)
+            _save_record(title, record)
+        if p.name in aside:
             _keep(p).replace(p)
+            aside.remove(p.name)
+            _save_record(title, record)
             say(f"Put back {p.name}")
     _marker(title).unlink()
     say("Done. Your notes are as they were.")
