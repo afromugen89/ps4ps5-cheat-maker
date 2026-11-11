@@ -505,3 +505,35 @@ def test_update_rebuilds_hook_lines_after_a_bring_over(make):
     find, _nop, keep = app.ctl.cheat_file.cheats
     assert find.locations[1].offset == h.hook and find.locations[0].offset == h.cave
     assert keep.value == 999.0
+
+
+# == C21b dry run with tools/make_old_notes.py ================================================
+def test_dry_run_with_make_old_notes(make, monkeypatch, caplog):
+    import importlib.util
+    import sys
+    from pathlib import Path
+
+    tc.learned_v1(1)
+    cur_notes = pj.project_path(fg.TITLE, fg.VERSION)
+    before = cur_notes.read_bytes()
+    spec = importlib.util.spec_from_file_location(
+        "make_old_notes", Path(__file__).resolve().parents[2] / "tools" / "make_old_notes.py"
+    )
+    tool = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(tool)
+    monkeypatch.setattr(sys, "argv", ["m", fg.TITLE, fg.VERSION, "03.000.004"])
+    assert tool.main() == 0
+    caplog.set_level("INFO")
+    app = make(Console(layout=fg.V1))
+    app.connect()
+    assert "are for version 03.000.004; the game is now 03.000.005" in app.bar.label.text()
+    app.bring()
+    assert app.picks == [], "the same class as before: no pick"
+    assert "how=exact field_shift=0x0" in caplog.text
+    assert app.w.status.text().startswith("Brought over 1 of 1 cheats for version 03.000.005")
+    app.ctl.shutdown()
+    monkeypatch.setattr(sys, "argv", ["m", fg.TITLE, fg.VERSION, "03.000.004", "--undo"])
+    assert tool.main() == 0
+    assert cur_notes.read_bytes() == before
+    assert cur_notes.with_name(cur_notes.name + ".carried").exists()
+    assert not pj.project_path(fg.TITLE, "03.000.004").exists()
