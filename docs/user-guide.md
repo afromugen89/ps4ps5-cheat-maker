@@ -307,6 +307,8 @@ after the cheat it came from (for example "health" and "fraction").
 - You can combine any cheats: ones that work after a restart, ones for this session
   only, and ones found again each run. Up to 4 of the parts can be values that move
   (session only or found again); parts that don't move have no limit.
+- To combine cheats that are found again each run, connect to the game first: the app
+  keeps the combined cheat in the game's notes.
 - Two cheats that change the same bytes can't be combined ("health and fraction overlap
   in memory").
 - **Works after restart?** says **This session only** while any part is session only,
