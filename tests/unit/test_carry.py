@@ -180,6 +180,17 @@ def test_site_fails_on_more_than_one_hit():
         cr.find_hook_site(hook(signature="", sig_unique=False), twice)
 
 
+def test_site_fails_on_an_instruction_too_short_for_the_jump():
+    short = b"\x89\x43\x08"  # mov [rbx+8],eax: 3 bytes, the jump would cover the next one
+    code = bytes(16) + short + b"\xc3\x0f\x1f\x40\x00" + bytes(16)
+    img = up.CodeImage([(0, code)])
+    sig = up.Signature(short + code[19:24], b"\x01" * 8).text()
+    h = hook(hook=0x10, insn="mov [rbx+8],eax", orig=short, reg="rbx", disp=8, role="writer")
+    h = dataclasses.replace(h, signature=sig)
+    with pytest.raises(cr.CarryFailed, match="the game's code changed where it was found"):
+        cr.find_hook_site(h, img)
+
+
 @pytest.mark.parametrize(
     "kw",
     [
@@ -475,9 +486,7 @@ def run_carry(old, game, *, pick=None, reserved=(), rounds=3, cancel=None):
         c = Clock()
         out = cr.locate(s, it.obj, sleep=c.sleep, clock=c)
         addr = out.address if out.found else None
-        if addr is None and it.obj in installed:
-            ah.remove(s, it.obj, lambda _s: None)
-        cr.settle(s, it.obj, addr)
+        cr.settle(s, it.obj, addr, placed=it.placed)  # a placed hook stays in (not seen yet)
         found[it.obj.id] = addr
     new, report = cr.assemble(plan, found, {})
     return plan, new, report, installed
@@ -714,6 +723,93 @@ def test_settle_keeps_only_ways_that_lead_to_the_address():
     assert hooked.anchors == [] and hooked.vtable is None
 
 
+def test_settle_keeps_a_placed_hook_that_wasnt_seen_yet():
+    g = fg.build(chain=True)
+    chain = pj.ChainAnchor(fg.STATIC_PTR - fg.BASE, (0x18, fg.HP), "Health")
+    obj = health([hook(), pj.VtableAnchor(), pj.StaticAnchor(0x10), chain])
+    cr.settle(g.session, obj, None, placed=True)
+    assert obj.anchors == [hook(), pj.VtableAnchor()] and obj.vtable == fg.PLAYER_VT - fg.BASE
+    lost = health([hook(), pj.VtableAnchor()])
+    cr.settle(g.session, lost, None)
+    assert lost.anchors == [] and lost.vtable is None, "nothing placed: every way dropped"
+
+
+def test_a_placed_hook_not_seen_yet_stays_in_and_counts_as_brought_over():
+    old = learned_v1(3)
+    g = fg.build(3, layout=fg.V2)
+    g.capture_ticks = False  # the game doesn't run the hooked code while we wait
+    plan, new, report, installed = run_carry(old, g)
+    [obj] = new.objects
+    assert plan.items[0].placed and installed == [obj]
+    assert obj.hook is not None and obj.anchors_of(pj.VtableAnchor) and obj.check
+    assert g.fake.peek(fg.PID, fg.V2.reader, 1) == b"\xe9", "the hook stays in the game"
+    assert report.carried == ["Infinite health"] and not report.failed
+    assert report.waiting == ["Health"] and report.found == 0
+    assert report.summary(NEW_V).endswith(
+        "Health: brought over, not seen yet; take a hit (or change it in the game) "
+        "and it will be found."
+    )
+
+
+def test_place_hook_puts_nothing_in_after_a_cancel_or_in_another_game(monkeypatch):
+    import threading
+
+    from cheatmaker.errors import ScanCancelled
+
+    old = learned_v1(3)
+    g = fg.build(3, layout=fg.V2)
+    plan = cr.prepare(g.session, old)
+    it = plan.items[0]
+    classes = cr.collect_classes(g.session, it, seconds=1, sleep=g.fight(), reserved=plan.reserved)
+    choice = cr.choose(g.session, classes, it)
+    stop = threading.Event()
+    monkeypatch.setattr(ah, "prove_slot", lambda *_a, **_k: stop.set())  # Cancel while proving
+    with pytest.raises(ScanCancelled):
+        cr.place_hook(g.session, it, choice, reserved=list(plan.reserved), cancel=stop)
+    assert g.fake.peek(fg.PID, fg.V2.reader, 10) == fg.V2.vmovss_r and not it.placed
+    game = g.session.game
+    restarted = dataclasses.replace(game, pid=game.pid + 1)
+    monkeypatch.setattr(ah, "prove_slot", lambda *_a, **_k: setattr(g.session, "game", restarted))
+    with pytest.raises(cr.CarryFailed, match="the game was closed"):
+        cr.place_hook(g.session, it, choice, reserved=list(plan.reserved))
+    assert g.fake.peek(fg.PID, fg.V2.reader, 10) == fg.V2.vmovss_r and not it.placed
+
+
+def test_workers_never_change_the_sessions_rooms():
+    old = learned_v1(3)
+    g = fg.build(3, layout=fg.V2)
+    open_line = (fg.CODE_SIZE - 0x1000, fg.CODE_SIZE - 0xE00)
+    g.session.reserved_rooms = [open_line]
+    plan, new, _report, _ = run_carry(old, g)
+    assert g.session.reserved_rooms == [open_line], "rooms are passed, not set from a worker"
+    rooms = ah.reserved_rooms(new.objects)
+    assert rooms and all(r in plan.reserved for r in rooms)
+    assert not any(_overlap(r, open_line) for r in rooms)
+
+
+def test_the_old_class_is_kept_only_when_the_hook_didnt_move():
+    old = learned_v1(1)
+    g = fg.build(1, layout=fg.V2)
+    plan = cr.prepare(g.session, old)
+    it = plan.items[0]
+    other = 0x7777
+    classes = cr.Classes(by_vtable={it.old.vtable: [1], other: [2]}, plausible=[1, 2])
+    assert it.site.offset != it.old.hook.hook
+    need = cr.choose(g.session, classes, it)
+    assert isinstance(need, cr.NeedPick) and need.kind == "class", "moved code: the player picks"
+    it.site = dataclasses.replace(it.site, offset=it.old.hook.hook)
+    assert cr.choose(g.session, classes, it) == cr.Choice(it.old.vtable, pj.HookFilter("vtable"))
+
+
+def test_only_fixed_code_parts_read_the_code():
+    p = static_notes()
+    fixed = pj.ProjectPart("god flag", kind="module_value", offset=0x1A2B0, on=b"\x01", off=b"\0")
+    p.cheats.append(combined(fixed))
+    g = fg.build(layout=fg.V2, static=True)
+    plan = cr.prepare(g.session, p)
+    assert plan.image is None and plan.parts == {1: cr.DATA_VALUE}
+
+
 # -- fixed code parts (AC-U6) and rooms ------------------------------------------------------
 CAVE_OFF = fg.CODE_SIZE - 0x900  # an old cave in the spare zeros
 
@@ -838,6 +934,10 @@ def test_update_with_hooks_rebuilds_them_from_the_brought_over_notes():
     assert report.carried == ["Infinite health"]
     image = up.read_code_image(g.session)
     out, rep = cr.update_with_hooks(g.session, cf, sigs, image, NEW_V, old, new)
+    assert [c.name for c in out.cheats] == ["Find Health again", "No death"]
+    assert rep.failed == {"Health (PC off)": cr.CONFIRM_FIRST.format(label="Health")}
+    new.objects[0].check = False  # the player said Yes in My cheats
+    out, rep = cr.update_with_hooks(g.session, cf, sigs, image, NEW_V, old, new)
     assert [c.name for c in out.cheats] == ["Find Health again", "No death", "Health (PC off)"]
     assert rep.moved == [c.name for c in out.cheats] and rep.failed == {}
     h = new.objects[0].hook
@@ -847,6 +947,41 @@ def test_update_with_hooks_rebuilds_them_from_the_brought_over_notes():
     assert keep.value == 999.0 and keep.value_type is ValueType.FLOAT
     assert nop.locations[0].offset == SHIFTED.sub_site - fg.BASE
     assert out.version == NEW_V
+
+
+def test_update_with_hooks_keeps_moved_caves_out_of_reserved_rooms():
+    from cheatmaker.core.cheats import Cheat, Location, LocationKind
+
+    old = learned_v1(1)
+    cf, _ = hook_file(old)
+    god = cave_cheat()
+    lines = [Location(LocationKind.CODE_PATCH, p.offset, p.on, p.off) for p in god.parts[1:]]
+    cf.cheats.append(Cheat("God", lines))
+    sigs = up.learn(cf, up.read_code_image(fg.build(1).session))
+    g = fg.build(1, layout=SHIFTED)
+    image = up.read_code_image(g.session)
+    free, _ = cr.update_with_hooks(g.session, cf, sigs, image, NEW_V, old, None)
+    cave_at = free.cheats[-1].locations[1].offset
+    room = (cave_at - 0x10, cave_at + 0x40)  # e.g. a brought-over hook's room is there
+    kept, rep = cr.update_with_hooks(g.session, cf, sigs, image, NEW_V, old, None, reserved=[room])
+    cave = kept.cheats[-1].locations[1]
+    assert "God" in rep.moved and not _overlap((cave.offset, cave.offset + len(cave.on)), room)
+
+
+def test_update_with_hooks_tells_two_cheats_with_one_name_apart():
+    from cheatmaker.core.cheats import Cheat, Location, LocationKind
+
+    old = learned_v1(1)
+    cf, sigs = hook_file(old)
+    bad = Cheat("No death", [Location(LocationKind.CODE_PATCH, 0x10, b"\x90", b"\xcc")])
+    cf.cheats.insert(0, bad)  # a second "No death" that can't move
+    g = fg.build(1, layout=SHIFTED)
+    out, rep = cr.update_with_hooks(
+        g.session, cf, sigs, up.read_code_image(g.session), NEW_V, old, None
+    )
+    [moved] = [c for c in out.cheats if c.name == "No death"]
+    assert moved.locations[0].offset == SHIFTED.sub_site - fg.BASE, "the one that moved"
+    assert rep.moved == ["No death"] and "No death" in rep.failed
 
 
 def test_update_with_hooks_before_a_bring_over_says_so():
@@ -880,5 +1015,8 @@ def test_rebuild_fails_plainly_without_a_hook_or_a_value():
         cr.rebuild_hook_cheat(g.session, find, new)
     keep.cheat.value_type = None
     new.objects = [cr.carried_object(old.objects[0])]
+    with pytest.raises(cr.CarryFailed, match="confirm Health in My cheats first"):
+        cr.rebuild_hook_cheat(g.session, keep, new)
+    new.objects[0].check = False
     with pytest.raises(cr.CarryFailed, match="make the PC-off cheat again"):
         cr.rebuild_hook_cheat(g.session, keep, new)

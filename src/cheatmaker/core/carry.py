@@ -55,7 +55,7 @@ from cheatmaker.core.project import (
     VtableAnchor,
 )
 from cheatmaker.core.session import Session
-from cheatmaker.errors import FindFailed, LockFailed, ProjectFileError, ReadFailed
+from cheatmaker.errors import FindFailed, LockFailed, ProjectFileError, ReadFailed, ScanCancelled
 
 log = logging.getLogger(__name__)
 
@@ -70,6 +70,12 @@ NO_OBJECT = "its value isn't in the notes any more"
 NOT_PICKED = "none of the places was picked"
 HOOK_FILE_FIRST = "bring your notes over first (My cheats)"
 PC_OFF_AGAIN = "make the PC-off cheat again (Find it next time)"
+CONFIRM_FIRST = "confirm {label} in My cheats first, then update again"
+# the new hook is in but the game hasn't run that code yet (a sentence of its own)
+WAITING = (
+    "{label}: brought over, not seen yet; take a hit (or change it in the game) "
+    "and it will be found."
+)
 
 HookHow = Literal["exact", "loose", "original"]
 
@@ -234,6 +240,9 @@ def find_hook_site(hook: HookAnchor, image: up.CodeImage, label: str = "it") -> 
     if not _same_kind(insn, orig, hook):
         log.info("action=carry_hook site=%#x not the same kind of instruction", hit)
         raise failed
+    if insn.len < 5:  # the hook's 5-byte jump would cover the next instruction
+        log.info("action=carry_hook site=%#x instruction too short (%d)", hit, insn.len)
+        raise failed
     return HookSite(
         hit,
         image.read(hit, insn.len),
@@ -284,6 +293,7 @@ class Item:
     kind: ItemKind
     site: HookSite | None = None
     reason: str = ""  # why its hook couldn't come over (it may still be found otherwise)
+    placed: bool = False  # its new hook went in (slot proven): kept even if not seen yet
 
     @property
     def shift(self) -> int:
@@ -345,6 +355,7 @@ class CarryReport:
     check: list[str] = field(default_factory=list)  # brought over, to be checked (a question)
     guessed: list[str] = field(default_factory=list)  # found from original bytes only
     failed: dict[str, str] = field(default_factory=dict)  # cheat -> reason
+    waiting: list[str] = field(default_factory=list)  # values hooked but not seen yet
     objects: int = 0
     found: int = 0
 
@@ -359,6 +370,8 @@ class CarryReport:
         if self.guessed:
             text += " Found from their original bytes only (test them): "
             text += ", ".join(self.guessed) + "."
+        for label in self.waiting:
+            text += " " + WAITING.format(label=label)
         if self.failed:
             text += " Not brought over: "
             text += "; ".join(f"{n} ({why})" for n, why in self.failed.items()) + "."
@@ -383,12 +396,22 @@ def assemble(
     """The new notes (format 4) and the report. Every object is saved, found or not
     (AC-U7); single cheats are always copied; a combined cheat only if every fixed part
     moved. ``found``: object id -> where it is now (None: not found); ``reasons``:
-    object id -> why not."""
+    object id -> why not. An object whose new hook went in but wasn't seen yet counts
+    as brought over (it is found once the game runs that code)."""
     old = plan.old
     objects = [it.obj for it in plan.items]
     for o in objects:
         o.check = True
-    report = CarryReport(objects=len(objects), found=sum(1 for v in found.values() if v))
+    waiting = {
+        it.obj.id: it.obj.label
+        for it in plan.items
+        if it.placed and it.obj.hook is not None and not found.get(it.obj.id)
+    }
+    report = CarryReport(
+        objects=len(objects),
+        found=sum(1 for v in found.values() if v),
+        waiting=list(waiting.values()),
+    )
     guessed_objs = {
         it.obj.id for it in plan.items if it.site is not None and it.site.how == "original"
     }
@@ -407,7 +430,7 @@ def assemble(
                 new.test = any(p.kind == "code_patch" for p in new.parts if not p.learned)
         cheats.append(new)
         objs = [o for o, _f in new.anchors if o]
-        missing = [o for o in objs if not found.get(o)]
+        missing = [o for o in objs if not found.get(o) and o not in waiting]
         if missing:
             why = _object_reason(plan, missing[0], reasons)
             report.failed[pc.name] = why
@@ -429,12 +452,13 @@ def assemble(
     return project, report
 
 
-def for_merge(source: Project, into: Project) -> Project:
+def for_merge(source: Project, into: Project, avoid: Iterable[str] = ()) -> Project:
     """``source`` with only the objects and cheats whose names ``into`` doesn't have
-    yet, object ids remapped to ids ``into`` doesn't use (Advanced, AC-U7)."""
+    yet, object ids remapped to ids neither ``into`` nor ``avoid`` (e.g. objects whose
+    hook is still in the game) uses (Advanced, AC-U7)."""
     labels = {o.label for o in into.objects}
     names = {c.name for c in into.cheats}
-    used = {o.id for o in into.objects}
+    used = {o.id for o in into.objects} | set(avoid)
     ids: dict[str, str] = {}
     objects = []
     n = 1
@@ -482,6 +506,17 @@ def drop_hook(item: Item, reason: str) -> None:
     log.info("action=carry_hook object=%s result=failed reason=%s", item.obj.id, reason)
 
 
+def has_code_parts(project: Project) -> bool:
+    """A combined cheat holds a fixed code part in the game's module: moving it needs
+    the game's code (a fixed data value or another module's part just fails its cheat,
+    see _carry_parts)."""
+    return any(
+        not p.learned and p.kind == "code_patch" and p.module == project.process
+        for pc in project.cheats
+        for p in pc.parts
+    )
+
+
 def prepare(
     session: Session,
     old: Project,
@@ -503,8 +538,7 @@ def prepare(
         items,
         reserved=[*reserved, *ah.reserved_rooms(old.objects), *part_rooms(old)],
     )
-    has_parts = any(not p.learned for pc in old.cheats for p in pc.parts)
-    if any(it.kind == "hook" for it in items) or has_parts:
+    if any(it.kind == "hook" for it in items) or has_code_parts(old):
         plan.image = up.read_code_image(session, progress, cancel)
     for it in items:
         hook = it.old.hook
@@ -518,9 +552,7 @@ def prepare(
             drop_hook(it, exc.reason)
             continue
         shift_fields(it.obj, it.shift)
-    if has_parts:
-        assert plan.image is not None
-        _carry_parts(plan, plan.image)
+    _carry_parts(plan, plan.image)
     return plan
 
 
@@ -536,7 +568,7 @@ def _part_log(name: str, part: ProjectPart, new: int | None, result: str) -> Non
     )
 
 
-def _carry_parts(plan: Plan, image: up.CodeImage) -> None:
+def _carry_parts(plan: Plan, image: up.CodeImage | None) -> None:
     """Move the combined cheats' fixed code parts with the v2 rules (AC-U6). A fixed
     value in the game's data, or a part in another module, fails its cheat."""
     old = plan.old
@@ -557,6 +589,7 @@ def _carry_parts(plan: Plan, image: up.CodeImage) -> None:
         )
     if not tmp:
         return
+    assert image is not None  # prepare reads the code when there are fixed code parts
     sigs = up.load_signatures(up.signatures_path(old.title_id, old.version))  # read only
     cf = CheatFile("", old.title_id, old.version, tmp, old.process)
     moved, report = up.update_file(
@@ -630,7 +663,7 @@ def collect_classes(
     seconds: float = rf.COLLECT_SECONDS,
     cancel: threading.Event | None = None,
     sleep: Callable[[float], None] = time.sleep,
-    reserved: Iterable[tuple[int, int]] | None = None,
+    reserved: Iterable[tuple[int, int]] = (),
 ) -> Classes:
     """Collect what the new hook site touches for ``seconds`` (the Player-only
     collect) and keep objects in writable memory whose fields look right; with a
@@ -641,12 +674,12 @@ def collect_classes(
         raise CarryFailed(item.reason or NOT_FOUND)
     if hook.filter.kind == "none":
         return Classes(skipped=True)
-    if reserved is not None:
-        session.reserved_rooms = list(reserved)
     game = session.require_game()
     writer = Writer(game.module_base + site.offset, site.code, site.text, 0)
     try:
-        objs = cv.collect_objects(session, writer, seconds, cancel, sleep=sleep)
+        objs = cv.collect_objects(
+            session, writer, seconds, cancel, sleep=sleep, extra_reserved=reserved or ()
+        )
     except LockFailed as exc:
         raise CarryFailed(str(exc)) from exc
     maps = rf.MapIndex(session.require_client().maps(game.pid))
@@ -703,7 +736,8 @@ def choose(session: Session, classes: Classes, item: Item) -> Choice | NeedPick:
     nothing = CarryFailed(NOTHING_TOUCHED.format(label="it"))
     if hook.filter.kind != "field":
         groups = {vt: objs for vt, objs in classes.by_vtable.items() if vt is not None}
-        if item.old.vtable in groups:  # the class didn't move (a dry run, a small patch)
+        same_site = item.site is not None and item.site.offset == hook.hook
+        if same_site and item.old.vtable in groups:  # nothing moved (a dry run, a patch)
             return Choice(item.old.vtable, HookFilter("vtable"))
         if len(groups) == 1:
             return Choice(next(iter(groups)), HookFilter("vtable"))
@@ -753,12 +787,11 @@ def place_hook(
     if old is None or site is None:
         raise CarryFailed(item.reason or NOT_FOUND)
     game = session.require_game()
-    session.reserved_rooms = list(reserved)
     cand = ah.HookCandidate(
         game.module_base + site.offset, site.code, site.text, 0, old.role, old.reg, site.disp, True
     )
     try:
-        anchor = ah.plan_hook(session, cand, choice.vtable, choice.filter)
+        anchor = ah.plan_hook(session, cand, choice.vtable, choice.filter, reserved)
         ah.prove_slot(session, game.module_base + anchor.slot, prove_seconds, cancel=cancel)
     except (LockFailed, FindFailed) as exc:
         raise CarryFailed(str(exc)) from exc
@@ -771,11 +804,17 @@ def place_hook(
     else:
         reset_class(obj)
     reserved.extend(ah.reserved_rooms([obj]))
-    session.reserved_rooms = list(reserved)
+    # the slot watch can be long: nothing goes in after a Cancel or into another game
+    if cancel is not None and cancel.is_set():
+        raise ScanCancelled("bringing the notes over was cancelled")
+    now = session.game
+    if now is None or now.pid != game.pid:
+        raise CarryFailed("the game was closed")
     try:
         state = ah.install(session, obj)
     except FindFailed as exc:
         raise CarryFailed(str(exc)) from exc
+    item.placed = True
     if on_install is not None:
         on_install(obj, state)
     log.info(
@@ -823,15 +862,21 @@ def _anchor_log(obj: ObjectSpec, kind: str, kept: bool, reason: str = "") -> Non
     )
 
 
-def settle(session: Session, obj: ObjectSpec, address: int | None) -> None:
+def settle(session: Session, obj: ObjectSpec, address: int | None, *, placed: bool = False) -> None:
     """Keep only the ways that lead to ``address`` (AC-U5): a static place that is it,
-    memory paths that end there (counted as new), the hook just placed. No address:
-    every way is dropped (saved with no way to be found, AC-U7). Take a hook placed
-    in this run out *before* dropping it, or nothing knows where it is."""
+    memory paths that end there (counted as new), the hook just placed. No address and
+    a hook ``placed`` (slot proven): the hook (and its class) stays in, the object is
+    found by Find again once the game runs that code. No address and nothing placed:
+    every way is dropped (saved with no way to be found, AC-U7); take a hook placed in
+    this run out *before* dropping it, or nothing knows where it is."""
     if address is None:
         for a in obj.anchors:
             if isinstance(a, StaticAnchor | ChainAnchor):
                 _anchor_log(obj, a.kind, False, "not found")
+        if placed and obj.hook is not None:
+            obj.anchors = [a for a in obj.anchors if isinstance(a, HookAnchor | VtableAnchor)]
+            _anchor_log(obj, "hook", True, "not seen yet")
+            return
         obj.anchors = []
         reset_class(obj)
         return
@@ -908,7 +953,9 @@ def split_hook_cheats(cf: CheatFile, old: Project | None) -> tuple[CheatFile, li
 
 def rebuild_hook_cheat(session: Session, line: HookLine, new: Project | None) -> Cheat:
     """The hook cheat made again from the brought-over notes (new place, room and slot).
-    A PC-off cheat keeps its value. Raises CarryFailed."""
+    A PC-off cheat keeps its value, and is made only once the player confirmed the
+    value (its class may still be unlearned, and a wrong one would change every
+    object the code touches). Raises CarryFailed."""
     obj = None
     if new is not None and new.carried_from is not None:
         obj = next((o for o in new.objects if o.label == line.label), None)
@@ -916,6 +963,8 @@ def rebuild_hook_cheat(session: Session, line: HookLine, new: Project | None) ->
         raise CarryFailed(HOOK_FILE_FIRST)
     if obj.hook is None:
         raise CarryFailed(CODE_CHANGED.format(label=line.label))
+    if line.kind == "keep" and obj.check:
+        raise CarryFailed(CONFIRM_FIRST.format(label=line.label))
     c = line.cheat
     try:
         if line.kind == "find":
@@ -937,32 +986,49 @@ def update_with_hooks(
     new_version: str,
     old: Project | None,
     new: Project | None,
+    *,
+    reserved: Iterable[tuple[int, int]] = (),
 ) -> tuple[CheatFile, up.UpdateReport]:
     """v2's Update for this version, where the notes' hook cheats are made again from
-    the brought-over notes instead of moved (AC-U9). Cheats keep their order."""
+    the brought-over notes instead of moved (AC-U9). Cheats keep their order. Moved
+    caves never go in ``reserved`` (module ranges: the notes' hook rooms and slots,
+    their code parts, the session's)."""
     rest, lines = split_hook_cheats(cf, old)
-    moved, report = up.update_file(rest, sigs, image, new_version)
-    if not lines:
-        return moved, report
-    rebuilt: dict[int, Cheat] = {}
+    # v2 reports by name; tag each cheat with its place so two cheats with one name
+    # can't be mixed up, then give the names back
+    names = {str(i): c.name for i, c in enumerate(rest.cheats)}
+    tagged = replace(rest, cheats=[replace(c, name=str(i)) for i, c in enumerate(rest.cheats)])
+    moved, tag_report = up.update_file(tagged, sigs, image, new_version, reserved=reserved)
+    moved_by_tag = {c.name: replace(c, name=names[c.name]) for c in moved.cheats}
+    report = up.UpdateReport()
+    failed: dict[int, str] = {}  # id(cheat in cf) -> reason
+    guessed: set[int] = set()
+    out: dict[int, Cheat] = {}
+    for i, c in enumerate(rest.cheats):
+        tag = str(i)
+        if tag in moved_by_tag:
+            out[id(c)] = moved_by_tag[tag]
+        else:
+            failed[id(c)] = tag_report.failed.get(tag, NOT_FOUND)
+            if tag in tag_report.failed_at:
+                report.failed_at[c.name] = tag_report.failed_at[tag]
+        if tag in tag_report.guessed:
+            guessed.add(id(c))
     for line in lines:
         try:
-            rebuilt[id(line.cheat)] = rebuild_hook_cheat(session, line, new)
+            out[id(line.cheat)] = rebuild_hook_cheat(session, line, new)
         except CarryFailed as exc:
-            report.failed[line.cheat.name] = exc.reason
+            failed[id(line.cheat)] = exc.reason
             log.info("action=update_hook cheat=%s result=failed reason=%s", line.cheat.name, exc)
-    hook_ids = {id(line.cheat) for line in lines}
-    rest_failed = {c.name for c in rest.cheats if c.name in report.failed}
-    moved_iter = iter(moved.cheats)
     cheats: list[Cheat] = []
     for c in cf.cheats:
-        if id(c) in hook_ids:
-            if id(c) in rebuilt:
-                cheats.append(rebuilt[id(c)])
-        elif c.name not in rest_failed:
-            cheats.append(next(moved_iter))
-    report.moved = [c.name for c in cheats]
-    report.failed = {c.name: report.failed[c.name] for c in cf.cheats if c.name in report.failed}
+        if id(c) in out:
+            cheats.append(out[id(c)])
+            report.moved.append(c.name)
+            if id(c) in guessed:
+                report.guessed.append(c.name)
+        else:
+            report.failed[c.name] = failed[id(c)]
     return replace(moved, cheats=cheats), report
 
 
@@ -1072,11 +1138,13 @@ def learn_note_signatures(
 
 __all__ = [
     "CODE_CHANGED",
+    "CONFIRM_FIRST",
     "DATA_VALUE",
     "NOTHING_TOUCHED",
     "NOT_FOUND",
     "OTHER_MODULE",
     "PART_FAILED",
+    "WAITING",
     "CarryFailed",
     "CarryReport",
     "Choice",
@@ -1096,6 +1164,7 @@ __all__ = [
     "find_hook_site",
     "find_source",
     "for_merge",
+    "has_code_parts",
     "hooks_to_learn",
     "learn_note_signatures",
     "list_sources",

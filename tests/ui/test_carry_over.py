@@ -475,7 +475,7 @@ def test_advanced_with_no_other_notes_says_so(make):
 
 
 # == AC-U9: Update for this version with the notes' hook in the file =========================
-def test_update_rebuilds_hook_lines_after_a_bring_over(make):
+def test_update_rebuilds_hook_lines_after_a_bring_over(make, monkeypatch):
     old = tc.learned_v1(1)
     cf, sigs = tc.hook_file(old)
     up.save_signatures(up.signatures_path(fg.TITLE, fg.VERSION), fg.TITLE, fg.VERSION, sigs)
@@ -499,7 +499,20 @@ def test_update_rebuilds_hook_lines_after_a_bring_over(make):
     app.ctl.cheat_file = None
     app.bring()
     assert app.w.status.text().startswith("Brought over 1 of 1 cheats")
+    seen = []
+    real = cr.update_with_hooks
+    monkeypatch.setattr(
+        cr, "update_with_hooks", lambda *a, **kw: seen.append(kw["reserved"]) or real(*a, **kw)
+    )
     text = update(cf)
+    notes = app.ctl.project
+    assert set(cr.ah.reserved_rooms(notes.objects)) <= set(seen[0]), "moved caves stay out"
+    assert text == (  # the PC-off line waits until Health is confirmed (it keeps a value)
+        "Updated 2 of 3 cheats for version 03.001.000. Not moved: Health (PC off) (confirm "
+        "Health in My cheats first, then update again)"
+    )
+    app.ctl.project.objects[0].check = False  # Yes in My cheats
+    text = update(tc.hook_file(old)[0])
     assert text == "Updated 3 of 3 cheats for version 03.001.000."
     h = pj.load(new_path()).objects[0].hook
     find, _nop, keep = app.ctl.cheat_file.cheats

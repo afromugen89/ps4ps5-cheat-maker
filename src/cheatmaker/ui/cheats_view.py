@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 )
 
 from cheatmaker import formats
+from cheatmaker.core import anchor_hook as ah
 from cheatmaker.core import carry as cr
 from cheatmaker.core import cave as cv
 from cheatmaker.core import project as pj
@@ -125,6 +126,7 @@ class CheatsView(QWidget):
         )
         self.update_btn.setVisible(False)
         self._learning = False
+        self._updating = False  # Update for this version is running
         self._learn_tried: set[tuple[str, str, int]] = set()
         buttons = QHBoxLayout()
         for w in (
@@ -255,6 +257,7 @@ class CheatsView(QWidget):
         p = self.ctl.project
         self.again_btn.setEnabled(up and not carrying and p is not None and bool(p.objects))
         self.bring_btn.setEnabled(up and not carrying)
+        self.update_btn.setEnabled(not carrying and not self._updating)
         self.save_btn.setEnabled(any(ch.saveable for ch in self.cheats))
 
     def _can_learn(self, c: Cheat | None, located: bool) -> bool:
@@ -488,13 +491,19 @@ class CheatsView(QWidget):
 
     def do_update(self) -> None:
         cf, g = self.ctl.cheat_file, self.ctl.session.game
-        if not (cf and g):
+        if not (cf and g) or self.finder.carrying or self._updating:
             return
         session = self.ctl.session
         old_path = up.signatures_path(cf.title_id, cf.version)
         notes_path = pj.project_path(cf.title_id, cf.version)
         p = self.ctl.project  # the brought-over notes, if this version has them
         new_notes = p if p is not None and not versions_differ(p.version, g.version) else None
+        # moved caves never go where the notes' hooks and code parts live (taken here,
+        # on the UI thread: the notes can change while the worker runs)
+        reserved = list(session.reserved_rooms)
+        if new_notes is not None:
+            reserved += ah.reserved_rooms(new_notes.objects) + cr.part_rooms(new_notes)
+        self._updating = True
         self.update_btn.setEnabled(False)
         self.hint.setText(hints.UPDATE_RUNNING)
 
@@ -506,7 +515,14 @@ class CheatsView(QWidget):
                 log.info("action=update_version old_notes=unreadable reason=%s", exc)
                 old_notes = None
             new, report = cr.update_with_hooks(
-                session, cf, up.load_signatures(old_path), image, g.version, old_notes, new_notes
+                session,
+                cf,
+                up.load_signatures(old_path),
+                image,
+                g.version,
+                old_notes,
+                new_notes,
+                reserved=reserved,
             )
             up.save_signatures(
                 up.signatures_path(g.title_id, g.version),
@@ -520,7 +536,8 @@ class CheatsView(QWidget):
 
     def _updated(self, result) -> None:
         new, report = result
-        self.update_btn.setEnabled(True)
+        self._updating = False
+        self._update_buttons()
         self.ctl.live.mark_all_off()
         self.ctl.cheat_file = new
         self.ctl.cheats_changed.emit()
@@ -533,6 +550,7 @@ class CheatsView(QWidget):
             self.hint.setText(hints.UPDATE_DONE)
 
     def _update_failed(self, exc: BaseException) -> None:
-        self.update_btn.setEnabled(True)
+        self._updating = False
+        self._update_buttons()
         self.fill()
         self.ctl.fail(exc, "update_version")
