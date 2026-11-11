@@ -10,6 +10,7 @@ from cheatmaker.core.values import ValueType
 from cheatmaker.errors import CheatMakerError
 
 MAIN_MODULE = "eboot.bin"
+MAX_MOVING = 4  # parts that move (session or learned) in one combined cheat
 
 
 class LocationKind(Enum):
@@ -26,6 +27,13 @@ class Location:
     off: bytes
     module: str = MAIN_MODULE
     section: int = 0
+    anchor: tuple[str, str] | None = None
+    """A learned part of a combined cheat: (object id, field) in the game's .cmproj.
+    Its place is found again each run; ``offset`` is unused and never written to."""
+    vtype: ValueType | None = field(default=None, compare=False)
+    """The number type of a combined cheat's part (what Find it next time learns)."""
+    part: str | None = field(default=None, compare=False)
+    """The part's name in a combined cheat ("health", "health (2)"); None otherwise."""
 
     def __post_init__(self) -> None:
         if self.offset < 0:
@@ -40,6 +48,11 @@ class Location:
         if self.kind is LocationKind.SESSION_ADDRESS:
             return self.offset
         return module_base + self.offset
+
+    @property
+    def moving(self) -> bool:
+        """A value found by a search that isn't learned yet: this session only."""
+        return self.kind is LocationKind.SESSION_ADDRESS and self.anchor is None
 
 
 @dataclass
@@ -69,6 +82,34 @@ class Cheat:
     @property
     def saveable(self) -> bool:
         return bool(self.locations) and not self.session_only
+
+    @property
+    def combined(self) -> bool:
+        """Made by Combine: each location is a named part."""
+        return any(loc.part is not None for loc in self.locations)
+
+    @property
+    def learned_parts(self) -> list[Location]:
+        """A combined cheat's parts that are found again each run."""
+        return [loc for loc in self.locations if loc.anchor is not None]
+
+    @property
+    def moving_parts(self) -> list[Location]:
+        """A combined cheat's parts that are this session only (not learned yet)."""
+        return [loc for loc in self.locations if loc.moving] if self.combined else []
+
+    @property
+    def objects(self) -> list[str]:
+        """The .cmproj objects this cheat is found again by, in order, no repeats."""
+        ids = [self.anchor[0]] if self.anchor is not None else []
+        ids += [loc.anchor[0] for loc in self.learned_parts if loc.anchor is not None]
+        return list(dict.fromkeys(ids))
+
+    @property
+    def found_again(self) -> bool:
+        """Found again each run: a single found-again cheat, or a combined cheat with
+        learned parts and none that are this session only."""
+        return self.anchor is not None or (bool(self.learned_parts) and not self.moving_parts)
 
     @property
     def value(self) -> float | int | None:
@@ -142,24 +183,119 @@ def value_positions(
     return ordered  # type: ignore[return-value]
 
 
-def combine(cheats: list[Cheat], name: str | None = None) -> Cheat:
+def combine(
+    cheats: list[Cheat],
+    name: str | None = None,
+    addr_of: Callable[[Location], int | None] | None = None,
+) -> Cheat:
     """One cheat that writes all of ``cheats``' lines (e.g. two health values that must
     both be kept). It keeps writing if any of them did. Its value can't be edited, since
-    the parts usually hold different numbers. Raises ValueError if it can't combine them."""
+    the parts usually hold different numbers. Each line becomes a named part that keeps
+    its number type, and a found-again cheat becomes a learned part. ``addr_of`` gives
+    where a learned part is right now (to spot overlaps). Raises ValueError if it can't
+    combine them."""
     if len(cheats) < 2:
         raise ValueError("pick at least two cheats to combine")
-    if any(c.anchor is not None for c in cheats):
-        raise ValueError("cheats found again after a restart can't be combined")
+    parts = [p for c in cheats for p in _parts_of(c)]
+    _name_parts(parts)
+    moving = sum(1 for p in parts if p.kind is LocationKind.SESSION_ADDRESS)
+    if moving > MAX_MOVING:
+        raise ValueError(f"Combine up to {MAX_MOVING} values that move; these have {moving}.")
+    _refuse_overlap(parts, addr_of)
     return Cheat(
         name=name or " + ".join(c.name for c in cheats),
-        locations=[
-            Location(loc.kind, loc.offset, loc.on, loc.off, loc.module, loc.section)
-            for c in cheats
-            for loc in c.locations
-        ],
+        locations=parts,
         freeze=any(c.freeze for c in cheats),
         hint="Combined: " + ", ".join(c.name for c in cheats),
     )
+
+
+def _parts_of(c: Cheat) -> list[Location]:
+    """Copies of ``c``'s lines as parts (named later), each with its number type."""
+    if c.anchor is not None:  # found again each run: one learned part
+        loc = c.locations[0]
+        return [
+            Location(
+                LocationKind.SESSION_ADDRESS,
+                0,
+                loc.on,
+                loc.off,
+                anchor=c.anchor,
+                vtype=c.value_type,
+                part=c.name,
+            )
+        ]
+    out = []
+    for i, loc in enumerate(c.locations, 1):
+        vtype = loc.vtype
+        if (
+            vtype is None
+            and c.value_type is not None
+            and loc.kind is not LocationKind.CODE_PATCH
+            and c.value_at is None
+            and len(loc.on) == c.value_type.size
+        ):
+            vtype = c.value_type
+        part = loc.part or (f"{c.name} ({i})" if len(c.locations) > 1 else c.name)
+        out.append(
+            Location(
+                loc.kind,
+                loc.offset,
+                loc.on,
+                loc.off,
+                loc.module,
+                loc.section,
+                anchor=loc.anchor,
+                vtype=vtype,
+                part=part,
+            )
+        )
+    return out
+
+
+def _name_parts(parts: list[Location]) -> None:
+    """Two parts never share a name: a repeat gets " (2)", " (3)", ..."""
+    used: set[str] = set()
+    for p in parts:
+        base = name = p.part or "part"
+        n = 2
+        while name in used:
+            name = f"{base} ({n})"
+            n += 1
+        p.part = name
+        used.add(name)
+
+
+def _span(
+    loc: Location, addr_of: Callable[[Location], int | None] | None
+) -> tuple[str, int, int] | None:
+    """(space, first byte, end) of a part, or None if it can't be told."""
+    if loc.anchor is not None:
+        addr = addr_of(loc) if addr_of is not None else None
+        return None if addr is None else ("", addr, addr + len(loc.on))
+    if loc.kind is LocationKind.SESSION_ADDRESS:
+        return ("", loc.offset, loc.offset + len(loc.on))
+    return (loc.module, loc.offset, loc.offset + len(loc.on))
+
+
+def _refuse_overlap(
+    parts: list[Location], addr_of: Callable[[Location], int | None] | None
+) -> None:
+    """Two parts that share a byte would fight over it: refuse them."""
+    spans = [_span(p, addr_of) for p in parts]
+    for i, a in enumerate(parts):
+        for j in range(i + 1, len(parts)):
+            b, sa, sb = parts[j], spans[i], spans[j]
+            same_anchor = a.anchor is not None and a.anchor == b.anchor
+            shared = (
+                sa is not None
+                and sb is not None
+                and sa[0] == sb[0]
+                and sa[1] < sb[2]
+                and sb[1] < sa[2]
+            )
+            if same_anchor or shared:
+                raise ValueError(f"{a.part} and {b.part} overlap in memory.")
 
 
 @dataclass
