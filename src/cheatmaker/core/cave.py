@@ -400,7 +400,7 @@ def effect_code(
 
         lea rsp,[rsp-128]                   ; past the red zone
       [ pushfq ; cmp <only_me> ; jne other ; popfq ]
-        push qword [obj+disp]               ; the old value
+        push qword [obj+disp]               ; the old value (4-byte ones via the scratch)
         <the game's writer>                 ; runs first: the game's flags
         pushfq ; push rax [; save xmm0, xmm1]
       [ inc qword [counter] ; mov [counter+8], <the game's new value> ]  (test build)
@@ -473,7 +473,7 @@ def effect_code(
             Ins.create(C.POPFQ),
         ]
     body += [
-        Ins.create_mem(C.PUSH_RM64, value),  # the old value: no flag or register changes
+        *_push_old(value, s64, size),
         _label(span[0].copy(), next(labels)),  # the game's own write
         Ins.create(C.PUSHFQ),
         Ins.create_reg(C.PUSH_R64, s64),
@@ -486,7 +486,12 @@ def effect_code(
         ]
     if counter is not None:
         body += _counter_lines(counter, s, value, mov_r_m, mov_m_r)
-    if effect is Effect.ALWAYS_FULL:
+    if effect is Effect.ALWAYS_FULL and size == 8:  # one store: never half written
+        body += [
+            Ins.create_reg_u64(C.MOV_R64_IMM64, s64, struct.unpack("<Q", full or b"")[0]),
+            Ins.create_mem_reg(C.MOV_RM64_R64, value, s64),
+        ]
+    elif effect is Effect.ALWAYS_FULL:
         body += _stores(target, full or b"")
     elif vtype.is_float:
         body += _float_effect(effect, value, old, s, game_ok_ip)
@@ -505,6 +510,22 @@ def effect_code(
     if len(code) > CAVE_ROOM:
         raise LockFailed("the fix doesn't fit in the spare space")
     return code
+
+
+def _push_old(value: ix.MemoryOperand, s64, size: int) -> list[ix.Instruction]:
+    """Push the old value without changing a flag or a register. A 4-byte value is
+    read as 4 bytes through the scratch register: ``push qword`` would read 4 more,
+    past the end of the page when the value is its last bytes."""
+    C, Ins, R = ix.Code, ix.Instruction, ix.Register
+    if size == 8:
+        return [Ins.create_mem(C.PUSH_RM64, value)]
+    return [
+        Ins.create_reg(C.PUSH_R64, s64),  # the old value's place (shorter than a lea)
+        Ins.create_reg(C.PUSH_R64, s64),
+        Ins.create_reg_mem(C.MOV_R32_RM32, _LOW32[s64], value),
+        Ins.create_mem_reg(C.MOV_RM64_R64, _mem(R.RSP, 8), s64),
+        Ins.create_reg(C.POP_R64, s64),
+    ]
 
 
 def check_effect_writer(insn: ix.Instruction, target: Target, vtype: ValueType) -> None:

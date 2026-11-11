@@ -358,6 +358,42 @@ def test_always_full_keeps_full_editable(form):
     assert vtype.decode(bytes(code[b] for _line, b in at)) == 321
 
 
+def test_always_full_on_8_bytes_is_one_store():
+    """Review 16: two dword stores could be seen half written by another thread."""
+    g = fg.build()
+    code = build_code(
+        g, "int64", cv.Effect.ALWAYS_FULL, 0x403000, full=(2**40 + 5).to_bytes(8, "little")
+    )
+    stores = [
+        i
+        for i in ix.Decoder(64, code, ip=0x403000)
+        if i.op0_kind == ix.OpKind.MEMORY
+        and i.memory_displacement == fg.HP64
+        and i.memory_base == ix.Register.RBX
+        and i.mnemonic == ix.Mnemonic.MOV
+    ]
+    sizes = [ix.MemorySizeInfo(i.memory_size).size for i in stores]
+    assert sizes == [8, 8], "the game's own write, then ours: no dword halves"
+    install(g, "int64", cv.Effect.ALWAYS_FULL, full=(2**40 + 5).to_bytes(8, "little"))
+    g.hit(g.player, 7, "int64")
+    assert g.value(g.player, "int64") == 2**40 + 5
+
+
+@pytest.mark.parametrize("form", ["float", "int32"])
+def test_a_4_byte_value_at_the_end_of_memory_is_read_as_4_bytes(form):
+    """Review 13: ``push qword [obj+disp]`` read 4 bytes past the value; at the end of a
+    mapped page that faults. The object here ends right after the value."""
+    g = fg.build()
+    f = fg.FORMS[form]
+    obj = fg.HEAP + fg.HEAP_SIZE - f.offset - 4
+    g.set_value(obj, 100, form)
+    install(g, form, cv.Effect.NEVER_DOWN)
+    g.hit(obj, 40, form)
+    assert g.value(obj, form) == 100
+    g.hit(obj, 120, form)
+    assert g.value(obj, form) == 120
+
+
 def test_refusals():
     g = fg.build()
     span, target = _span_target(g, "float")
