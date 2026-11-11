@@ -94,6 +94,8 @@ def test_inverse_round_trips_for_every_type_and_rounding():
 def test_to_real_gives_the_nearest_when_nothing_is_exact():
     w = Way(I32, I32, (Step(Kind.MUL, I32, const=10),))
     assert w.to_real(87) == 9  # 87 can't be shown: x10 shows 90
+    assert w.real_for(87) == (9, False) and w.real_for(90) == (9, True)
+    assert X100_CUT.real_for(29)[1], "nudged to an exact one"
     with pytest.raises(ValueError):
         Way(F, F, (Step(Kind.MUL, F, const=0.0),)).to_real(5)
 
@@ -140,6 +142,24 @@ def test_float32_overflow_and_out_of_range_whole():
     assert big.to_screen(1e10) == math.inf
     assert CUT.to_screen(3e9) == I32.int_range()[0], "cvtt*: indefinite"
     assert CUT.to_screen(float("nan")) == I32.int_range()[0]
+
+
+def test_whole_conversion_into_a_small_type_wraps_like_the_cpu():
+    """cvttss2si writes a 4-byte register; a 1- or 2-byte copy keeps its low bits."""
+    w = Way(F, I8, (Step(Kind.TO_WHOLE, I8, rounding="cut"),))
+    assert w.to_screen(300.7) == 44 and w.to_screen(-129.0) == 127
+    assert w.to_screen(5e9) == 0, "indefinite 0x80000000 keeps its low byte"
+    w = Way(F, I16, (Step(Kind.TO_WHOLE, I16, rounding="round"),))
+    assert w.to_screen(70000.0) == 70000 - 65536
+
+
+def test_int64_to_float_rounds_once():
+    n = 2**60 + 2**36 + 1  # just above half a float32 step: rounds up
+    w = Way(I64, F, (Step(Kind.TO_DECIMAL, F),))
+    assert w.to_screen(n) == float(2**60 + 2**37)
+    assert w.to_screen(-n) == -float(2**60 + 2**37)
+    assert w.to_screen(2**60 + 2**36) == float(2**60), "a tie goes to even"
+    assert w.to_screen(51) == 51.0
 
 
 def test_then_composes_hops():

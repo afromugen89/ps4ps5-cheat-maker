@@ -100,12 +100,30 @@ def _div(a: float, b: float) -> float:
 
 
 def _to_whole(x: float, to: ValueType, rounding: Rounding | None) -> int:
-    """cvt(t)ss2si: NaN or out of range gives the "indefinite" value (the lowest)."""
-    lo, hi = to.int_range()
+    """cvt(t)ss2si: NaN or out of range gives the "indefinite" value (the lowest). The
+    CPU converts into a 4- or 8-byte register; a 1- or 2-byte copy keeps its low bits."""
+    cpu = to if to.size >= 4 else ValueType.INT32
+    lo, hi = cpu.int_range()
     if not math.isfinite(x):
-        return lo
-    n = math.trunc(x) if rounding == "cut" else round(x)  # round: halves to even
-    return n if lo <= n <= hi else lo
+        n = lo
+    else:
+        n = math.trunc(x) if rounding == "cut" else round(x)  # round: halves to even
+        n = n if lo <= n <= hi else lo
+    return n if cpu is to else _wrap(n, to)
+
+
+def _int_to_f32(n: int) -> float:
+    """cvtsi2ss: one rounding (to nearest, ties to even) straight to 24 bits. Going
+    through ``float(n)`` first would round twice for numbers above 2**53."""
+    m = abs(n)
+    shift = m.bit_length() - 24
+    if shift <= 0:
+        return _f32(float(n))
+    q, r = divmod(m, 1 << shift)
+    half = 1 << (shift - 1)
+    if r > half or (r == half and q & 1):
+        q += 1
+    return _f32(math.copysign(float(q << shift), n))
 
 
 def _next(x: float | int, vtype: ValueType, up: bool) -> float | int:
@@ -192,6 +210,8 @@ class Way:
             return _wrap(int(x), s.to)
         if k is Kind.TO_WHOLE:
             return _to_whole(float(x), s.to, s.rounding)
+        if k is Kind.TO_DECIMAL and s.to is ValueType.FLOAT and isinstance(x, int):
+            return _int_to_f32(x)
         if k in (Kind.TO_DECIMAL, Kind.WIDEN, Kind.NARROW):
             return _fit(float(x), s.to)
         if k is Kind.MUL:
@@ -215,6 +235,11 @@ class Way:
         factor, then nudged by up to NUDGE_STEPS float32 (or whole) steps until the
         forward maths gives ``screen`` exactly (a typed 29 -> 0.29f shows 28 when the
         game cuts 0.29f x 100). With no exact one, the nearest guess."""
+        return self.real_for(screen, max_now)[0]
+
+    def real_for(self, screen: float | int, max_now: MaxNow = None) -> tuple[float | int, bool]:
+        """``to_real`` and whether the game shows exactly ``screen`` for it (False: the
+        nearest value, which the player is told about)."""
         f = self.factor(max_now)
         if f == 0 or not math.isfinite(f):
             raise ValueError("this way can't be turned back into the real value")
@@ -225,14 +250,14 @@ class Way:
             lo, hi = self.real.int_range()
             x0 = max(lo, min(hi, round(guess))) if math.isfinite(guess) else 0
         if self._same_shown(self.to_screen(x0, max_now), screen):
-            return x0
+            return x0, True
         up = down = x0
         for _ in range(NUDGE_STEPS):
             up, down = _next(up, self.real, True), _next(down, self.real, False)
             for x in (up, down):
                 if self._fits(x) and self._same_shown(self.to_screen(x, max_now), screen):
-                    return x
-        return x0
+                    return x, True
+        return x0, False
 
     def _fits(self, x: float | int) -> bool:
         try:
