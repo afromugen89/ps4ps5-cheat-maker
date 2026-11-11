@@ -768,10 +768,15 @@ class FindAgain(QObject):
                 continue
             placed.add(r.obj.id)
             p.put_object(r.obj)
-            tracker = rf.Tracker(self.ctl.session, r.obj, r.obj_addr)
+            tracker = self.ctl.live.trackers.get(r.obj.id)
+            if tracker is None:
+                tracker = rf.Tracker(self.ctl.session, r.obj, r.obj_addr)
+                self.ctl.live.trackers[r.obj.id] = tracker
+            else:  # an already-learned object got a field: keep following it as it is
+                with tracker._lock:
+                    tracker.obj = r.obj
             tracker.confirmed = True
             tracker.on_lost = lambda o=r.obj: self.path_lost(o)
-            self.ctl.live.trackers[r.obj.id] = tracker
         self.remember_combined(cheat)
         self.ctl.cheats_changed.emit()
 
@@ -1095,7 +1100,9 @@ class LearnDialog(QDialog):
     ) -> list[str]:
         """Put in each new object's hook (or note its memory path), like a single
         cheat. Objects already in the notes (``existing``) are left as they are. A hook
-        that can't go in is added to ``notes``. Returns the install states."""
+        that can't go in is added to ``notes``. Cancel is checked before each hook goes
+        in: pressed during the last one, the work is done and it ends as a success.
+        Returns the install states."""
         session, finder = self.ctl.session, self.finder
         pid = session.require_game().pid
         states: list[str] = []

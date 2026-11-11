@@ -1151,3 +1151,16 @@ def test_a_stuck_hooks_id_and_rooms_are_not_reused(win, console, monkeypatch):  
     finder.keep_rooms()  # e.g. after a save: the stuck hook's rooms stay kept
     for room in ah.reserved_rooms([stuck]):
         assert room in win.ctl.session.reserved_rooms
+
+
+def test_joining_a_learned_object_keeps_its_tracker(win, console):  # re-review 3
+    connect(win)
+    learn(win, add_health_cheat(win, console.game))
+    before = win.ctl.live.trackers["obj1"]
+    session_part(win, "fraction", fraction_in_player(console.game), ValueType.INT32, 77)
+    win.ctl.cheats_changed.emit()
+    learn(win, combine_all(win))
+    tracker = win.ctl.live.trackers["obj1"]
+    assert tracker is before and tracker.confirmed
+    assert [f.name for f in tracker.obj.fields] == ["Infinite Health", "fraction"]
+    assert tracker.obj is win.ctl.project.object("obj1")
