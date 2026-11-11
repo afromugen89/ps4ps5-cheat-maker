@@ -768,3 +768,53 @@ def test_only_me_skips_writers_that_reach_the_value_another_way():
     assert [len(c.parts) for c in bl.queue] == [1]
     [s] = [s for s in bl.skipped if s.writer.address == other]
     assert s.reason == b.OTHER_PLACE_ONLY_ME
+
+
+# -- the test counter's place (review 12) -----------------------------------------------
+def test_a_counter_place_the_game_writes_to_is_left_alone(caplog):
+    caplog.set_level(logging.INFO)
+    g, clock, bl = setup()
+    bl.watch()
+    slot = cv.find_slot(g.session)
+    game_data = struct.pack("<Q", 0) + b"GAME!\0\0\0"
+    clock.events.extend(
+        hits(lambda: g.hit(g.player, 50.0), lambda: g.fake.poke(fg.PID, slot, game_data))
+    )
+    out = bl.try_candidate(bl.next_candidate())
+    assert out.result is not TR.PASS and out.rollback is b.Rollback.RESTORED, out
+    assert g.fake.peek(fg.PID, fg.WRITER, 10) == fg.VMOVSS_W
+    assert g.fake.peek(fg.PID, slot, 16) == game_data, "not zeroed: the game's"
+    assert "action=build_slot_changed" in caplog.text
+
+
+def test_a_counter_place_in_use_at_install_writes_nothing(monkeypatch):
+    g, _clock, bl = setup()
+    bl.watch()
+    before = module(g)
+    real_prepare = bl._prepare
+
+    def prepare(c, n):
+        inst = real_prepare(c, n)
+        g.fake.poke(fg.PID, inst.slot, b"\1" * 16)  # the game took it meanwhile
+        return inst
+
+    monkeypatch.setattr(bl, "_prepare", prepare)
+    out = bl.try_candidate(bl.next_candidate())
+    assert out.result is TR.FAIL and out.hint == b.SLOT_IN_USE
+    assert g.fake.peek(fg.PID, fg.WRITER, 10) == fg.VMOVSS_W and notes.current_note() is None
+    assert module(g)[0] == before[0]
+
+
+def test_the_kept_fix_is_marked_on_without_writing_again(monkeypatch):
+    g, clock, bl = setup()
+    live = bl.live = LiveCheats(g.session, Freezer(g.session))
+    bl.watch()
+    clock.events.extend(hits(lambda: g.hit(g.player, 50.0)))
+    assert bl.try_candidate(bl.next_candidate()).result is TR.PASS
+    writes = []
+    real = g.fake.write
+    monkeypatch.setattr(g.fake, "write", lambda p, a, d: (writes.append(a), real(p, a, d)))
+    cheat = bl.finalize().cheat
+    assert cheat.enabled and live.active[id(cheat)] is cheat
+    room = cheat.locations[0].offset + fg.BASE
+    assert writes.count(fg.WRITER) == 1 and writes.count(room) == 1, "each written once"

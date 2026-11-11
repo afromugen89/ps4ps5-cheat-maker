@@ -397,6 +397,7 @@ ONLY_YOU_SEEN = "Only you were seen. Get hit and hit enemies while the bar moves
 CANT_TELL_APART = "Couldn't tell you apart from enemies."
 NOT_TAKEN = "the PS5 didn't take the change"
 RESTART = notes.RESTART
+SLOT_IN_USE = "the game uses the place kept for the test counter"
 CLOSED_WHILE_KEEPING = "Stopped before the fix was kept. Your game is unchanged."
 
 
@@ -455,6 +456,7 @@ class _Installed:
     total: int = 0  # how many fixes this build tries, for the hint
     put_back: Rollback | None = None  # how its put back went, for the other thread
     method: str = ""  # the crash note's method when not the candidate's ("collect")
+    seen_count: int = 0  # the highest counter read in the test
 
 
 class Builder:
@@ -874,6 +876,10 @@ class Builder:
         with self._op:
             if self.closed or cancel.is_set():
                 return TestOutcome(TryResult.CANCELLED)
+            if inst.slot is not None and client.read(game.pid, inst.slot, cv.SLOT_SIZE) != bytes(
+                cv.SLOT_SIZE
+            ):
+                return TestOutcome(TryResult.FAIL, SLOT_IN_USE)  # nothing written
             notes.open_note(self._note(inst))  # before any byte goes in (B6)
             with self._lock:
                 self._installed = inst
@@ -981,6 +987,7 @@ class Builder:
             after = client.read(game.pid, inst.slot, cv.SLOT_SIZE)
             if after == raw:
                 count = struct.unpack_from("<Q", raw)[0]
+                inst.seen_count = max(inst.seen_count, count)
                 return Sample(value, count, self.vtype.decode(raw[8 : 8 + self.vtype.size]))
             raw = after
         log.info("action=build_sample dropped=True")
@@ -1104,6 +1111,18 @@ class Builder:
             self.not_restored = True
         return inst.put_back
 
+    def _slot_ours(self, inst: _Installed) -> bool:
+        """The counter holds only what our routine could have left: zero, or a count
+        no lower than the test saw. Else the game uses that place too: it is left
+        as it is (zeroing it could break the game) and logged."""
+        assert inst.slot is not None
+        raw = self._client().read(self._game().pid, inst.slot, cv.SLOT_SIZE)
+        count = struct.unpack_from("<Q", raw)[0]
+        ours = raw == bytes(cv.SLOT_SIZE) or count >= max(1, inst.seen_count)
+        if not ours:
+            log.warning("action=build_slot_changed slot=%#x raw=%s", inst.slot, raw.hex())
+        return ours
+
     def _write_back(self, inst: _Installed, reason: str) -> Rollback:
         try:
             game = self._game()
@@ -1112,7 +1131,8 @@ class Builder:
                 client.write(game.pid, addr, orig)
             self.sleep(PUT_BACK_WAIT_S)  # a thread may still be inside a routine
             for addr, size in inst.rooms:
-                client.write(game.pid, addr, bytes(size))
+                if addr != inst.slot or self._slot_ours(inst):
+                    client.write(game.pid, addr, bytes(size))
         except CheatMakerError as exc:
             log.warning(
                 "action=build_rollback n=%d reason=%r restored=False error=%s",
@@ -1173,7 +1193,7 @@ class Builder:
         cheat = self._cheat(inst, saved, base, full)
         cheat.check_after_restart = self.only_me and not self.by_class
         if self.live is not None:
-            self.live.turn_on(cheat)  # the same bytes: marks it on in My cheats
+            self.live.mark_on(cheat)  # its bytes are in already: nothing more written
         else:
             cheat.enabled = True
         after = "Check after restart" if self.only_me and not self.by_class else "Yes"
@@ -1217,7 +1237,7 @@ class Builder:
                 raise BuildFailed(CLOSED_WHILE_KEEPING)
             for room in inst.hooks:
                 client.write(game.pid, room.test_room, bytes(len(room.code)))
-            if inst.slot is not None:
+            if inst.slot is not None and self._slot_ours(inst):
                 client.write(game.pid, inst.slot, bytes(cv.SLOT_SIZE))
         except CheatMakerError as exc:
             if isinstance(exc, BuildFailed):

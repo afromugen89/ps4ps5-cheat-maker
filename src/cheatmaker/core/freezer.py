@@ -184,6 +184,14 @@ class LiveCheats:
         cheat.enabled = True
         self.active[id(cheat)] = cheat
 
+    def mark_on(self, cheat: Cheat) -> None:
+        """A cheat whose bytes are already in the game (Make it work just kept its
+        fix): on and listed as active, with nothing written."""
+        if cheat.freeze:
+            raise ValueError("a kept fix never freezes")
+        cheat.enabled = True
+        self.active[id(cheat)] = cheat
+
     def turn_off(self, cheat: Cheat, restore: bool = True) -> None:
         self.freezer.unfreeze(str(id(cheat)))
         cheat.enabled = False
