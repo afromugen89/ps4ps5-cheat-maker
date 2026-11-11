@@ -358,9 +358,15 @@ class Tracer:
             hop.stop = "read-modify-write: it's the real one"
             return None
         options = self._options(hop, by_writer)
-        if any(o.cand.address == hop.watched.address for o in options):
+        # a writer that reads it back from the very same place counts like a
+        # read-modify-write one: it decides only with the most hits or no other source
+        selfs = {o.cand.writer for o in options if o.cand.address == hop.watched.address}
+        self_copy = [wp for wp, _h in by_writer if wp.writer.address in selfs]
+        if self_copy and _most_hits(self_copy, by_writer):
             hop.stop = "read back from the same place: it's the real one"
             return None
+        options = [o for o in options if o.cand.address != hop.watched.address]
+        rmw += [wp for wp in self_copy if wp not in rmw]
         self._check_cancel()
         self._say(hop, Stage.STEADY)
         winner = self._check(hop, options) if options else None
@@ -585,7 +591,10 @@ class Tracer:
                     continue
                 max_address = None
                 if path.max_load is not None:
-                    max_address = tf.exec_address(path.max_load, h)
+                    # the hit's registers are those before the source load: work the
+                    # max load's own registers out from them (code in between may
+                    # have moved a pointer on)
+                    max_address = tf.exec_max_address(wp.window, path, h, self._read)
                     if max_address is None:
                         continue
                 expr = path.load.mem.text() + (f"+{path.load.lane:X}h" if path.load.lane else "")

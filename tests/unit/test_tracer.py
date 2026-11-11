@@ -18,7 +18,7 @@ from cheatmaker.core.trace_way import Kind
 from cheatmaker.core.tracer import Outcome, Tracer, watch_span
 from cheatmaker.core.values import ValueType
 from cheatmaker.errors import ProtocolError, ReadFailed, WriteFailed
-from tests.asm import call, ends, ins, mem, rep_movsb, ret, rip
+from tests.asm import asm, call, ends, ins, mem, rep_movsb, ret, rip
 from tests.tracegame import PID, RSP, TraceGame
 
 F, D = ValueType.FLOAT, ValueType.DOUBLE
@@ -845,3 +845,35 @@ def test_read_modify_write_found_at_hop_2_is_found_not_sure():
     assert r.address == widget and r.verdict is None and not r.sure
     assert r.hops[0].verdict is Verdict.COPY
     assert r.hops[1].stop == "read-modify-write: it's the real one"
+
+
+def test_exec_fallback_max_after_a_pointer_reload_uses_the_moved_register():
+    """The source load's registers are carried forward to the max load
+    (``mov rbx,[rbx+30h]`` in between), as QA BUG-12."""
+    from cheatmaker.core import trace_flow as tf
+
+    g = TraceGame()
+    obj, maxobj = g.alloc(0x40), g.alloc(0x40)
+    g.set_ptr(obj + 0x30, maxobj)
+    k100 = g.const(F, 100.0)
+    body = (
+        ins("MOVSS_XMM_XMMM32", "xmm0", mem("rbx", 0x10)),
+        ins("MOV_R64_RM64", "rbx", mem("rbx", 0x30)),
+        ins("DIVSS_XMM_XMMM32", "xmm0", mem("rbx", 0x14)),
+        ins("MULSS_XMM_XMMM32", "xmm0", rip(k100)),
+        ins("CVTTSS2SI_R32_XMMM32", "eax", "xmm0"),
+        ins("MOV_RM32_R32", mem("rdi"), "eax"),
+    )
+    start = g.code(*body)
+    code = asm(start, *body)
+    writer = [start, *ends(code, start)][-2]
+    win = tf.decode_window(b"\xcc" * 8 + code, writer, start + len(code) - writer)
+
+    def read(a: int, n: int) -> bytes:
+        return g.fake.peek(PID, a, n)
+
+    path = tf.follow(win, 0, read, lambda a: a == k100, I32)
+    assert path.end is tf.End.SOURCE and path.max_load is not None
+    hit = WatchHit(start, {"rbx": obj, "rip": start})
+    assert tf.exec_max_address(win, path, hit, read) == maxobj + 0x14
+    assert tf.exec_max_address(win, path, WatchHit(start, {"rip": start}), read) is None

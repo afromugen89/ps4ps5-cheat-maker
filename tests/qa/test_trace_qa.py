@@ -821,10 +821,6 @@ def test_tc12f_cancel_closes_without_adding_a_row(twin, tgame):
 
 
 # -- TC-13 read back from the watched place ignores who writes most (AC-T3) -----------------
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG-09: one self-copy hit makes a copy 'already real' despite a busier copier",
-)
 def test_tc13_a_rare_self_copy_doesnt_outvote_the_copier():
     g = TraceGame()
     obj, hud = g.alloc(0x40), g.alloc(0x40)
@@ -884,10 +880,6 @@ def test_tc14_an_unlisted_8_byte_freeze_over_the_copy_is_paused_and_put_back_who
 
 
 # -- TC-15 guide after Check which is real (AC-T1) ------------------------------------------------
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG-11: copies plus one row that couldn't be checked: no trace suggestion",
-)
 def test_tc15_all_checked_rows_copies_with_one_unchecked_still_suggests_the_trace():
     from cheatmaker.core.guide import Action, Guide
 
@@ -904,10 +896,6 @@ def test_tc15b_guide_suggests_after_all_copies_and_not_after_a_real_one():
 
 
 # -- TC-16 execute-breakpoint fallback with a share of a max (AC-T4 rule 4) -----------------------
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG-12: exec fallback works out the max with the registers of the other load",
-)
 def test_tc16_exec_fallback_max_address_uses_the_max_loads_registers():
     g = TraceGame()
     obj, maxobj, hud = g.alloc(0x40), g.alloc(0x40), g.alloc(0x40)

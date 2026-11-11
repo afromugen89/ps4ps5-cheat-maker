@@ -1019,6 +1019,58 @@ def follow_into_caller(
     return path, cands
 
 
+def exec_max_address(win: Window | None, path: Path, hit: WatchHit, read: Read) -> int | None:
+    """The max's address for an execute-breakpoint hit taken at the **source** load:
+    the registers there are carried to the max load. After the source load, the
+    plain register moves, ``lea`` and 64-bit pointer loads in between are replayed
+    forward (reading pointers now); before it, the registers must be untouched in
+    between. None when that can't be done."""
+    load, max_load = path.load, path.max_load
+    if win is None or load is None or max_load is None:
+        return None
+    needed = {r for r in (max_load.mem.base, max_load.mem.index) if r is not None}
+    if max_load.at < load.at:
+        if needed & _clobbered(win.insns[max_load.at : load.at]):
+            return None
+        return exec_address(max_load, hit)
+    regs = dict(hit.regs)
+    for insn in win.insns[load.at : max_load.at]:
+        for name in _clobbered([insn]):
+            value = _forward(insn, regs, read) if name == _dest(insn) else None
+            if value is None:
+                regs.pop(name, None)
+            else:
+                regs[name] = value
+    return exec_address(max_load, WatchHit(hit.rip, regs))
+
+
+def _dest(insn: ix.Instruction) -> str | None:
+    if insn.op_count and insn.op_kind(0) == ix.OpKind.REGISTER:
+        return full_name(insn.op0_register)
+    return None
+
+
+def _forward(insn: ix.Instruction, regs: dict[str, int], read: Read) -> int | None:
+    """The new value of a 64-bit register ``insn`` sets, from ``regs`` before it:
+    ``mov r,r``, ``lea r,[m]`` or ``mov r,[m]`` (a pointer read now). Else None."""
+    if insn.op_count != 2 or ix.RegisterExt.size(insn.op0_register) != 8:
+        return None
+    m = insn.mnemonic
+    if m == M.MOV and insn.op_kind(1) == ix.OpKind.REGISTER:
+        return regs.get(full_name(insn.op1_register))
+    if m not in (M.MOV, M.LEA) or insn.op_kind(1) != ix.OpKind.MEMORY:
+        return None
+    ref = MemRef.of(insn)
+    where = exec_address(Load(insn.ip, text(insn), ref, 0, 0), WatchHit(0, regs))
+    if where is None or m == M.LEA:
+        return where
+    try:
+        return int.from_bytes(read(where, 8), "little")
+    except Exception as exc:  # a pointer that can't be read: no max address
+        log.debug("action=trace_replay unreadable=%#x error=%s", where, exc)
+        return None
+
+
 def exec_address(load: Load, hit: WatchHit) -> int | None:
     """The address ``load`` reads, from an execute breakpoint's trap on it: the
     registers are those before the load runs, so this is exact (AC-T4 rule 4).

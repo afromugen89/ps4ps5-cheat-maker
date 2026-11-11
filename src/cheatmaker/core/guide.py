@@ -142,9 +142,10 @@ class Guide:
         return self._narrow()
 
     def after_check(self, verdicts: list[Verdict]) -> Suggestion | None:
-        """Check which is real marked every checked row a copy: the real value isn't in
-        the list, so trace it from a copy (spec-trace AC-T1)."""
-        if verdicts and all(v is Verdict.COPY for v in verdicts):
+        """Check which is real marked every row it could check a copy (rows that
+        couldn't be checked, e.g. unloaded, don't count): the real value isn't in the
+        list, so trace it from a copy (spec-trace AC-T1)."""
+        if Verdict.COPY in verdicts and all(v in (Verdict.COPY, Verdict.FAILED) for v in verdicts):
             return Suggestion(TRACE_HINT, Action.TRACE)
         return None
 

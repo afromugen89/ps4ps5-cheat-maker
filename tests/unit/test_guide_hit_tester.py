@@ -207,7 +207,10 @@ def test_guide_suggests_tracing_when_every_checked_row_is_a_copy():
     s = g.after_check([Verdict.COPY, Verdict.COPY])
     assert s is not None and s.action is Action.TRACE and s.text == TRACE_HINT
     assert g.after_check([Verdict.COPY, Verdict.REAL]) is None
-    assert g.after_check([Verdict.COPY, Verdict.FAILED]) is None
+    # rows that couldn't be checked don't count (QA BUG-11); one copy is needed
+    assert g.after_check([Verdict.COPY, Verdict.FAILED]).action is Action.TRACE
+    assert g.after_check([Verdict.FAILED]) is None
+    assert g.after_check([Verdict.COPY, Verdict.KEPT]) is None
     assert g.after_check([]) is None
     put_back = g.after_put_back()
     assert put_back.action is Action.TRACE
