@@ -30,6 +30,7 @@ log = logging.getLogger(__name__)
 
 FILE_NAME = "build_notes.json"
 PUT_BACK_WAIT_S = 2.0  # as Builder.rollback: let threads leave the routine first
+RESTART = "Restart the game: fixes only live in memory until then."
 _lock = threading.Lock()
 
 
@@ -93,9 +94,23 @@ def _load() -> dict:
         # A damaged file must not stop the builder; it only loses old crash marks.
         log.warning("action=build_notes_unreadable path=%s error=%s", p, exc)
         return {"open": None, "crashed": []}
-    raw.setdefault("open", None)
-    raw.setdefault("crashed", [])
+    if not isinstance(raw.get("open"), dict):
+        raw["open"] = None
+    crashed = raw.get("crashed")
+    raw["crashed"] = [c for c in crashed if _good_mark(c)] if isinstance(crashed, list) else []
     return raw
+
+
+def _good_mark(c: object) -> bool:
+    """A crash mark with every field of the right type; others are dropped."""
+    ok = (
+        isinstance(c, dict)
+        and all(isinstance(c.get(k), str) for k in ("title_id", "version", "method"))
+        and type(c.get("writer_off")) is int
+    )
+    if not ok:
+        log.warning("action=build_notes_bad_mark")
+    return ok
 
 
 def _save(data: dict) -> None:
@@ -142,15 +157,7 @@ def is_crashed(title_id: str, version: str, writer_off: int, method: str) -> boo
         crashed = _load()["crashed"]
     want = _key(title_id, version, writer_off, method)
     return any(
-        _key(
-            c.get("title_id", ""),
-            c.get("version", ""),
-            c.get("writer_off", -1),
-            c.get("method", ""),
-        )
-        == want
-        for c in crashed
-        if isinstance(c, dict)
+        _key(c["title_id"], c["version"], c["writer_off"], c["method"]) == want for c in crashed
     )
 
 
@@ -179,12 +186,30 @@ def mark_crashed(title_id: str, version: str, writer_off: int, method: str) -> N
     )
 
 
+def _put_back_sites(client, pid: int, base: int, patches: tuple[Patch, ...]) -> bool:
+    """Our bytes at a site go back to the original. True when every site ends up
+    holding the original."""
+    clean = True
+    for p in reversed(patches):
+        addr = base + p.site_off
+        orig, new = bytes.fromhex(p.orig_hex), bytes.fromhex(p.new_hex)
+        now = client.read(pid, addr, len(new))
+        if now == new:
+            client.write(pid, addr, orig)
+        elif now != orig:
+            clean = False
+    return clean
+
+
 def check_on_connect(session: Session, sleep: Callable[[float], None] = time.sleep) -> str | None:
     """After connecting and finding the game: deal with a note left open. Returns a hint
     for the player, or None when there was nothing to do.
 
     The same game process still running means the app (not the game) went away: the
-    fix is put back and nothing is marked. Otherwise the game restarted or isn't
+    fix is put back and nothing is marked. The routines are only zeroed when every
+    site holds the game's own bytes again; a site holding something else (a jump we
+    had re-aimed, another tool's patch) may still lead into them, so then they stay
+    and the player is asked to restart. Otherwise the game restarted or isn't
     running, so the fix is gone with it and its method is marked as a crash."""
     note = current_note()
     if note is None:
@@ -201,19 +226,18 @@ def check_on_connect(session: Session, sleep: Callable[[float], None] = time.sle
     if same:
         assert game is not None and client is not None
         try:
-            for p in reversed(note.patches):
-                addr = game.module_base + p.site_off
-                if client.read(game.pid, addr, len(bytes.fromhex(p.new_hex))) == bytes.fromhex(
-                    p.new_hex
-                ):
-                    client.write(game.pid, addr, bytes.fromhex(p.orig_hex))
-            sleep(PUT_BACK_WAIT_S)
-            for off, size in note.rooms:
-                client.write(game.pid, game.module_base + off, bytes(size))
+            clean = _put_back_sites(client, game.pid, game.module_base, note.patches)
+            if clean:
+                sleep(PUT_BACK_WAIT_S)
+                for off, size in note.rooms:
+                    client.write(game.pid, game.module_base + off, bytes(size))
         except CheatMakerError as exc:
             log.warning("action=build_rollback where=connect restored=False error=%s", exc)
-            return "Restart the game: fixes only live in memory until then."
-        clear_note()
+            return RESTART
+        clear_note()  # either way: this process isn't a crash of the fix
+        if not clean:
+            log.warning("action=build_rollback where=connect restored=False error=site_changed")
+            return RESTART
         log.info("action=build_rollback where=connect restored=True n=%d", note.n)
         return f"Fix {note.n} from last time was still in the game. It's been put back."
     mark_crashed(note.title_id, note.version, note.site_off, note.method)

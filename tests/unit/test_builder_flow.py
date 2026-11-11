@@ -725,3 +725,21 @@ def test_a_reading_that_never_settles_is_dropped(monkeypatch):
 
     monkeypatch.setattr(g.fake, "read", read)
     assert bl._sample(inst) is None
+
+
+def test_finalize_notes_the_re_aimed_jump_before_writing_it(monkeypatch):
+    g, clock, bl = setup()
+    bl.watch()
+    clock.events.extend(hits(lambda: g.hit(g.player, 50.0)))
+    assert bl.try_candidate(bl.next_candidate()).result is TR.PASS
+    real_write, noted = g.fake.write, []
+
+    def write(pid, addr, data):
+        if addr == fg.WRITER:  # the jump is re-aimed: the note already says so
+            [p] = notes.current_note().patches
+            noted.append(bytes.fromhex(p.new_hex) == data)
+        real_write(pid, addr, data)
+
+    monkeypatch.setattr(g.fake, "write", write)
+    bl.finalize()
+    assert noted == [True]

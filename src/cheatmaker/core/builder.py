@@ -388,7 +388,7 @@ NOT_SURE_REAL = "Not sure this is the real one."
 ONLY_YOU_SEEN = "Only you were seen. Get hit and hit enemies while the bar moves."
 CANT_TELL_APART = "Couldn't tell you apart from enemies."
 NOT_TAKEN = "the PS5 didn't take the change"
-RESTART = "Restart the game: fixes only live in memory until then."
+RESTART = notes.RESTART
 CLOSED_WHILE_KEEPING = "Stopped before the fix was kept. Your game is unchanged."
 
 
@@ -808,7 +808,11 @@ class Builder:
                 raise LockFailed("the patch would land outside the game's own code")
         return inst
 
-    def _note(self, inst: _Installed) -> notes.OpenNote:
+    def _note(
+        self, inst: _Installed, sites: list[tuple[int, bytes, bytes]] | None = None
+    ) -> notes.OpenNote:
+        """The crash note for ``inst``; ``sites`` replaces its (address, original,
+        ours) list, as when finalize re-aims the jumps."""
         game = self._game()
         base = game.module_base
         return notes.OpenNote(
@@ -818,7 +822,9 @@ class Builder:
             site_off=inst.candidate.parts[0].writer.address - base,
             method=inst.method or _method_name(inst.candidate),
             n=inst.n,
-            patches=tuple(notes.Patch(a - base, o.hex(), new.hex()) for a, o, new in inst.sites),
+            patches=tuple(
+                notes.Patch(a - base, o.hex(), new.hex()) for a, o, new in (sites or inst.sites)
+            ),
             rooms=tuple((a - base, size) for a, size in inst.rooms),
         )
 
@@ -1168,9 +1174,15 @@ class Builder:
                 jmp = cv.jmp_patch(
                     room.part.writer.address, room.saved_room, room.part.writer.length
                 )
+                saved.append((room, code, jmp))
+            # The note names the re-aimed jumps first: if the app dies in between, the
+            # next connect finds a site that is neither and leaves the routines alone.
+            kept = {room.part.writer.address: jmp for room, _c, jmp in saved}
+            sites = [(a, o, kept.get(a, new)) for a, o, new in inst.sites]
+            notes.open_note(self._note(inst, sites))
+            for room, code, jmp in saved:
                 client.write(game.pid, room.saved_room, code)
                 client.write(game.pid, room.part.writer.address, jmp)
-                saved.append((room, code, jmp))
             self.sleep(PUT_BACK_WAIT_S)
             if self._installed is not inst:  # put back on this thread meanwhile
                 if inst.put_back is Rollback.NOT_RESTORED:

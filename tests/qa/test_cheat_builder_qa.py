@@ -1,8 +1,8 @@
 """QA for the smart cheat builder, "Make it work..." (docs/spec-cheat-builder.md B1-B9).
 
 Report: qa/reports/2026-11-11-cheat-builder.md. Test case IDs (TC-xx) match the report.
-Bugs found are strict xfail tests marked "BUG-nn": they fail today and must pass
-once fixed (then remove the marker).
+Bugs found were strict xfail tests named "bugNN"; all are fixed now and the markers
+are gone, so each one guards against its bug coming back.
 
 The game is tests/fakegame.py (writers and routines run on tests/minicpu.py); time is
 the fake clock from the builder flow tests, whose sleeps let the game act.
@@ -366,11 +366,6 @@ def test_bug04_hit_between_value_and_counter_reads(monkeypatch):
     assert out.result is TR.PASS, out
 
 
-@pytest.mark.xfail(
-    reason="BUG-05: a damaged crash-notes file ('crashed': null) stops the builder with a "
-    "TypeError",
-    strict=True,
-)
 @pytest.mark.parametrize("crashed", [None, 5, {"a": 1}, [{"writer_off": "x"}]])
 def test_bug05_damaged_crash_list(crashed):
     _g, _clock, bl = setup()

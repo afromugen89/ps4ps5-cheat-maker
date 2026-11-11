@@ -113,3 +113,30 @@ def test_game_restarted_marks_the_method_crashed(how):
     assert bn.is_crashed(note.title_id, note.version, note.site_off, "hook")
     assert bn.current_note() is None
     assert g.fake.writes == [], "a new game's code is never touched"
+
+
+def test_damaged_marks_are_dropped_and_good_ones_kept():
+    bn.notes_path().parent.mkdir(parents=True, exist_ok=True)
+    good = {"title_id": "A", "version": "1", "writer_off": 16, "method": "hook"}
+    bad = [None, 5, "x", {"writer_off": "x"}, {**good, "writer_off": "16"}, {**good, "title_id": 1}]
+    bn.notes_path().write_text(json.dumps({"open": 7, "crashed": [*bad, good]}), "utf-8")
+    assert bn.current_note() is None
+    assert bn.is_crashed("A", "1", 16, "hook")
+    bn.mark_crashed("B", "1", 0, "nop")
+    assert len(json.loads(bn.notes_path().read_text(encoding="utf-8"))["crashed"]) == 2
+
+
+def test_a_site_with_other_bytes_keeps_the_routines_and_says_restart():
+    """The jump was re-aimed (finalize) or replaced: zeroing the rooms could leave a
+    live jump into zeros, so they stay."""
+    g = fg.build(capture_ticks=False)
+    note = _note(g)
+    other = b"\xe9\x10\x20\x00\x00\x90"
+    g.fake.poke(fg.PID, fg.SUB_SITE, other)
+    g.fake.poke(fg.PID, fg.BASE + 0x3000, b"\x55" * 0x20)
+    bn.open_note(note)
+    hint = bn.check_on_connect(g.session, sleep=lambda _s: None)
+    assert hint == bn.RESTART
+    assert g.fake.peek(fg.PID, fg.SUB_SITE, 6) == other
+    assert g.fake.peek(fg.PID, fg.BASE + 0x3000, 0x20) == b"\x55" * 0x20, "routines kept"
+    assert bn.current_note() is None and not bn.is_crashed(fg.TITLE, fg.VERSION, 0x300, "hook")
