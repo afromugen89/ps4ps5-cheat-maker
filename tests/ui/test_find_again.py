@@ -1095,3 +1095,30 @@ def test_learning_a_ticked_cheat_puts_its_fixed_bytes_back(win, console):  # rev
     assert game.fake.peek(fg.PID, fg.DATA + 0x80, 1) == b"\x01"
     learn(win, win.ctl.cheat_file.cheats[0])
     assert game.fake.peek(fg.PID, fg.DATA + 0x80, 1) == b"\x00"
+
+
+# -- re-review fixes ------------------------------------------------------------------------
+def test_rename_while_disconnected_is_kept_in_the_notes(win, console):  # BUG-06
+    from cheatmaker.ui.cheats_view import COL_NAME
+
+    combined_found_again(win, console)
+    win.ctl.shutdown()  # no notes loaded now
+    win.cheats.table.item(0, COL_NAME).setText("Health")
+    console.restart(2)
+    connect(win)
+    assert [c.name for c in win.ctl.cheat_file.cheats] == ["Health"], "no second row"
+    assert [c.name for c in pj.load(pj.project_path(fg.TITLE, fg.VERSION)).cheats] == ["Health"]
+
+
+def test_rename_while_connected_comes_back_after_a_restart(win, console):  # BUG-06
+    from cheatmaker.ui.cheats_view import COL_NAME
+
+    combined_found_again(win, console)
+    win.cheats.table.item(0, COL_NAME).setText("Health")
+    win.ctl.shutdown()
+    win.ctl.cheat_file.cheats.clear()  # a fresh app
+    run2 = console.restart(2)
+    connect(win)
+    assert [c.name for c in win.ctl.cheat_file.cheats] == ["Health"]
+    tick(win)
+    assert run2.health() == 999.0

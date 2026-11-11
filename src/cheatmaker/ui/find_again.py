@@ -246,10 +246,22 @@ class FindAgain(QObject):
             return
         cf = self.ctl.ensure_file()
         have = {c.anchor for c in cf.cheats if c.anchor}
-        have_parts = {self._key(c.name, self._anchors(c)) for c in cf.cheats if c.learned_parts}
+        rows = [c for c in cf.cheats if c.learned_parts]
+        have_parts = {self._key(c.name, self._anchors(c)) for c in rows}
+        noted = {self._key(pc.name, pc.anchors) for pc in p.cheats if pc.parts}
+        # Rows no notes entry names: renamed while the notes weren't loaded.
+        unnamed = [c for c in rows if self._key(c.name, self._anchors(c)) not in noted]
+        renamed = False
         for pc in p.cheats:
             if pc.parts:
                 if self._key(pc.name, pc.anchors) in have_parts:
+                    continue
+                row = next((c for c in unnamed if self._anchors(c) == pc.anchors), None)
+                if row is not None:  # that row is this entry: keep the row's new name
+                    unnamed.remove(row)
+                    pc.name = row.name
+                    have_parts.add(self._key(pc.name, pc.anchors))
+                    renamed = True
                     continue
                 cheat = self._combined_from(p, pc)
                 if cheat is not None:
@@ -273,6 +285,8 @@ class FindAgain(QObject):
                     anchor=(pc.object, pc.field),
                 )
             )
+        if renamed:
+            self.save()
 
     @staticmethod
     def _combined_from(p: pj.Project, pc: pj.ProjectCheat) -> Cheat | None:

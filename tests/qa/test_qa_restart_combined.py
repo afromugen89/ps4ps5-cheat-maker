@@ -977,12 +977,7 @@ def test_rt05_rename_while_connected_is_kept(win, console):  # retest: renamed()
     assert [c.name for c in win.ctl.cheat_file.cheats] == ["Health"]
 
 
-@pytest.mark.xfail(
-    reason="BUG-06: renaming a combined found-again cheat while disconnected brings back "
-    "a second row under the old name on the next connect",
-    strict=True,
-)
-def test_rt06_rename_while_disconnected_no_second_row(win, console):  # BUG-06
+def test_rt06_rename_while_disconnected_no_second_row(win, console):  # BUG-06 fixed
     connect(win)
     learn(win, add_health_cheat(win, console.game))
     fixed_cheat(win)
