@@ -345,12 +345,7 @@ def test_tc10b_learn_button_off_when_nothing_moves(win, console):  # TC-10
     assert not win.cheats.learn_btn.isEnabled(), "nothing left to learn"
 
 
-@pytest.mark.xfail(
-    reason="BUG-01: a moving part in the same object as an already-learned part gets a "
-    "second object and a second hook",
-    strict=True,
-)
-def test_tc11_same_object_as_an_already_learned_part_shares_it(win, console):  # TC-11
+def test_tc11_same_object_as_an_already_learned_part_shares_it(win, console):  # BUG-01 fixed
     connect(win)
     learn(win, add_health_cheat(win, console.game))
     session_part(win, "fraction", fraction_in_player(console.game), ValueType.INT32, 77)
@@ -487,12 +482,7 @@ def test_tc15_cancel_after_first_install_restores_rooms_and_paths(win, console, 
     assert "you pressed Cancel" in dlg.hint.text()
 
 
-@pytest.mark.xfail(
-    reason="BUG-04: an unexpected (non-CheatMakerError) error while learning skips the "
-    "rollback: reserved rooms stay changed",
-    strict=True,
-)
-def test_tc16_unexpected_error_still_rolls_back(win, console, monkeypatch):  # TC-16
+def test_tc16_unexpected_error_still_rolls_back(win, console, monkeypatch):  # BUG-04 fixed
     connect(win)
     c = two_moving(win, console.game, money_in_enemy, ValueType.INT64, "money")
     rooms = list(win.ctl.session.reserved_rooms)

@@ -86,11 +86,13 @@ def part_field(cheat: Cheat, obj_id: str) -> tuple[str, str]:
 
 class PartFailed(FindFailed):
     """A part of a combined cheat couldn't be learned (or Cancel was pressed): every
-    hook put in during the dialog is out again and nothing was changed."""
+    hook put in during the dialog is out again and nothing was changed. ``stuck``: a
+    hook couldn't be taken out (it still comes out on close)."""
 
-    def __init__(self, part: str, k: int, n: int, reason: str) -> None:
-        super().__init__(hints.LEARN_PART_FAILED.format(part=part, k=k, n=n, reason=reason))
-        self.part, self.k, self.n = part, k, n
+    def __init__(self, part: str, k: int, n: int, reason: str, stuck: bool = False) -> None:
+        text = hints.LEARN_PART_STUCK if stuck else hints.LEARN_PART_FAILED
+        super().__init__(text.format(part=part, k=k, n=n, reason=reason))
+        self.part, self.k, self.n, self.stuck = part, k, n, stuck
 
 
 def _reason(exc: BaseException) -> str:
@@ -103,6 +105,21 @@ def _reason(exc: BaseException) -> str:
     if not text.startswith("Cheat Maker") and text[1:2].islower():
         text = text[0].lower() + text[1:]
     return text if text.endswith(".") else text + "."
+
+
+def _join(obj: pj.ObjectSpec, other: pj.ObjectSpec, fld: pj.Field) -> None:
+    """Add ``fld`` (and the memory paths to it) from ``other`` to ``obj``, the same
+    object. A name ``obj`` already has gets " (2)", ..."""
+    old, n = fld.name, 2
+    names = {f.name for f in obj.fields}
+    while fld.name in names:
+        fld.name = f"{old} ({n})"
+        n += 1
+    obj.fields.append(fld)
+    for a in other.anchors_of(pj.ChainAnchor):
+        if a.field == old:
+            a.field = fld.name
+        obj.anchors.append(a)
 
 
 class FindAgain(QObject):
@@ -430,14 +447,21 @@ class FindAgain(QObject):
             self._ours.clear()
 
     def _remove(self, obj: pj.ObjectSpec) -> None:
+        if not self.take_out(obj):
+            self._unrecord(obj.id)
+
+    def take_out(self, obj: pj.ObjectSpec) -> bool:
+        """Take ``obj``'s hook out. False if it couldn't be: then it stays recorded as
+        ours (another try on close)."""
         try:
             ah.remove(self.ctl.session, obj, self.sleep)
         except CheatMakerError as exc:
             log.warning("action=hook_remove object=%s reason=%s", obj.id, exc)
-        else:
-            with self._lock:
-                self._mine.pop(obj.id, None)
+            return False
+        with self._lock:
+            self._mine.pop(obj.id, None)
         self._unrecord(obj.id)
+        return True
 
     def path_lost(self, obj: pj.ObjectSpec) -> None:
         """A value found by a memory path stopped checking out (it moved). Simple games
@@ -922,9 +946,12 @@ class LearnDialog(QDialog):
         if any(loc.vtype is None for loc in parts):
             return
         if cheat.enabled:  # our own freeze would hide the game's reads and writes
-            self.ctl.live.turn_off(cheat, restore=False)
+            # Fixed parts get their bytes back; learned parts are left as they are.
+            fixed = any(loc.kind is not LocationKind.SESSION_ADDRESS for loc in cheat.locations)
+            self.ctl.live.turn_off(cheat, restore=fixed)
             self.ctl.cheats_changed.emit()
         ids = finder.new_object_ids(len(parts))
+        seeds = self._seed_objects()
         rooms0 = list(session.reserved_rooms)
         by_chain0 = set(finder.by_chain)
         pointer_scan = self.pointers.isChecked()
@@ -934,31 +961,45 @@ class LearnDialog(QDialog):
         n = len(parts)
         installed_here: list[pj.ObjectSpec] = []
 
-        def rollback() -> None:
-            """Every hook put in during this dialog comes out; the notes' rooms and
-            the memory-path list are as before."""
-            for obj in installed_here:
-                finder._remove(obj)
+        def rollback() -> list[pj.ObjectSpec]:
+            """Every hook put in during this dialog comes out; the notes' rooms and the
+            memory-path list are as before. Returns the hooks that couldn't come out:
+            they stay recorded and their rooms stay kept."""
+            stuck = [obj for obj in installed_here if not finder.take_out(obj)]
             with finder._lock:
                 finder.by_chain.clear()
                 finder.by_chain.update(by_chain0)
-            session.reserved_rooms = rooms0
+            session.reserved_rooms = rooms0 + ah.reserved_rooms(stuck)
+            return stuck
 
         def work():
             try:
-                results, learned, notes = self._learn_parts(parts, ids, pointer_scan, cancel)
-                states = self._install_parts(results, cancel, installed_here)
-            except ConnectionLost:
-                rollback()
+                results, learned, notes = self._learn_parts(parts, ids, pointer_scan, cancel, seeds)
+                states = self._install_parts(
+                    results, cancel, installed_here, {o.id for o, _ in seeds}, notes
+                )
+            except BaseException as exc:  # whatever went wrong, nothing stays changed
+                stuck = rollback()
+                if isinstance(exc, CheatMakerError) and not isinstance(exc, ConnectionLost):
+                    at = min(max(self._part_k, 1), n)
+                    part = parts[at - 1].part or "?"
+                    raise PartFailed(part, at, n, _reason(exc), bool(stuck)) from exc
                 raise
-            except CheatMakerError as exc:
-                rollback()
-                at = min(max(self._part_k, 1), n)
-                raise PartFailed(parts[at - 1].part or "?", at, n, _reason(exc)) from exc
             return results, learned, notes, states
 
         self._part_k = 0
         self.ctl.tasks.run(work, self._done_parts, self._failed_parts)
+
+    def _seed_objects(self) -> list[tuple[pj.ObjectSpec, int]]:
+        """The cheat's learned parts' objects (copies) and where they start now, so a
+        part found in one of them joins it. Copies: the notes change only on success."""
+        seeds = []
+        for obj_id in self.cheat.objects:
+            tracker = self.ctl.live.trackers.get(obj_id)
+            if tracker is None or tracker.address is None or tracker.obj.vtable is None:
+                continue
+            seeds.append((pj.ObjectSpec.from_json(tracker.obj.to_json()), tracker.address))
+        return seeds
 
     def _learn_parts(
         self,
@@ -966,15 +1007,17 @@ class LearnDialog(QDialog):
         ids: list[str],
         pointer_scan: bool,
         cancel: threading.Event,
+        seeds: list[tuple[pj.ObjectSpec, int]],
     ) -> tuple[list[PartLearned], list[rf.Learned], list[str]]:
         """Learn each part in turn (one watchpoint at a time). A part in the same object
-        as an earlier one (same start, same class) joins that object: one hook."""
+        (same start, same class) as an earlier part or as one of ``seeds`` joins that
+        object: two fields, one hook."""
         session, n = self.ctl.session, len(parts)
         rooms0 = list(session.reserved_rooms)
         results: list[PartLearned] = []
         learned_all: list[rf.Learned] = []
         notes: list[str] = []
-        objs: list[tuple[pj.ObjectSpec, int]] = []  # distinct objects and their start
+        objs: list[tuple[pj.ObjectSpec, int]] = list(seeds)  # distinct objects, start
         for k, loc in enumerate(parts, 1):
             self._part_k = k
             if cancel.is_set():
@@ -1005,8 +1048,7 @@ class LearnDialog(QDialog):
                 None,
             )
             if same is not None:  # two fields, one hook
-                same.fields.append(fld)
-                same.anchors += learned.obj.anchors_of(pj.ChainAnchor)
+                _join(same, learned.obj, fld)
                 obj = same
                 log.info("action=learn object=%s part=%s same object", obj.id, loc.part)
             else:
@@ -1025,18 +1067,22 @@ class LearnDialog(QDialog):
         results: list[PartLearned],
         cancel: threading.Event,
         installed_here: list[pj.ObjectSpec],
+        existing: set[str],
+        notes: list[str],
     ) -> list[str]:
         """Put in each new object's hook (or note its memory path), like a single
-        cheat. Returns the install states."""
+        cheat. Objects already in the notes (``existing``) are left as they are. A hook
+        that can't go in is added to ``notes``. Returns the install states."""
         session, finder = self.ctl.session, self.finder
         pid = session.require_game().pid
         states: list[str] = []
-        seen: set[str] = set()
-        for r in results:
+        seen: set[str] = set(existing)
+        for k, r in enumerate(results, 1):
             obj = r.obj
             if obj.id in seen:
                 continue
             seen.add(obj.id)
+            self._part_k = k  # a failure now names the part whose hook goes in
             if cancel.is_set():
                 raise ScanCancelled("Find it next time was cancelled")
             if obj.anchors_of(pj.ChainAnchor):
@@ -1050,12 +1096,11 @@ class LearnDialog(QDialog):
                 state = ah.install(session, obj)
             except CheatMakerError as exc:
                 log.warning("action=hook_install object=%s reason=%s", obj.id, exc)
+                notes.append(str(exc))
             finder.note_install(obj, state, pid)
             if finder.is_ours(obj.id, pid):
                 installed_here.append(obj)
             states.append(state)
-        if cancel.is_set():
-            raise ScanCancelled("Find it next time was cancelled")
         return states
 
     def _done_parts(self, result) -> None:

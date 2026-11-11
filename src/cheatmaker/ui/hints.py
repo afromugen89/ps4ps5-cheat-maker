@@ -161,6 +161,10 @@ READY_PART = {
 READY_PARTS = "Ready: {parts}."
 LEARN_PART_FAILED = "Couldn't learn {part} (part {k} of {n}): {reason} Nothing was changed."
 LEARN_PART_CANCELLED = "you pressed Cancel."
+LEARN_PART_STUCK = (
+    "Couldn't learn {part} (part {k} of {n}): {reason} A hook couldn't be taken out of "
+    "the game's code, so close the game before you play on."
+)
 COMBINED_FOUND = "Ready: {name} found again ({parts}, {secs:.1f} s). Tick it to use it."
 PART_COUNT = {True: "{n} part", False: "{n} parts"}  # keyed by "just one"
 COMBINE_NEEDS_NOTES = (

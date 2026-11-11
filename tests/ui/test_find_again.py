@@ -994,3 +994,104 @@ def test_renaming_a_combined_cheat_is_kept(win, console):  # QA risk: name is in
     win.cheats.table.selectRow(0)
     win.cheats.delete_btn.click()
     assert pj.load(pj.project_path(fg.TITLE, fg.VERSION)).cheats == []
+
+
+def test_a_failed_learn_leaves_an_already_learned_object_untouched(win, console):  # review 2
+    connect(win)
+    game = console.game
+    learn(win, add_health_cheat(win, game))
+    session_part(win, "fraction", fraction_in_player(game), ValueType.INT32, 77)
+    nowhere = fg.HEAP + 0xE000
+    game.fake.poke(fg.PID, nowhere, struct.pack("<i", 5))
+    session_part(win, "ammo", nowhere, ValueType.INT32, 5)
+    win.ctl.cheats_changed.emit()
+    c = combine_all(win)
+    dlg = learn(win, c)
+    assert dlg.hint.text().startswith("Couldn't learn ammo (part 2 of 2)")
+    [obj] = win.ctl.project.objects
+    assert [f.name for f in obj.fields] == ["Infinite Health"], "the notes are as before"
+    assert [f.name for f in win.ctl.live.trackers["obj1"].obj.fields] == ["Infinite Health"]
+    assert pj.load(pj.project_path(fg.TITLE, fg.VERSION)).objects[0].fields == obj.fields
+
+
+def test_an_unexpected_error_while_hooking_takes_the_hooks_out(win, console, monkeypatch):
+    connect(win)  # review 3
+    c = two_moving(win, console.game, money_in_enemy, ValueType.INT64)
+    real, calls = ah.install, []
+
+    def second_breaks(session, obj):
+        calls.append(obj.id)
+        if len(calls) == 2:
+            raise RuntimeError("garbage from the console")
+        return real(session, obj)
+
+    monkeypatch.setattr(ah, "install", second_breaks)
+    rooms = list(win.ctl.session.reserved_rooms)
+    learn(win, c)
+    fake = console.game.fake
+    assert fake.peek(fg.PID, fg.READER, 10) == fg.VMOVSS_R
+    assert win.cheats.finder.installed == {} and win.ctl.session.reserved_rooms == rooms
+    assert len(c.moving_parts) == 2
+
+
+def test_a_hook_that_cant_come_out_is_kept_and_said(win, console, monkeypatch):  # review 4
+    from cheatmaker.errors import ReadFailed
+
+    connect(win)
+    c = two_moving(win, console.game, money_in_enemy, ValueType.INT64)
+    dlg = LearnDialog(win.ctl, win.cheats.finder, c, win)
+    real = ah.install
+
+    def install_then_cancel(session, obj):
+        state = real(session, obj)
+        dlg.do_cancel()
+        return state
+
+    def remove_fails(*a, **k):
+        raise ReadFailed("the PS5 stopped answering")
+
+    monkeypatch.setattr(ah, "install", install_then_cancel)
+    monkeypatch.setattr(ah, "remove", remove_fails)
+    dlg.start_btn.click()
+    assert dlg.hint.text() == hints.LEARN_PART_STUCK.format(
+        part="fraction", k=2, n=2, reason=hints.LEARN_PART_CANCELLED
+    )
+    assert "Nothing was changed" not in dlg.hint.text()
+    [stuck] = win.cheats.finder.installed.values()
+    assert stuck.id == "obj1", "still ours: it comes out on close"
+    for room in ah.reserved_rooms([stuck]):
+        assert room in win.ctl.session.reserved_rooms, "its rooms stay kept"
+
+
+def test_a_hook_that_cant_go_in_is_said(win, console, monkeypatch):  # review 5
+    from cheatmaker.errors import LockFailed
+
+    connect(win)
+    c = two_moving(win, console.game, money_in_enemy, ValueType.INT64)
+    real = ah.install
+
+    def second_refused(session, obj):
+        if obj.id == "obj2":
+            raise LockFailed("Something else already changed that game code.")
+        return real(session, obj)
+
+    monkeypatch.setattr(ah, "install", second_refused)
+    dlg = learn(win, c)
+    assert dlg.hint.text().startswith("Ready: ")
+    assert "(Something else already changed that game code.)" in dlg.hint.text()
+
+
+def test_learning_a_ticked_cheat_puts_its_fixed_bytes_back(win, console):  # review 10
+    connect(win)
+    game = console.game
+    a = session_part(win, "health", game.health_addr, ValueType.FLOAT, 999.0)
+    b = session_part(win, "fraction", fraction_in_player(game), ValueType.INT32, 77)
+    god = Cheat(
+        "god", [Location(LocationKind.MODULE_VALUE, fg.DATA - fg.BASE + 0x80, b"\x01", b"\x00")]
+    )
+    win.ctl.cheat_file.cheats[:] = [combine([a, b, god], name="Health")]
+    win.ctl.cheats_changed.emit()
+    tick(win)
+    assert game.fake.peek(fg.PID, fg.DATA + 0x80, 1) == b"\x01"
+    learn(win, win.ctl.cheat_file.cheats[0])
+    assert game.fake.peek(fg.PID, fg.DATA + 0x80, 1) == b"\x00"
