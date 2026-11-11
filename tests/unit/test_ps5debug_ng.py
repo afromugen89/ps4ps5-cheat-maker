@@ -621,6 +621,43 @@ def test_watch_writes(client, server):
     assert client.version() == "1.3"
 
 
+def test_watch_until_ends_after_a_hit(client, server):
+    server.watch_rips = [0x400102, 0x400102, 0x400102]
+    asked = []
+
+    def until(hits, elapsed):
+        asked.append((len(hits), elapsed))
+        return len(hits) >= 1
+
+    rips = client.watch_writes(PID, HEALTH_ADDR, 4, timeout_s=5.0, until=until)
+    assert rips == [0x400102] and asked[0][0] == 1 and asked[0][1] >= 0
+    assert server.commands.count(Cmd.DEBUG_CONTINUE) == 1, "the trapped game runs on"
+    assert server.watchpoints[-1] == (0, 0, 0, 0, 0) and Cmd.DEBUG_DETACH in server.commands
+
+
+def test_watch_until_is_asked_while_nothing_happens(client, server):
+    import time
+
+    seen = []
+    t0 = time.monotonic()
+    hits = client.watch(
+        PID, HEALTH_ADDR, 4, "write", 10.0, until=lambda h, el: seen.append(el) or True
+    )
+    assert hits == [] and len(seen) == 1 and time.monotonic() - t0 < 5, "cancelled early"
+    assert server.watchpoints[-1] == (0, 0, 0, 0, 0)
+
+
+def test_watch_until_error_still_clears_the_watchpoint(client, server):
+    server.watch_rips = [0x400102]
+
+    def until(_hits, _elapsed):
+        raise RuntimeError("boom")
+
+    with pytest.raises(RuntimeError):
+        client.watch(PID, HEALTH_ADDR, 4, "write", 3.0, until=until)
+    assert server.watchpoints[-1] == (0, 0, 0, 0, 0) and Cmd.DEBUG_DETACH in server.commands
+
+
 def test_watch_rejects_odd_size(client):
     with pytest.raises(ValueError):
         client.watch_writes(PID, HEAP_BASE, 3, 1)

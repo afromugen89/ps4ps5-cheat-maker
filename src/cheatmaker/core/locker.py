@@ -13,6 +13,7 @@ from dataclasses import dataclass, replace
 
 import iced_x86 as ix
 
+from cheatmaker.console.client import WatchUntil
 from cheatmaker.core.cheats import Cheat, Location, LocationKind
 from cheatmaker.core.session import Session
 from cheatmaker.errors import LockFailed, ReadFailed
@@ -270,15 +271,21 @@ class _CodeCache:
 
 
 def find_writers(
-    session: Session, address: int, size: int, timeout_s: float = 30.0
+    session: Session,
+    address: int,
+    size: int,
+    timeout_s: float = 30.0,
+    *,
+    until: WatchUntil | None = None,
 ) -> list[Writer]:
     """Watch ``address`` while the player makes the value change. Most hits first.
+    ``until`` can end the watch early (see ``ConsoleClient.watch``).
 
     A writer whose flags the game reads right after it (``sub ... ; jle``) is marked
     unsafe: switching it off leaves that branch looking at stale flags."""
     client = session.require_client()
     game = session.require_game()
-    rips = client.watch_writes(game.pid, address, size, timeout_s)
+    rips = client.watch_writes(game.pid, address, size, timeout_s, until=until)
     log.info("action=lock_watch address=%#x rips=%d", address, len(rips))
     if not rips:
         raise LockFailed("nothing changed the value while we were watching")

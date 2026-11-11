@@ -30,6 +30,7 @@ from cheatmaker.console.client import (
     ScanHit,
     WatchHit,
     WatchKind,
+    WatchUntil,
 )
 from cheatmaker.console.local_scan import (
     LocalScanSession,
@@ -1408,15 +1409,31 @@ class Ps5DebugNgClient:
         self._scan_ranges_list = []
 
     # -- watchpoints ("Lock it", "Find it next time") -------------------------
-    def watch_writes(self, pid: int, addr: int, size: int, timeout_s: float) -> list[int]:
-        return [h.rip for h in self.watch(pid, addr, size, "write", timeout_s)]
+    def watch_writes(
+        self,
+        pid: int,
+        addr: int,
+        size: int,
+        timeout_s: float,
+        *,
+        until: WatchUntil | None = None,
+    ) -> list[int]:
+        return [h.rip for h in self.watch(pid, addr, size, "write", timeout_s, until=until)]
 
     def watch(
-        self, pid: int, addr: int, size: int, kind: WatchKind, timeout_s: float
+        self,
+        pid: int,
+        addr: int,
+        size: int,
+        kind: WatchKind,
+        timeout_s: float,
+        *,
+        until: WatchUntil | None = None,
     ) -> list[WatchHit]:
         """Hardware watchpoint (DR0). The PS5 dials back to us on port 755 with one
         0x4A0-byte packet per trap. ``access`` (breaktype 3, read-write) is from
-        PROTOCOL.md §7.3 and is UNVERIFIED on the console until test C10a."""
+        PROTOCOL.md §7.3 and is UNVERIFIED on the console until test C10a.
+        ``until`` is asked after each hit and each idle half second."""
         if size not in _DR7_LEN:
             raise ValueError(f"can't watch {size} bytes")
         if kind not in _DR7_KIND:
@@ -1449,15 +1466,20 @@ class Ps5DebugNgClient:
                     struct.pack("<IIIIQ", 0, 1, _DR7_LEN[size], _DR7_KIND[kind], addr),
                 )
                 self._w.ok("set watchpoint")
-            deadline = time.monotonic() + timeout_s
+            started = time.monotonic()
+            deadline = started + timeout_s
             while len(found) < MAX_WATCH_HITS and (left := deadline - time.monotonic()) > 0:
                 try:
                     found.append(hits.get(timeout=min(left, 0.5)))
                 except queue.Empty:
+                    if until is not None and until(list(found), time.monotonic() - started):
+                        break
                     continue
                 with self._lock:  # the game is stopped at the trap; let it run on
                     self._w.request(Cmd.DEBUG_CONTINUE, struct.pack("<I", 0))
                     self._w.ok("continue")
+                if until is not None and until(list(found), time.monotonic() - started):
+                    break
         finally:
             stop.set()
             try:

@@ -222,3 +222,10 @@ def test_find_writers_keeps_safe_and_earlier_reasons(session, fake):
     fake.writers[HEALTH_ADDR] = [WRITER_ADDR + 4]
     [w] = find_writers(session, HEALTH_ADDR, 4, 1)
     assert "atomic" in w.unsafe and w.flags.used
+
+
+def test_find_writers_passes_until_to_the_watch(session, fake):
+    asked = []
+    [w] = find_writers(session, HEALTH_ADDR, 4, 1, until=lambda h, t: asked.append(h) or True)
+    assert w.address == WRITER_ADDR and len(asked) == 1 and len(asked[0]) == 2
+    assert fake.until_answers == [True]
