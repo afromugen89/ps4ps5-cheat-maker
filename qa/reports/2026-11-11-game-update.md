@@ -329,3 +329,168 @@ One issue per bug, label `bug`. Titles:
 7. BUG-07: Update for this version drops a moved cheat when another cheat has the same name and fails
 8. BUG-08: The field shift can put a field before the start of the object
 9. BUG-09: A slot-check reason shows as a capitalised sentence inside the summary brackets
+
+## Re-test after fixes (2026-11-11, `claude/project-thread-jhmjbm` @ `7a6a4da`)
+
+Environment: Linux 6.18 x86_64, Python 3.13.18, PySide6 6.12.0 (offscreen), pytest 9 +
+pytest-qt, unicorn installed (so `tests/qa/test_capture_emulated.py` runs; its 24 skips are
+its own by-design "no filter" cases).
+
+### Product owner summary (re-test)
+
+All nine bugs from the first round are fixed and verified; their tests pass without the
+xfail marker. Both judgement calls hold up:
+- TC-23: with the value not confirmed yet, the moved "No death" is still kept. Only the PC-off
+  line waits for the Yes, and it says why ("confirm Health in My cheats first, then update
+  again"). See TC-28.
+- BUG-06: only a value that a failed bring-over left behind is replaced. A value that is
+  still waiting to be seen, or the player's own value, is kept as it is (TC-33, TC-17), and
+  the player's new cheat on the lost value stays on it (TC-32).
+
+The exploratory pass on the review-fix areas found 4 new bugs (0 Critical, 0 High, 1 Medium,
+3 Low). None of them writes to the game without a Yes.
+- BUG-11 (Medium): Advanced reports a cheat as brought over, but it never shows in My cheats.
+  This happens when the cheat's value is already in the new notes without that cheat's field.
+  It is a side effect of the BUG-03 fix.
+- BUG-10 (Low): the console-test tool `make_old_notes` stops half-way when the fingerprints
+  file is broken. Both `--undo` and a new dry run then refuse, so the files have to be fixed
+  by hand.
+- BUG-12 (Low): Advanced can give two values the same id when the old notes hold two values
+  with one name and the new notes hold a lost one.
+- BUG-13 (Low): the new `action=carry_fields` log line always says `shift=0`.
+
+Release recommendation: **Ready with known issues**. BUG-11 should be fixed before Advanced
+is used on notes that the player has already extended.
+
+### Results
+
+| TC-ID | Title | Priority | Result | Notes |
+|---|---|---|---|---|
+| TC-02 | Odd version text never crashes | Low | Pass | BUG-01 fixed |
+| TC-12 | Bring-over read holds the one-code-read slot | Medium | Pass | BUG-02 fixed |
+| TC-13 | Advanced waits while another code read runs | Medium | Pass | BUG-02 fixed (CARRY_WAIT) |
+| TC-15 | Merge keeps new-named cheats on values already here | Medium | Pass | BUG-03 fixed (but see BUG-11) |
+| TC-16 | Merged value's question names its own version | Low | Pass | BUG-04 fixed |
+| TC-18 | C21e pass line matches Cancel during the slot check | Medium | Pass | BUG-05 fixed (doc now says no `hook_install`) |
+| TC-22 | Advanced repeats a failed bring-over | Medium | Pass | BUG-06 fixed |
+| TC-23 | AC-U9 keeps a moved cheat whose name repeats | Medium | Pass | BUG-07 fixed; test now confirms the value first (review m9) |
+| TC-24 | Field shift never gives a negative offset | Medium | Pass | BUG-08 fixed |
+| TC-25 | Slot-check reason reads as part of the summary | Low | Pass | BUG-09 fixed |
+| TC-28 | AC-U9 with the value not confirmed: twin kept, PC-off waits | Medium | Pass | the TC-23 judgement call holds |
+| TC-29 | New reasons and "search for it" are plain words | Low | Pass | |
+| TC-30 | Plan / install errors give short reasons and are logged | Low | Pass | `step=plan` NO_ROOM, `step=install` NOT_PUT_IN; no jump left |
+| TC-31 | Field moved before the object: the value fails, no hook | Medium | Pass | |
+| TC-32 | Advanced again keeps the player's new cheat on the lost value | Medium | Pass | |
+| TC-33 | Advanced never replaces a value still waiting to be seen | Medium | Pass | |
+| TC-34 | Code read given back on a read error, a dropped link, a game restart | Medium | Pass | 3 cases |
+| TC-35 | Cancel during a pick ends the run | High | Pass | offer back, no jump, no file |
+| TC-36 | Link drops during a pick | Medium | Pass | no crash |
+| TC-37 | make_old_notes: dry run, real bring-over, `--undo` byte for byte | High | Pass | `.carried` kept; a second `--undo` is refused |
+| TC-38 | make_old_notes never stops half-way | Low | **Fail** | BUG-10 |
+| TC-39 | Merge onto a value without the cheat's field | Medium | **Fail** | BUG-11 |
+| TC-40 | Merge keeps object ids unique with repeated names | Low | **Fail** | BUG-12 |
+| TC-41 | `carry_fields` log line names the real shift | Low | **Fail** | BUG-13 |
+| TC-27 | Regression: full suite | High | Pass | `2314 passed, 24 skipped, 4 xfailed` |
+
+Other review-fix areas checked by reading the code and running the existing tests:
+- A rollback during a pick returns quietly (`self.run is not run`), and so does a hook that goes
+  in after a rollback.
+- A placed hook that hasn't been seen yet keeps its hook and its class (`settle(placed=True)`).
+
+### New bugs
+
+### BUG-10: make_old_notes stops half-way on an unreadable fingerprints file
+- Severity: Low (tester tool, console tests C21b-g)
+- Priority: P3
+- Related test case: TC-38 | Automated test: `tests/qa/test_game_update_qa.py::test_tc38_make_old_notes_never_stops_half_way`
+- Environment: 7a6a4da, Linux, Python 3.13.18
+- Steps to reproduce:
+  1. Notes for PPSA01285 03.000.005, and real notes for 03.000.004.
+  2. `signatures/PPSA01285_03.000.005.json` contains `{` (broken).
+  3. `python tools/make_old_notes.py PPSA01285 03.000.005 03.000.004`.
+  4. Then run it with `--undo`, and then run the dry run again.
+- Expected result: either "Nothing was changed: ..." with every file as it was, or a
+  finished dry run that `--undo` puts back. The tool's docstring says a mistake never touches
+  real notes.
+- Actual result: a `json.decoder.JSONDecodeError` traceback. By then the real 03.000.004 notes
+  are set aside as `.keep` and a copy marked 03.000.004 is in their place, but no record was
+  written. `--undo` then says "No dry run was made"; a new dry run says "...cmproj.keep
+  already exists: run with --undo first".
+- Evidence: listing after the crash: `PPSA01285_03.000.004.cmproj`,
+  `PPSA01285_03.000.004.cmproj.keep`, `PPSA01285_03.000.005.cmproj`, with no
+  `_make_old_notes.json`.
+- Suspected cause: `tools/make_old_notes.py` `forward()`. Files are moved before
+  `_copy_as(cur_sigs, ...)` reads the fingerprints, and the record is written last. Read and
+  check both files (as dicts) before anything moves, or write the record first.
+- Impact for the product owner: a tester running C21 with a damaged fingerprints file has to
+  rename files by hand to get their real notes back.
+
+### BUG-11: Advanced counts a cheat as brought over onto a value that lacks its field
+- Severity: Medium
+- Priority: P2
+- Related test case: TC-39 | Automated test: `test_tc39_merge_onto_a_value_without_the_cheats_field`
+- Steps to reproduce:
+  1. Old notes (03.000.005): Health with the fields Health and Health 32, and the cheat
+     "HP32 max" (set 5000 on Health 32).
+  2. New notes (03.001.000): Health with only the field Health.
+  3. Advanced, then pick 03.000.005.
+- Expected result: AC-U7 adds cheats with new names. The cheat comes over usable (the
+  field is added), or it is named under "Not brought over".
+- Actual result: "Brought over 2 of 2 cheats for version 03.001.000. Check them: Rich." The
+  saved notes hold `('HP32 max', 'obj1', 'Health 32')`, but obj1 has only `['Health']`. My
+  cheats shows `['Infinite health', 'Rich']`, so HP32 max is invisible and the summary
+  counted it.
+- Suspected cause: `core/carry.py` `for_merge` (`ids[o.id] = mine.id`). The cheat is remapped
+  to the value with the same label without checking that the value has the cheat's field (or
+  part fields). `assemble(have=...)` then counts it as carried.
+- Impact for the product owner: a cheat the summary says was brought over is missing from My
+  cheats.
+
+### BUG-12: Advanced gives two values one id when names repeat and one is lost
+- Severity: Low
+- Priority: P3
+- Related test case: TC-40 | Automated test: `test_tc40_merge_keeps_object_ids_unique_with_repeated_names`
+- Steps to reproduce: `for_merge(source, into)` where the source holds two objects labelled
+  "Ammo" (obj1, obj2), and `into` holds a lost "Ammo" (obj1, `check`, no anchors).
+- Expected result: the ids in the merged project are unique.
+- Actual result: `['obj1', 'obj1']`. Both old values take the lost value's id.
+  `adopt_carried` keeps only one of them, and the run's `found` dict mixes them up.
+- Suspected cause: `core/carry.py` `for_merge`. `new_id = mine.id` is reused for every
+  source object with that label. Only the first should replace the lost value; the rest
+  should get fresh ids. (Matching by label alone also maps a second same-label value's
+  cheats onto the first, which is the same class of problem as BUG-11.)
+- Impact for the product owner: rare (it needs two cheats with the same name), but one of
+  the values brought again silently disappears.
+
+### BUG-13: the carry_fields log line always says shift=0
+- Severity: Low
+- Priority: P3
+- Related test case: TC-41 | Automated test: `test_tc41_the_field_log_line_names_the_real_shift`
+- Steps to reproduce: run the TC-24 setup (`field_shift=-0x20`, a field at +8).
+- Expected result: `action=carry_fields object=obj1 shift=-32 result=failed fields=Ident`
+- Actual result: `action=carry_fields object=obj1 shift=0 result=failed fields=Ident`
+- Suspected cause: `core/carry.py` `prepare`. `it.site = None` is set before the log call,
+  and `Item.shift` is 0 without a site. Log the shift before clearing the site.
+- Impact for the product owner: the console log a tester reads to see how far a value moved
+  shows the wrong number.
+
+### Observations (not filed)
+- On a game restart or a dropped link, `_rollback` gives the code read back at once. The
+  prepare worker may still be reading until it sees the cancel, so in that short window a
+  second read could start. Not reproducible with the synchronous task runner, and the window
+  is one read chunk.
+- `update_with_hooks` reports by name. When two cheats are both called "No death" and one
+  moves, the name appears in both `moved` and `failed`.
+
+### Automated tests added (re-test)
+
+These were added to `tests/qa/test_game_update_qa.py`:
+- TC-28 to TC-37: regression tests for the fixes and the review-fix areas (all pass).
+- TC-38 to TC-41: strict xfails for BUG-10 to BUG-13.
+
+The first round's 9 bug tests now pass without markers. Results:
+- File: `39 passed, 4 xfailed`.
+- Full suite: `2314 passed, 24 skipped, 4 xfailed in 58.12s`.
+- `ruff check` and `ruff format --check` are clean on the file.
+
+GitHub issues: none created (re-test instructions: commit only).
