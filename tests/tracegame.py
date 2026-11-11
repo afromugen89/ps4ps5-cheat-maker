@@ -64,6 +64,7 @@ class Routine:
     regs: dict[str, int]
     insns: list[ix.Instruction] = field(default_factory=list, repr=False)
     runs: int = 0
+    trap_regs: dict[str, int] = field(default_factory=dict)  # what the console gets wrong
 
     @property
     def writer_end(self) -> int:
@@ -163,15 +164,18 @@ class TraceGame:
         regs: dict[str, int],
         writer: int | None = None,
         writer_ip: int | None = None,
+        trap_regs: dict[str, int] | None = None,
     ) -> Routine:
         """Place code and run it before every read. The traps recorded are those of
         instruction number ``writer`` (default the last one), or of the instruction at
-        ``writer_ip`` (one in a callee placed with ``code``)."""
+        ``writer_ip`` (one in a callee placed with ``code``). ``trap_regs`` replace
+        registers in the recorded traps (a console that reports them wrong)."""
         start = self.code(*insns)
         decoded = list(ix.Decoder(64, self.fake.peek(PID, start, SLOT), ip=start))
         decoded = decoded[: len(insns)]
         w = decoded[-1 if writer is None else writer].ip if writer_ip is None else writer_ip
         r = Routine(start, decoded[-1].next_ip, w, dict(regs), decoded)
+        r.trap_regs = dict(trap_regs or {})
         self.routines.append(r)
         self._run(r)
         return r
@@ -213,7 +217,7 @@ class TraceGame:
             store = _store(cpu, insn)
             cpu.step()
             if ip == r.writer and store is not None:
-                self.record(*store, WatchHit(cpu.rip, _regs(cpu)))
+                self.record(*store, WatchHit(cpu.rip, _regs(cpu) | r.trap_regs))
         r.runs += 1
 
     def record(self, addr: int, size: int, hit: WatchHit) -> None:
