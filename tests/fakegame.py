@@ -10,6 +10,11 @@ holds a ``jmp`` into a routine, it decodes the routine and does what it says for
 object the instruction touches (filter, store into the slot, bump the counter,
 optional keep-value store). So the tests check the encoded bytes, not a stub.
 
+A ``Layout`` is one game version: ``V1`` is today's game (the module constants are its
+values), ``V2`` the version after an update, whose code moved 0x80 bytes and whose
+health fields moved 8 bytes inside every object (the hooked instruction now reads
+``[r12+2B4h]``), with its classes elsewhere (spec-game-update AC-U11).
+
 ``Game.hit`` is the game taking damage: it runs one writer (``FORMS``: a decimal, a
 whole number written by ``sub [rax+2B0h],ecx ; jle``, an 8-byte whole number) on
 tests/minicpu.py, instruction by instruction, starting at the game's own code. If a
@@ -21,6 +26,7 @@ from __future__ import annotations
 
 import struct
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import iced_x86 as ix
@@ -56,6 +62,7 @@ SUB_W = bytes.fromhex("2988B0020000")
 JLE_DEAD = bytes.fromhex("7E02")  # jle +2: to the "dead" code
 MOV64_SITE = BASE + 0x400  # mov [rbx+2B8h],rcx
 MOV64_W = bytes.fromhex("48898BB8020000")
+STATIC_VALUE = 4321  # "Obolites": a whole number at a fixed place in the module's data
 STACK = 0x7FFF_0000
 STACK_SIZE = 0x4000
 RSP = STACK + 0x3000
@@ -100,6 +107,98 @@ GAME_REGS = {  # what the game's other registers hold when it writes (any values
     "xmm2": 0x2222,
 }
 
+
+def _with_disp(code: bytes, disp: int) -> bytes:
+    """``code`` whose trailing 4 bytes (a disp32 field number) are ``disp``."""
+    return code[:-4] + struct.pack("<i", disp)
+
+
+READER_OTHER_REG = bytes.fromhex("C4C17A108426")  # vmovss xmm0,[r14+disp32] (same length)
+
+
+@dataclass(frozen=True)
+class Layout:
+    """One version of the game's module. ``code_shift``: where the four instructions
+    sit; ``field_shift``: where HP, HP32, HP64 sit in every object (the ident at +8
+    never moves); ``vt_shift``: where the classes sit; ``static_off``: address of the
+    int32 Obolites in module data; ``chain_root``: the pointer-chain root; ``changed``:
+    the reader uses another base register (r14, not r12)."""
+
+    version: str
+    code_shift: int = 0
+    field_shift: int = 0
+    vt_shift: int = 0
+    static_off: int = DATA + 0x40
+    chain_root: int = STATIC_PTR
+    changed: bool = False
+
+    @property
+    def writer(self) -> int:
+        return WRITER + self.code_shift
+
+    @property
+    def reader(self) -> int:
+        return READER + self.code_shift
+
+    @property
+    def sub_site(self) -> int:
+        return SUB_SITE + self.code_shift
+
+    @property
+    def mov64_site(self) -> int:
+        return MOV64_SITE + self.code_shift
+
+    @property
+    def hp(self) -> int:
+        return HP + self.field_shift
+
+    @property
+    def hp32(self) -> int:
+        return HP32 + self.field_shift
+
+    @property
+    def hp64(self) -> int:
+        return HP64 + self.field_shift
+
+    @property
+    def player_vt(self) -> int:
+        return PLAYER_VT + self.vt_shift
+
+    @property
+    def enemy_vt(self) -> int:
+        return ENEMY_VT + self.vt_shift
+
+    @property
+    def vmovss_w(self) -> bytes:
+        return _with_disp(VMOVSS_W, self.hp)
+
+    @property
+    def vmovss_r(self) -> bytes:
+        head = READER_OTHER_REG if self.changed else VMOVSS_R[:-4]
+        return head + struct.pack("<i", self.hp)
+
+    @property
+    def sub_w(self) -> bytes:
+        return _with_disp(SUB_W, self.hp32)
+
+    @property
+    def mov64_w(self) -> bytes:
+        return _with_disp(MOV64_W, self.hp64)
+
+    @property
+    def forms(self) -> dict[str, Form]:
+        return {
+            "float": Form(self.writer, self.vmovss_w, "r12", "xmm1", ValueType.FLOAT, self.hp),
+            "int32": Form(
+                self.sub_site, self.sub_w, "rax", "ecx", ValueType.INT32, self.hp32, "sub"
+            ),
+            "int64": Form(self.mov64_site, self.mov64_w, "rbx", "rcx", ValueType.INT64, self.hp64),
+        }
+
+
+V1 = Layout(VERSION)
+V2 = Layout("03.001.000", code_shift=0x80, field_shift=8, vt_shift=0x40)
+
 PLAYER_AT = {1: HEAP + 0x100, 2: HEAP + 0x4400, 3: HEAP + 0x8800}
 ENEMIES_AT = {1: (HEAP + 0x800, HEAP + 0xC00), 2: (HEAP + 0x1000, HEAP + 0x5000), 3: ()}
 
@@ -115,30 +214,31 @@ class Game:
     capture_ticks: bool = True  # run_routines before each read (capture routines only)
     script: deque[tuple[int, float | int, str]] = field(default_factory=deque)
     last_cpu: Cpu | None = None  # the CPU after the last hit (registers, flags)
+    layout: Layout = V1
 
     @property
     def health_addr(self) -> int:
-        return self.player + HP
+        return self.player + self.layout.hp
 
     def health(self) -> float:
         return struct.unpack("<f", self.fake.peek(PID, self.health_addr, 4))[0]
 
     def set_health(self, v: float, obj: int | None = None) -> None:
-        self.fake.poke(PID, (obj or self.player) + HP, struct.pack("<f", v))
+        self.fake.poke(PID, (obj or self.player) + self.layout.hp, struct.pack("<f", v))
 
     def value(self, obj: int, form: str = "float") -> float | int:
-        f = FORMS[form]
+        f = self.layout.forms[form]
         return f.vtype.decode(self.fake.peek(PID, obj + f.offset, f.vtype.size))
 
     def set_value(self, obj: int, v: float | int, form: str = "float") -> None:
-        f = FORMS[form]
+        f = self.layout.forms[form]
         self.fake.poke(PID, obj + f.offset, f.vtype.encode(v))
 
     def hit(self, obj: int, new: float | int, form: str = "float", rflags: int = 0x202) -> Cpu:
         """The game writes ``new`` into ``obj`` with the ``form`` writer, starting at its
         own code (so through our hook if one is there). Returns the CPU just after
         the writer: its registers and flags are what the game's next code sees."""
-        f = FORMS[form]
+        f = self.layout.forms[form]
         cpu = Cpu(_GameMemory(self.fake), rflags=rflags)
         for name, v in GAME_REGS.items():
             cpu[name] = v
@@ -161,6 +261,21 @@ class Game:
         if self.script:
             self.hit(*self.script.popleft())
 
+    def fight(self, rounds: int = 1) -> Callable[[float], None]:
+        """A ``sleep`` for ``cv.collect_objects``: each of the first ``rounds`` calls
+        hits the player and every enemy once through the game's writer (so through a
+        hook there), each losing 1 health; later calls do nothing."""
+        left = [rounds]
+
+        def sleep(_seconds: float) -> None:
+            if left[0] <= 0:
+                return
+            left[0] -= 1
+            for obj in (self.player, *self.enemies):
+                self.hit(obj, float(self.value(obj)) - 1.0)
+
+        return sleep
+
     def move_player(self, new: int) -> None:
         """A new biome: the player object is rebuilt elsewhere, the old one freed."""
         old = self.player
@@ -170,13 +285,13 @@ class Game:
         self.player = new
 
 
-def _object(vt: int, ident: int, hp: float) -> bytes:
+def _object(vt: int, ident: int, hp: float, layout: Layout = V1) -> bytes:
     obj = bytearray(0x300)
     obj[0:8] = struct.pack("<Q", vt)
     obj[8:12] = struct.pack("<I", ident)
-    obj[HP : HP + 4] = struct.pack("<f", hp)
-    obj[HP32 : HP32 + 4] = struct.pack("<i", int(hp))
-    obj[HP64 : HP64 + 8] = struct.pack("<q", int(hp) * 1000)
+    obj[layout.hp : layout.hp + 4] = struct.pack("<f", hp)
+    obj[layout.hp32 : layout.hp32 + 4] = struct.pack("<i", int(hp))
+    obj[layout.hp64 : layout.hp64 + 8] = struct.pack("<q", int(hp) * 1000)
     return bytes(obj)
 
 
@@ -200,42 +315,64 @@ class _GameMemory:
 
 
 def build(
-    run: int = 1, *, chain: bool = False, connect: bool = True, capture_ticks: bool = True
+    run: int = 1,
+    *,
+    chain: bool = False,
+    static: bool = False,
+    connect: bool = True,
+    capture_ticks: bool = True,
+    layout: Layout = V1,
 ) -> Game:
     """``capture_ticks=False``: only ``hit``/``play`` run hooked code (for routines
-    ``run_routines`` doesn't understand, like the builder's)."""
+    ``run_routines`` doesn't understand, like the builder's). ``static``: Obolites
+    (STATIC_VALUE) at ``layout.static_off``. ``layout``: which game version runs."""
     fake = FakeConsole()
-    fake.add_process(PID, "eboot.bin", TITLE, "Returnal", VERSION)
+    fake.add_process(PID, "eboot.bin", TITLE, "Returnal", layout.version)
     code = bytearray(b"\xcc" * 0x1000) + bytearray(CODE_SIZE - 0x1000)
-    code[0x100 : 0x100 + 10] = VMOVSS_W
-    code[0x200 : 0x200 + 10] = VMOVSS_R
-    code[0x300 : 0x300 + 11] = SUB_W + JLE_DEAD + b"\xc3\x90\xc3"  # alive: ret; dead: ret
-    code[0x400 : 0x400 + 7] = MOV64_W
+    lay = layout
+    for site, insn in (
+        (lay.writer, lay.vmovss_w),
+        (lay.reader, lay.vmovss_r),
+        (lay.sub_site, lay.sub_w + JLE_DEAD + b"\xc3\x90\xc3"),  # alive: ret; dead: ret
+        (lay.mov64_site, lay.mov64_w),
+    ):
+        code[site - BASE : site - BASE + len(insn)] = insn
     fake.add_region(PID, "executable", BASE, bytes(code), PROT_R | PROT_X)
     fake.add_region(PID, "executable", DATA, DATA_SIZE, PROT_R | PROT_W)
     fake.add_region(PID, "executable", RODATA, 0x1000, PROT_R)
     fake.add_region(PID, "[anon]", HEAP, HEAP_SIZE, PROT_R | PROT_W)
     fake.add_region(PID, "[stack]", STACK, STACK_SIZE, PROT_R | PROT_W)
     player, enemies = PLAYER_AT[run], ENEMIES_AT[run]
-    fake.poke(PID, player, _object(PLAYER_VT, 0x40048, 100.0))
+    fake.poke(PID, player, _object(lay.player_vt, 0x40048, 100.0, lay))
     for e in enemies:
-        fake.poke(PID, e, _object(ENEMY_VT, 0x30010, 250.0))
-    if chain:  # [[base+STATIC]+0x10]+HP leads to health (a "simple" game)
+        fake.poke(PID, e, _object(lay.enemy_vt, 0x30010, 250.0, lay))
+    if chain:  # [[base+root]+0x10]+HP leads to health (a "simple" game)
         holder = HEAP + 0xF000
-        fake.poke(PID, STATIC_PTR, struct.pack("<Q", holder - 0x10))
+        fake.poke(PID, lay.chain_root, struct.pack("<Q", holder - 0x10))
         fake.poke(PID, holder, struct.pack("<Q", player))
+    if static:
+        fake.poke(PID, lay.static_off, struct.pack("<i", STATIC_VALUE))
     session = Session(lambda ip, port: fake)
     if connect:
         session.connect("1.2.3.4")
         session.refresh_game()
     game = Game(
-        fake, session, run, player, tuple(enemies), [*enemies, player], capture_ticks=capture_ticks
+        fake,
+        session,
+        run,
+        player,
+        tuple(enemies),
+        [*enemies, player],
+        capture_ticks=capture_ticks,
+        layout=lay,
     )
+    after_reader = lay.reader + len(lay.vmovss_r)
+    reg = "r14" if lay.changed else "r12"
     fake.read_hits[game.health_addr] = [
-        WatchHit(READER + 10, {"r12": player, "rip": READER + 10}),
-        WatchHit(READER + 10, {"r12": player, "rip": READER + 10}),
+        WatchHit(after_reader, {reg: player, "rip": after_reader}),
+        WatchHit(after_reader, {reg: player, "rip": after_reader}),
     ]
-    fake.write_hits[game.health_addr] = [WatchHit(WRITER + 10, {"r12": player})]
+    fake.write_hits[game.health_addr] = [WatchHit(lay.writer + 10, {"r12": player})]
     fake.game_ticks.append(lambda: game.capture_ticks and run_routines(game))
     fake.game_ticks.append(game._play_tick)
     return game
@@ -252,7 +389,7 @@ def _routine(fake: FakeConsole, site: int) -> list[ix.Instruction] | None:
 
 def run_routines(game: Game) -> None:
     """Every hooked site in the game runs once for every touched object."""
-    for site in (WRITER, READER):
+    for site in (game.layout.writer, game.layout.reader):
         insns = _routine(game.fake, site)
         if insns is None:
             continue
