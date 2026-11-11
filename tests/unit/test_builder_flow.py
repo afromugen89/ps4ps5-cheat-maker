@@ -329,7 +329,7 @@ def test_close_after_a_pass_puts_everything_back():
     assert module(g) != before
     assert bl.close() is b.Rollback.RESTORED
     assert module(g) == before and bl.close() is b.Rollback.NOTHING
-    with pytest.raises(BuildFailed, match="no passed fix"):
+    with pytest.raises(ScanCancelled):  # closed: no step starts any more
         bl.finalize()
 
 
@@ -504,9 +504,144 @@ def test_alive_falls_back_to_the_process_list(monkeypatch):
     monkeypatch.setattr(g.fake, "foreground_app", unsupported)
     clock.events.extend(hits(lambda: g.hit(g.player, 50.0)))
     assert bl.try_candidate(bl.next_candidate()).result is TR.PASS
-    bl.close()
+    bl.rollback()
     real, gone = g.fake.processes, []
     clock.events.extend(hits(*[None] * 6, lambda: gone.append(1)))
     monkeypatch.setattr(g.fake, "processes", lambda: [] if gone else real())
     out = bl.try_candidate(bl.next_candidate() or b.Candidate(bl.tried[0][0].parts))
     assert out.result is TR.LOST and notes.is_crashed(fg.TITLE, fg.VERSION, 0x100, "hook")
+
+
+# -- close() on another thread (Cancel, Disconnect) -------------------------------------
+class _Blocked:
+    """Hold the first matching write of the fake console until ``go`` is set."""
+
+    def __init__(self, g, monkeypatch, when: Callable[[int, int], bool]) -> None:
+        self.inside, self.go = threading.Event(), threading.Event()
+        self.n = 0
+        real = g.fake.write
+
+        def write(pid, addr, data):
+            real(pid, addr, data)
+            self.n += 1
+            if not self.inside.is_set() and when(self.n, addr):
+                self.inside.set()
+                self.go.wait(5)
+
+        monkeypatch.setattr(g.fake, "write", write)
+
+
+def _in_thread(fn) -> tuple[threading.Thread, dict]:
+    out: dict = {}
+
+    def run():
+        try:
+            out["value"] = fn()
+        except BaseException as exc:  # handed to the test thread
+            out["error"] = exc
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    return t, out
+
+
+def test_close_on_another_thread_waits_for_the_install_then_puts_back(monkeypatch):
+    g, _clock, bl = setup()
+    bl.watch()
+    before = module(g)
+    held = _Blocked(g, monkeypatch, lambda n, _a: n == 1)  # the routine is in, the jump not
+    worker, wout = _in_thread(lambda: bl.try_candidate(bl.next_candidate()))
+    assert held.inside.wait(5)
+    closer, cout = _in_thread(bl.close)
+    closer.join(0.3)
+    assert closer.is_alive(), "close waits for the writes in progress"
+    held.go.set()
+    closer.join(5)
+    worker.join(5)
+    # Either thread may do the put back once the writes end; both report it.
+    assert cout["value"] is b.Rollback.RESTORED
+    out = wout["value"]
+    assert out.result is TR.CANCELLED and out.rollback is b.Rollback.RESTORED, out
+    assert module(g) == before and notes.current_note() is None
+
+
+def test_close_on_another_thread_during_finalize_waits_and_the_cheat_matches(monkeypatch):
+    g, clock, bl = setup()
+    bl.watch()
+    clock.events.extend(hits(lambda: g.hit(g.player, 50.0)))
+    assert bl.try_candidate(bl.next_candidate()).result is TR.PASS
+    held = _Blocked(g, monkeypatch, lambda n, _a: n == 1)  # the saved routine is in
+    worker, wout = _in_thread(bl.finalize)
+    assert held.inside.wait(5)
+    closer, cout = _in_thread(bl.close)
+    closer.join(0.3)
+    assert closer.is_alive(), "close waits for finalize's writes"
+    held.go.set()
+    worker.join(5)
+    closer.join(5)
+    assert "error" not in wout, wout
+    cheat = wout["value"].cheat
+    assert cout["value"] is b.Rollback.NOTHING, "nothing left to put back: the fix is kept"
+    for loc in cheat.locations:  # the cheat said to be on is what the game has
+        assert g.fake.peek(fg.PID, fg.BASE + loc.offset, len(loc.on)) == loc.on
+
+
+def test_finalize_after_close_keeps_nothing():
+    g, clock, bl = setup()
+    bl.watch()
+    before = module(g)
+    clock.events.extend(hits(lambda: g.hit(g.player, 50.0)))
+    assert bl.try_candidate(bl.next_candidate()).result is TR.PASS
+    cancel = threading.Event()
+    cancel.set()  # Cancel pressed while the pass was on its way to the dialog
+    with pytest.raises(ScanCancelled):
+        bl.finalize(cancel)
+    assert module(g) == before and notes.current_note() is None
+
+
+def test_close_that_cant_wait_says_not_restored_and_the_worker_puts_back(monkeypatch):
+    g, _clock, bl = setup()
+    bl.watch()
+    before = module(g)
+    held = _Blocked(g, monkeypatch, lambda n, _a: n == 1)
+    worker, wout = _in_thread(lambda: bl.try_candidate(bl.next_candidate()))
+    assert held.inside.wait(5)
+    assert bl.close(wait=0.05) is b.Rollback.NOT_RESTORED, "never claims a put back"
+    assert bl.not_restored
+    held.go.set()
+    worker.join(5)
+    out = wout["value"]
+    assert out.result is TR.CANCELLED and out.rollback is b.Rollback.RESTORED, out
+    assert module(g) == before
+
+
+def test_a_put_back_not_taken_stops_the_build():
+    g, clock, bl = setup()
+    bl.watch()
+    clock.events.extend([lambda: setattr(g.fake, "fail_writes", True)])
+    out = bl.try_candidate(bl.next_candidate())
+    assert out.result is TR.NO_HIT and out.rollback is b.Rollback.NOT_RESTORED
+    assert bl.not_restored and notes.current_note() is not None, "the note stays open"
+    g.fake.fail_writes = False
+    with pytest.raises(BuildFailed, match="Restart the game"):
+        bl.try_candidate(bl.next_candidate())
+    assert bl.close() is b.Rollback.NOT_RESTORED, "close repeats it"
+
+
+def test_put_back_on_this_thread_while_installing_is_redone(monkeypatch):
+    g, _clock, bl = setup()
+    bl.watch()
+    before = module(g)
+    real = g.fake.write
+    n = []
+
+    def write(pid, addr, data):
+        real(pid, addr, data)
+        n.append(addr)
+        if len(n) == 1:
+            bl.rollback("other")  # as a put back between our two writes
+
+    monkeypatch.setattr(g.fake, "write", write)
+    out = bl.try_candidate(bl.next_candidate())
+    assert out.result is TR.CANCELLED and out.rollback is b.Rollback.RESTORED
+    assert module(g) == before

@@ -8,6 +8,11 @@ The console part, ``Builder``: one method per step the dialog runs as a backgrou
 job (``real_check``, ``watch``, ``collect``, ``try_candidate``, ``finalize``). Every
 byte a test fix puts in the game is noted in one record under a lock, so ``rollback``
 can run from any thread (worker, Cancel, Disconnect) and runs once.
+
+Putting a fix in, keeping it and putting it back are each one run of writes under a
+second lock, so they never mix: ``close`` on another thread waits for the writes in
+progress (``CLOSE_WAIT_S`` at most) and only then puts back. A put back the PS5 didn't
+take is remembered (``not_restored``): the build tries nothing more after it.
 """
 
 from __future__ import annotations
@@ -374,6 +379,7 @@ ALIVE_ANSWER_S = 2.0  # B5: a read slower than this means the PS5 isn't answerin
 PROCESSES_EVERY_S = 3.0  # fallback when the PS5 can't say which app is in front
 PUT_BACK_WAIT_S = notes.PUT_BACK_WAIT_S  # B6: before routine and counter are zeroed
 MAX_OTHERS = 4  # Only me: other objects read during a test
+CLOSE_WAIT_S = 10.0  # close(): how long to wait for writes in progress on another thread
 
 NOTHING_CHANGED = "Nothing changed it. Try again and make it change while the bar moves."
 NOTHING_WORKED = "None of the safe fixes worked for this value. Your game is unchanged."
@@ -382,6 +388,7 @@ ONLY_YOU_SEEN = "Only you were seen. Get hit and hit enemies while the bar moves
 CANT_TELL_APART = "Couldn't tell you apart from enemies."
 NOT_TAKEN = "the PS5 didn't take the change"
 RESTART = "Restart the game: fixes only live in memory until then."
+CLOSED_WHILE_KEEPING = "Stopped before the fix was kept. Your game is unchanged."
 
 
 class TryResult(Enum):
@@ -437,6 +444,7 @@ class _Installed:
     hooks: list[_Room] = field(default_factory=list)
     slot: int | None = None
     total: int = 0  # how many fixes this build tries, for the hint
+    put_back: Rollback | None = None  # how its put back went, for the other thread
 
 
 class Builder:
@@ -484,7 +492,11 @@ class Builder:
         self.others: list[int] = []  # other objects' value addresses (Only me)
         self.collect_tries = 0
         self.real_results: dict[rc.Key, rc.Result] = {}  # from real_check, for the Find list
-        self._lock = threading.Lock()
+        self.closed = False  # close() ran: no step starts or writes any more
+        self.not_restored = False  # a put back the PS5 didn't take: stop, say Restart
+        self._lock = threading.Lock()  # guards the fields below
+        self._op = threading.RLock()  # one run of writes at a time (install, keep, put back)
+        self._step_cancel: threading.Event | None = None  # the running step's; close sets it
         self._installed: _Installed | None = None
         self._passed: _Installed | None = None
         self._pending: tuple[_Installed, TestData] | None = None
@@ -503,6 +515,15 @@ class Builder:
         game = self._game()
         raw = self._client().read(game.pid, self.address if addr is None else addr, self.vtype.size)
         return self.vtype.decode(raw)
+
+    def _start_step(self, cancel: threading.Event | None) -> threading.Event:
+        """Refuse to start once closed; returns the step's cancel, which close() sets."""
+        if self.closed:
+            raise ScanCancelled("build closed")
+        ev = cancel if cancel is not None else threading.Event()
+        with self._lock:
+            self._step_cancel = ev
+        return ev
 
     def _crashed(self, w: Writer, m: Method) -> bool:
         game = self._game()
@@ -541,6 +562,7 @@ class Builder:
 
     def watch(self, cancel: threading.Event | None = None) -> list[Candidate]:
         """Catch the writers, classify them and line up the fixes to try."""
+        cancel = self._start_step(cancel)
         game = self._game()
         if self.release is not None:
             self.release()
@@ -561,7 +583,7 @@ class Builder:
             )
         except LockFailed as exc:
             raise BuildFailed(NOTHING_CHANGED) from exc
-        if cancel is not None and cancel.is_set():
+        if cancel.is_set():
             raise ScanCancelled("build cancelled")
         self.writers = writers
         now_full = self.full is not None and self._read_value() == self.full
@@ -640,6 +662,9 @@ class Builder:
     ) -> TestOutcome:
         """Put the fix in, let the player play for 20 s, judge it. On anything but a pass
         (or a question for the player) the game is put back before this returns."""
+        cancel = self._start_step(cancel)
+        if self.not_restored:  # an earlier fix may still be in: never add another
+            raise BuildFailed(RESTART)
         if self.only_me and self.filter is None:
             raise BuildFailed(CANT_TELL_APART)
         before = {id(t) for t, _o in self.tried} - {id(c)}
@@ -748,39 +773,55 @@ class Builder:
     def _install_and_test(
         self,
         inst: _Installed,
-        cancel: threading.Event | None,
+        cancel: threading.Event,
         progress: Callable[[float, str], None] | None,
     ) -> TestOutcome:
+        failed = self._install(inst, cancel)
+        if failed is not None:
+            return failed
+        return self._live_test(inst, cancel, progress)
+
+    def _install(self, inst: _Installed, cancel: threading.Event) -> TestOutcome | None:
+        """Note, routines, then jumps, as one run of writes (close waits for it). None
+        when the fix is in; else how it ended, with the game put back."""
         game = self._game()
         client = self._client()
-        notes.open_note(self._note(inst))  # before any byte goes in (B6)
-        with self._lock:
-            self._installed = inst
-        log.info(
-            "action=build_try n=%d method=%s writers=%s rooms=%s",
-            inst.n,
-            _method_name(inst.candidate),
-            ",".join(f"{p.writer.address:#x}" for p in inst.candidate.parts),
-            ",".join(f"{a:#x}" for a, _s in inst.rooms),
-        )
-        try:
-            for addr, code in inst.routines:  # the routine first, then the jump into it
-                client.write(game.pid, addr, code)
-            for addr, _orig, new in inst.sites:
-                client.write(game.pid, addr, new)
-            landed = all(
-                client.read(game.pid, a, len(code)) == code for a, code in inst.routines
-            ) and all(client.read(game.pid, a, len(new)) == new for a, _o, new in inst.sites)
-        except WriteFailed:
-            landed = False
-        if not landed:
-            return TestOutcome(TryResult.FAIL, NOT_TAKEN, rollback=self.rollback(NOT_TAKEN))
-        return self._live_test(inst, cancel, progress)
+        with self._op:
+            if self.closed or cancel.is_set():
+                return TestOutcome(TryResult.CANCELLED)
+            notes.open_note(self._note(inst))  # before any byte goes in (B6)
+            with self._lock:
+                self._installed = inst
+            log.info(
+                "action=build_try n=%d method=%s writers=%s rooms=%s",
+                inst.n,
+                _method_name(inst.candidate),
+                ",".join(f"{p.writer.address:#x}" for p in inst.candidate.parts),
+                ",".join(f"{a:#x}" for a, _s in inst.rooms),
+            )
+            try:
+                for addr, code in inst.routines:  # the routine first, then the jump into it
+                    client.write(game.pid, addr, code)
+                for addr, _orig, new in inst.sites:
+                    client.write(game.pid, addr, new)
+                landed = all(
+                    client.read(game.pid, a, len(code)) == code for a, code in inst.routines
+                ) and all(client.read(game.pid, a, len(new)) == new for a, _o, new in inst.sites)
+            except WriteFailed:
+                landed = False
+            if self._installed is not inst:
+                # Put back on this thread while we wrote: our later writes went in after
+                # it, so put back once more.
+                rb = self._put_back(inst, "closed while putting it in")
+                return TestOutcome(TryResult.CANCELLED, rollback=rb)
+            if not landed:
+                return TestOutcome(TryResult.FAIL, NOT_TAKEN, rollback=self._end(inst, NOT_TAKEN))
+        return None
 
     def _live_test(
         self,
         inst: _Installed,
-        cancel: threading.Event | None,
+        cancel: threading.Event,
         progress: Callable[[float, str], None] | None,
     ) -> TestOutcome:
         game = self._game()
@@ -797,20 +838,19 @@ class Builder:
                     continue
         except (ConnectionLost, ReadFailed):
             return self._lost(inst, game_gone=False)
+        if progress is not None:
+            progress(0.0, hint)
         samples = [Sample(start_value)]
         others_down = False
         alive = _AliveCheck(self, inst)
         t0 = self.clock()
-        if progress is not None:
-            progress(0.0, hint)
         while self.clock() - t0 < TEST_S:
-            if cancel is not None and cancel.is_set():
-                return TestOutcome(TryResult.CANCELLED, rollback=self.rollback("cancelled"))
-            if self._taken_back(inst):
-                return TestOutcome(TryResult.CANCELLED, rollback=Rollback.RESTORED)
+            if cancel.is_set():
+                return TestOutcome(TryResult.CANCELLED, rollback=self._end(inst, "cancelled"))
             self.sleep(POLL_S)
-            if self._taken_back(inst):
-                return TestOutcome(TryResult.CANCELLED, rollback=Rollback.RESTORED)
+            taken = self._taken_back(inst)
+            if taken is not None:
+                return TestOutcome(TryResult.CANCELLED, rollback=taken)
             try:
                 value = self._read_value()
                 count, last = 0, None
@@ -828,6 +868,9 @@ class Builder:
             except (ConnectionLost, ReadFailed):
                 ok, gone = False, self._game_gone()
             if not ok:
+                taken = self._taken_back(inst)  # the patch went because it was put back
+                if taken is not None:
+                    return TestOutcome(TryResult.CANCELLED, rollback=taken)
                 return self._lost(inst, game_gone=gone)
             samples.append(Sample(value, count, last))
             if progress is not None:
@@ -845,10 +888,21 @@ class Builder:
         self._pending = (inst, data)
         return self._verdict(inst, data)
 
-    def _taken_back(self, inst: _Installed) -> bool:
-        """Another thread (Cancel, Disconnect) already put this fix back."""
+    def _taken_back(self, inst: _Installed) -> Rollback | None:
+        """None while the fix is in; else how its put back (by Cancel or Disconnect on
+        another thread) went, waiting for that put back to finish."""
         with self._lock:
-            return self._installed is not inst
+            if self._installed is inst:
+                return None
+        with self._op:
+            return inst.put_back or Rollback.NOTHING
+
+    def _end(self, inst: _Installed, reason: str) -> Rollback:
+        """Put this fix back; if another thread already did, how that went."""
+        rb = self.rollback(reason)
+        if rb is Rollback.NOTHING and inst.put_back is not None:
+            return inst.put_back
+        return rb
 
     def _verdict(self, inst: _Installed, data: TestData) -> TestOutcome:
         j = judge(data, self._answers)
@@ -865,7 +919,7 @@ class Builder:
             return TestOutcome(TryResult.PASS)
         if j.outcome is Outcome.NEEDS_ANSWER:
             return TestOutcome(TryResult.NEEDS_ANSWER, question=j.question)
-        rb = self.rollback(j.reason)
+        rb = self._end(inst, j.reason)
         if j.outcome is Outcome.NO_HIT:
             return TestOutcome(TryResult.NO_HIT, "You didn't get hit; trying again.", rollback=rb)
         return TestOutcome(TryResult.FAIL, j.reason, rollback=rb)
@@ -899,7 +953,7 @@ class Builder:
 
     def _lost(self, inst: _Installed, game_gone: bool) -> TestOutcome:
         """B6: put back at once. A game that is gone crashed with this fix (S7)."""
-        rb = self.rollback("the game stopped responding")
+        rb = self._end(inst, "the game stopped responding")
         if game_gone:
             game = self._game()
             c = inst.candidate
@@ -925,17 +979,34 @@ class Builder:
         )
 
     # -- B6: putting things back ----------------------------------------------------------
-    def rollback(self, reason: str = "") -> Rollback:
+    def rollback(self, reason: str = "", *, wait: float | None = None) -> Rollback:
         """Original bytes back at the sites, then after 2 s the routine rooms and the
         counter zeroed, then the note cleared. Safe from any thread; the second call
-        does nothing. NOT_RESTORED when the PS5 doesn't answer (the note stays open)."""
-        with self._lock:
-            inst, self._installed = self._installed, None
-            if self._passed is inst:
-                self._passed = None
-        if inst is None:
-            return Rollback.NOTHING
-        self._pending = None
+        does nothing. NOT_RESTORED when the PS5 doesn't answer (the note stays open),
+        or when writes in progress on another thread don't end within ``wait`` s."""
+        if not self._op.acquire(timeout=-1 if wait is None else wait):
+            log.warning("action=build_rollback reason=%r restored=False error=busy", reason)
+            self.not_restored = True
+            return Rollback.NOT_RESTORED
+        try:
+            with self._lock:
+                inst, self._installed = self._installed, None
+                if self._passed is inst:
+                    self._passed = None
+            if inst is None:
+                return Rollback.NOTHING
+            self._pending = None
+            return self._put_back(inst, reason)
+        finally:
+            self._op.release()
+
+    def _put_back(self, inst: _Installed, reason: str) -> Rollback:
+        inst.put_back = self._write_back(inst, reason)
+        if inst.put_back is Rollback.NOT_RESTORED:
+            self.not_restored = True
+        return inst.put_back
+
+    def _write_back(self, inst: _Installed, reason: str) -> Rollback:
         try:
             game = self._game()
             client = self._client()
@@ -956,45 +1027,41 @@ class Builder:
         log.info("action=build_rollback n=%d reason=%r restored=True", inst.n, reason)
         return Rollback.RESTORED
 
-    def close(self) -> Rollback:
-        """The dialog closes, Disconnect, or the app quits: nothing of ours stays."""
-        return self.rollback("closed")
+    def close(self, wait: float = CLOSE_WAIT_S) -> Rollback:
+        """The dialog closes, Disconnect, or the app quits: nothing of ours stays.
+        Stops the running step, waits for its writes in progress, then puts back.
+        NOT_RESTORED whenever a put back of this build wasn't taken."""
+        self.closed = True
+        with self._lock:
+            ev, inst = self._step_cancel, self._installed
+        if ev is not None:
+            ev.set()
+        rb = self.rollback("closed", wait=wait)
+        if rb is Rollback.NOTHING and inst is not None and inst.put_back is not None:
+            rb = inst.put_back  # the worker saw the cancel and put it back first
+        return Rollback.NOT_RESTORED if self.not_restored else rb
 
     # -- B8: the result -------------------------------------------------------------------
-    def finalize(self) -> BuildResult:
+    def finalize(self, cancel: threading.Event | None = None) -> BuildResult:
         """Swap the passed fix to the routine without the counter and make the cheat.
         The new routine goes into the second room first, then the jump is re-aimed
-        with one write; after 2 s the test room and the counter are zeroed."""
-        inst = self._passed
-        if inst is None or self._installed is not inst:
-            raise BuildFailed("There's no passed fix to keep.")
-        game = self._game()
-        client = self._client()
-        base = game.module_base
-        full = self.vtype.encode(self.full) if self.full is not None else None
-        try:
-            saved: list[tuple[_Room, bytes, bytes]] = []
-            for room in inst.hooks:
-                code = self._saved_code(room, full)
-                jmp = cv.jmp_patch(
-                    room.part.writer.address, room.saved_room, room.part.writer.length
-                )
-                client.write(game.pid, room.saved_room, code)
-                client.write(game.pid, room.part.writer.address, jmp)
-                saved.append((room, code, jmp))
-            self.sleep(PUT_BACK_WAIT_S)
-            for room in inst.hooks:
-                client.write(game.pid, room.test_room, bytes(len(room.code)))
-            if inst.slot is not None:
-                client.write(game.pid, inst.slot, bytes(cv.SLOT_SIZE))
-        except CheatMakerError as exc:
-            rb = self.rollback("finalize failed")
-            if rb is Rollback.NOT_RESTORED:
-                raise BuildFailed(RESTART) from exc
-            raise BuildFailed(f"Couldn't keep the fix: {exc}. Your game is unchanged.") from exc
-        with self._lock:
-            self._installed = self._passed = None
+        with one write; after 2 s the test room and the counter are zeroed. All of it
+        is one run of writes: close() on another thread waits for it to end."""
+        cancel = self._start_step(cancel)
+        with self._op:
+            inst = self._passed
+            if inst is None or self._installed is not inst:
+                raise BuildFailed("There's no passed fix to keep.")
+            if cancel.is_set():
+                if self._end(inst, "cancelled") is Rollback.NOT_RESTORED:
+                    raise BuildFailed(RESTART)
+                raise ScanCancelled("build cancelled")
+            saved = self._keep(inst)
+            with self._lock:
+                self._installed = self._passed = None
         notes.clear_note()
+        base = self._game().module_base
+        full = self.vtype.encode(self.full) if self.full is not None else None
         cheat = self._cheat(inst, saved, base, full)
         cheat.check_after_restart = self.only_me and not self.by_class
         if self.live is not None:
@@ -1009,9 +1076,42 @@ class Builder:
             len(cheat.locations),
             after,
         )
-        # TODO(B7): a second address (a "likely real" neighbour that went down while the
-        # target held) is not built yet: the dialog offers Lock it for it instead.
+        # B7 (a second address that went down while this one held) isn't built in this
+        # version; see "Not in this version" in docs/spec-cheat-builder.md.
         return BuildResult(cheat, after, tuple(self.skipped))
+
+    def _keep(self, inst: _Installed) -> list[tuple[_Room, bytes, bytes]]:
+        """The writes of finalize, under the write lock. On any failure the fix is put
+        back and BuildFailed says how that went."""
+        game = self._game()
+        client = self._client()
+        full = self.vtype.encode(self.full) if self.full is not None else None
+        try:
+            saved: list[tuple[_Room, bytes, bytes]] = []
+            for room in inst.hooks:
+                code = self._saved_code(room, full)
+                jmp = cv.jmp_patch(
+                    room.part.writer.address, room.saved_room, room.part.writer.length
+                )
+                client.write(game.pid, room.saved_room, code)
+                client.write(game.pid, room.part.writer.address, jmp)
+                saved.append((room, code, jmp))
+            self.sleep(PUT_BACK_WAIT_S)
+            if self._installed is not inst:  # put back on this thread meanwhile
+                if inst.put_back is Rollback.NOT_RESTORED:
+                    raise BuildFailed(RESTART)
+                raise BuildFailed(CLOSED_WHILE_KEEPING)
+            for room in inst.hooks:
+                client.write(game.pid, room.test_room, bytes(len(room.code)))
+            if inst.slot is not None:
+                client.write(game.pid, inst.slot, bytes(cv.SLOT_SIZE))
+        except CheatMakerError as exc:
+            if isinstance(exc, BuildFailed):
+                raise
+            if self._end(inst, "finalize failed") is Rollback.NOT_RESTORED:
+                raise BuildFailed(RESTART) from exc
+            raise BuildFailed(f"Couldn't keep the fix: {exc}. Your game is unchanged.") from exc
+        return saved
 
     def _saved_code(self, room: _Room, full: bytes | None) -> bytes:
         """The routine kept in the cheat: the test one without the counter lines."""
