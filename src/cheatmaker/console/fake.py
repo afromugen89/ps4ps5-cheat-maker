@@ -71,6 +71,8 @@ class FakeConsole:
         # an "access" watch sees read_hits plus the write hits (like DR7 RW=11).
         self.write_hits: dict[int, list[WatchHit]] = {}
         self.read_hits: dict[int, list[WatchHit]] = {}
+        # instruction address -> hits of an "execute" breakpoint there (regs before it)
+        self.exec_hits: dict[int, list[WatchHit]] = {}
         self.watched: list[tuple[int, int, str, float]] = []  # (addr, size, kind, timeout)
         self.until_answers: list[bool] = []  # what each watch's ``until`` said
         # Called before every read: lets a test "run the game" between requests
@@ -353,13 +355,20 @@ class FakeConsole:
         no time passed (the fake doesn't wait)."""
         self._alive()
         self._proc(pid)
-        if kind not in ("write", "access"):
+        if kind not in ("write", "access", "execute"):
             raise ValueError(f"unknown watch kind {kind!r}")
+        if kind == "execute" and size != 1:
+            raise ValueError("an execute breakpoint covers 1 byte")
         self.watched.append((addr, size, kind, timeout_s))
         writes = self.write_hits.get(addr)
         if writes is None:
             writes = [WatchHit(r) for r in self.writers.get(addr, [])]
-        hits = list(writes) if kind == "write" else [*self.read_hits.get(addr, []), *writes]
+        if kind == "execute":
+            hits = list(self.exec_hits.get(addr, []))
+        elif kind == "write":
+            hits = list(writes)
+        else:
+            hits = [*self.read_hits.get(addr, []), *writes]
         hits = hits[:16]
         if until is not None:
             self.until_answers.append(bool(until(list(hits), 0.0)))

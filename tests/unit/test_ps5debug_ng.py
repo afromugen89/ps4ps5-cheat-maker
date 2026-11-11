@@ -1011,6 +1011,28 @@ def test_watch_write_kind_and_bad_kind(client, server):
         client.watch(PID, HEALTH_ADDR, 4, "exec", 1.0)
 
 
+def test_watch_execute_is_breaktype_0_one_byte_and_keeps_the_raw_packet(client, server):
+    server.watch_regs = [{"rip": 0x400100, "rbx": HEAP_BASE, "rsp": 0x7FFF0000}]
+    hits = client.watch(PID, 0x400100, 1, "execute", timeout_s=1.0)
+    assert server.watchpoints[0] == (0, 1, 0, 0, 0x400100)  # length 1 byte = 0, exec = 0
+    assert [h.rip for h in hits] == [0x400100] and hits[0].reg("rbx") == HEAP_BASE
+    assert hits[0].raw == interrupt_packet(server.watch_regs[0]), "the whole 0x4A0 packet"
+    assert server.watchpoints[-1] == (0, 0, 0, 0, 0)
+    with pytest.raises(ValueError):
+        client.watch(PID, 0x400100, 4, "execute", 1.0)
+
+
+def test_parse_interrupt_keeps_the_packet_out_of_compare_and_repr():
+    from cheatmaker.console.client import WatchHit
+    from cheatmaker.console.ps5debug_ng import parse_interrupt
+
+    pkt = interrupt_packet({"rip": 9, "rax": 1})
+    hit = parse_interrupt(pkt)
+    assert hit.raw == pkt and len(hit.raw) == INTERRUPT_SIZE
+    assert hit == WatchHit(9, hit.regs), "raw doesn't change equality"
+    assert "raw" not in repr(hit)
+
+
 def test_parse_struct_reg_layout():
     from cheatmaker.console.ps5debug_ng import parse_interrupt, parse_struct_reg
     from cheatmaker.errors import ProtocolError

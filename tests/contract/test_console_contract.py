@@ -141,3 +141,20 @@ def test_watch_returns_hits_with_registers(client):
     assert asked and asked[-1][0] == writes, "until sees the hits so far"
     with pytest.raises(ValueError):
         client.watch(PID, HEALTH_ADDR, 4, "exec", 1.0)
+
+
+def test_watch_execute_serves_exec_hits_for_one_byte(client):
+    if not hasattr(client, "peek"):
+        pytest.skip("fake only: needs the game to run the instruction")
+    from cheatmaker.console.client import WatchHit
+
+    load = 0x400100
+    hit = WatchHit(load, {"rbx": HEALTH_ADDR - 0x10, "rip": load})
+    client.exec_hits[load] = [hit, hit]
+    assert client.watch(PID, load, 1, "execute", 1.0) == [hit, hit]
+    assert client.watch(PID, HEALTH_ADDR, 4, "write", 1.0) == client.watch(
+        PID, HEALTH_ADDR, 4, "write", 1.0
+    ), "execute hits don't leak into data watches"
+    assert hit not in client.watch(PID, HEALTH_ADDR, 4, "access", 1.0)
+    with pytest.raises(ValueError):
+        client.watch(PID, load, 4, "execute", 1.0)
