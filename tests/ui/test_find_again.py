@@ -1122,3 +1122,32 @@ def test_rename_while_connected_comes_back_after_a_restart(win, console):  # BUG
     assert [c.name for c in win.ctl.cheat_file.cheats] == ["Health"]
     tick(win)
     assert run2.health() == 999.0
+
+
+def test_a_stuck_hooks_id_and_rooms_are_not_reused(win, console, monkeypatch):  # re-review 2
+    from cheatmaker.errors import ReadFailed
+
+    connect(win)
+    c = two_moving(win, console.game, money_in_enemy, ValueType.INT64)
+    dlg = LearnDialog(win.ctl, win.cheats.finder, c, win)
+    real = ah.install
+
+    def install_then_cancel(session, obj):
+        state = real(session, obj)
+        dlg.do_cancel()
+        return state
+
+    def remove_fails(*a, **k):
+        raise ReadFailed("the PS5 stopped answering")
+
+    monkeypatch.setattr(ah, "install", install_then_cancel)
+    monkeypatch.setattr(ah, "remove", remove_fails)
+    dlg.start_btn.click()
+    finder = win.cheats.finder
+    [stuck] = finder.installed.values()
+    assert stuck.id not in finder.new_object_ids(3)
+    single = Cheat("x", [Location(LocationKind.SESSION_ADDRESS, 0x10, b"\0", b"\0")])
+    assert finder.object_id_for(single) != stuck.id
+    finder.keep_rooms()  # e.g. after a save: the stuck hook's rooms stay kept
+    for room in ah.reserved_rooms([stuck]):
+        assert room in win.ctl.session.reserved_rooms

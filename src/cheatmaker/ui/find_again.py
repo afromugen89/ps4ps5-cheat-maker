@@ -187,9 +187,15 @@ class FindAgain(QObject):
         return self.ctl.project
 
     def keep_rooms(self) -> None:
-        """New caves and slots never go where the notes' hooks live (even unused)."""
+        """New caves and slots never go where the notes' hooks live (even unused), nor
+        where a hook of ours still is that the notes don't hold (one that couldn't be
+        taken out after a failed Find it next time)."""
         p = self.ctl.project
-        self.ctl.session.reserved_rooms = ah.reserved_rooms(p.objects) if p else []
+        objects = list(p.objects) if p else []
+        in_notes = {o.id for o in objects}
+        with self._lock:
+            objects += [o for i, o in self.installed.items() if i not in in_notes]
+        self.ctl.session.reserved_rooms = ah.reserved_rooms(objects)
 
     def save(self) -> None:
         self.keep_rooms()
@@ -643,12 +649,15 @@ class FindAgain(QObject):
         for pc in p.cheats:
             if pc.name == cheat.name and not pc.parts:
                 return pc.object  # a new find updates the anchor (AC-12.4)
-        return p.new_object_id()
+        return self.new_object_ids(1)[0]
 
     def new_object_ids(self, n: int) -> list[str]:
-        """``n`` object ids not used in the notes yet (one per part to learn)."""
+        """``n`` object ids not used in the notes yet, nor by a hook of ours still in
+        the game (one per part to learn)."""
         p = self.ensure_project()
         used = {o.id for o in p.objects}
+        with self._lock:
+            used |= set(self.installed) | set(self._mine)
         ids: list[str] = []
         k = 1
         while len(ids) < n:
