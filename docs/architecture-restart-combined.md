@@ -62,7 +62,7 @@ flowchart LR
   {"name": "health",   "object": "obj1", "field": "health",   "value": 3.0},
   {"name": "fraction", "object": "obj1", "field": "fraction", "value": 1.0},
   {"name": "god flag", "kind": "module_value", "module": "eboot.bin", "section": 0,
-   "offset": "0x1a2b0", "on": "01", "off": "00", "type": "byte"}]}
+   "offset": "0x1a2b0", "on": "01", "off": "00", "type": "int8"}]}
 ```
 
 ## Per-file changes
