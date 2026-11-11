@@ -886,3 +886,111 @@ def test_learn_button_off_while_a_learned_part_is_not_found(win, console):  # AC
     win.ctl.cheats_changed.emit()
     win.cheats.table.selectRow(0)
     assert not win.cheats.learn_btn.isEnabled()
+
+
+# -- review fixes (combined cheats) ---------------------------------------------------------
+def test_combining_a_ticked_cheat_asks_before_writing_a_found_again_part(win, console):  # 1
+    connect(win)
+    learn(win, add_health_cheat(win, console.game))
+    game = console.game
+    frac = session_part(win, "fraction", fraction_in_player(game), ValueType.INT32, 77)
+    win.ctl.cheats_changed.emit()
+    tick(win, 1)  # the session cheat is on
+    assert frac.enabled
+    win.ctl.live.trackers["obj1"].confirmed = False  # a new run: not asked yet
+    game.set_health(50.0)
+    asked = []
+    win.cheats.finder.ask_confirm = lambda text: asked.append(text) or False
+    c = combine_all(win)
+    assert len(asked) == 1 and asked[0].startswith("Is this your Infinite Health + fraction?")
+    assert not c.enabled and game.health() == 50.0, "No: nothing written"
+    assert win.status.text() == hints.CONFIRM_NO.format(name=c.name)
+    assert str(id(c)) not in win.ctl.freezer.keys
+
+
+def test_combining_a_ticked_cheat_yes_turns_it_on(win, console):  # review 1
+    connect(win)
+    learn(win, add_health_cheat(win, console.game))
+    session_part(win, "fraction", fraction_in_player(console.game), ValueType.INT32, 77)
+    win.ctl.cheats_changed.emit()
+    tick(win, 1)
+    win.ctl.live.trackers["obj1"].confirmed = False
+    asked = []
+    win.cheats.finder.ask_confirm = lambda text: asked.append(text) or True
+    c = combine_all(win)
+    assert len(asked) == 1 and c.enabled and console.game.health() == 999.0
+
+
+def test_combine_saves_the_notes_once(win, console, monkeypatch):  # review 11
+    connect(win)
+    learn(win, add_health_cheat(win, console.game))
+    add_found_fraction(win)
+    saves = []
+    monkeypatch.setattr(pj, "save", lambda path, p: saves.append(path))
+    combine_all(win)
+    assert len(saves) == 1
+
+
+def test_learn_button_off_while_a_part_waits_for_a_moved_question(win, console):  # review 8
+    connect(win)
+    learn(win, add_health_cheat(win, console.game))
+    session_part(win, "fraction", fraction_in_player(console.game), ValueType.INT32, 77)
+    win.ctl.cheats_changed.emit()
+    combine_all(win)
+    tracker = win.ctl.live.trackers["obj1"]
+    tracker.pending = console.game.player + 0x1000
+    win.ctl.cheats_changed.emit()
+    win.cheats.table.selectRow(0)
+    assert not win.cheats.learn_btn.isEnabled()
+    tracker.pending, tracker.address = None, None
+    win.ctl.cheats_changed.emit()
+    win.cheats.table.selectRow(0)
+    assert not win.cheats.learn_btn.isEnabled(), "lost right now"
+
+
+def test_single_learn_keeps_a_combined_entry_with_the_same_name(win, console):  # review 9
+    c = combined_found_again(win, console)
+    p = win.ctl.project
+    [entry] = p.cheats
+    raw = struct.pack("<f", 5.0)
+    other = Cheat(
+        c.name,  # the same name as the combined cheat
+        [Location(LocationKind.SESSION_ADDRESS, console.game.health_addr, raw, raw)],
+        value_type=ValueType.FLOAT,
+    )
+    win.ctl.ensure_file().cheats.append(other)
+    learn(win, other)
+    assert entry in win.ctl.project.cheats
+
+
+def test_two_combined_cheats_with_the_same_parts_both_come_back(win, console):  # QA risk
+    c = combined_found_again(win, console)
+    second = Cheat(  # Combine refuses the same part twice, so make it by hand
+        "Health 2",
+        [
+            Location(
+                loc.kind, 0, loc.on, loc.off, anchor=loc.anchor, vtype=loc.vtype, part=loc.part
+            )
+            for loc in c.locations
+        ],
+        freeze=True,
+    )
+    win.ctl.cheat_file.cheats.append(second)
+    win.cheats.finder.remember_combined(second)
+    assert len(win.ctl.project.cheats) == 2
+    win.ctl.cheat_file.cheats.clear()  # a fresh app
+    win.ctl.shutdown()
+    console.restart(2)
+    connect(win)
+    assert [x.name for x in win.ctl.cheat_file.cheats] == [COMBINED, "Health 2"]
+
+
+def test_renaming_a_combined_cheat_is_kept(win, console):  # QA risk: name is in the key
+    from cheatmaker.ui.cheats_view import COL_NAME
+
+    combined_found_again(win, console)
+    win.cheats.table.item(0, COL_NAME).setText("Health")
+    assert [c.name for c in pj.load(pj.project_path(fg.TITLE, fg.VERSION)).cheats] == ["Health"]
+    win.cheats.table.selectRow(0)
+    win.cheats.delete_btn.click()
+    assert pj.load(pj.project_path(fg.TITLE, fg.VERSION)).cheats == []

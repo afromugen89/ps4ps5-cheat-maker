@@ -161,7 +161,12 @@ READY_PART = {
 READY_PARTS = "Ready: {parts}."
 LEARN_PART_FAILED = "Couldn't learn {part} (part {k} of {n}): {reason} Nothing was changed."
 LEARN_PART_CANCELLED = "you pressed Cancel."
-COMBINED_FOUND = "Ready: {name} found again ({n} parts, {secs:.1f} s). Tick it to use it."
+COMBINED_FOUND = "Ready: {name} found again ({parts}, {secs:.1f} s). Tick it to use it."
+PART_COUNT = {True: "{n} part", False: "{n} parts"}  # keyed by "just one"
+COMBINE_NEEDS_NOTES = (
+    "Connect to the game first: cheats found again each run can only be combined while "
+    "Cheat Maker has the game's notes."
+)
 COMBINED_NOT_FOUND = (
     "Couldn't find {part} (part of {name}) this time. Delete {name} and make it again, "
     "or search for {part}."

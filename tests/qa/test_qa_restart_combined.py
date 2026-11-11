@@ -283,21 +283,24 @@ def test_tc07_combine_on_for_two_found_again_off_for_one(win, console):  # TC-07
     assert win.cheats.combine_btn.isEnabled()
 
 
-@pytest.mark.xfail(
-    reason="BUG-02: Combine while disconnected doesn't update the notes: the parts come "
-    "back as their own rows and the combined cheat is never saved",
-    strict=True,
-)
-def test_tc09_combine_found_again_while_disconnected(win, console):  # TC-09
+def test_tc09_combine_found_again_while_disconnected(win, console):  # TC-09, BUG-02 fixed
+    # Fix chosen: Combine is refused (button off, plain message) for found-again cheats
+    # while the game's notes aren't loaded, so nothing is lost next run. Connect, then
+    # combine.
     connect(win)
     learn(win, add_health_cheat(win, console.game))
     add_found_fraction(win)
     win.ctl.shutdown()  # the game is closed: no connection, no notes loaded
     win.cheats.table.selectAll()
-    win.cheats.combine_btn.click()
-    assert [c.name for c in win.ctl.cheat_file.cheats] == ["Infinite Health + fraction"]
+    assert not win.cheats.combine_btn.isEnabled()
+    assert win.cheats.combine_btn.toolTip() == hints.COMBINE_NEEDS_NOTES
+    win.cheats.do_combine()  # even if pressed some other way
+    assert win.status.text() == hints.COMBINE_NEEDS_NOTES
+    assert [c.name for c in win.ctl.cheat_file.cheats] == ["Infinite Health", "fraction"]
     console.restart(2)
     connect(win)
+    win.cheats.table.selectAll()
+    win.cheats.combine_btn.click()  # connected: it works and is kept
     assert [c.name for c in win.ctl.cheat_file.cheats] == ["Infinite Health + fraction"]
     assert [c.name for c in saved().cheats] == ["Infinite Health + fraction"]
 
@@ -641,11 +644,7 @@ def test_tc32_restart_with_one_part_missing(win, console):  # TC-32
     assert all(a < fg.HEAP for _p, a, _d in run3.fake.writes[len(before) :])
 
 
-@pytest.mark.xfail(
-    reason="BUG-05: status says '1 parts' for a combined cheat with one learned part",
-    strict=True,
-)
-def test_tc33_part_count_says_part_not_parts(win, console):  # TC-33
+def test_tc33_part_count_says_part_not_parts(win, console):  # TC-33, BUG-05 fixed
     connect(win)
     learn(win, add_health_cheat(win, console.game))
     fixed_cheat(win)

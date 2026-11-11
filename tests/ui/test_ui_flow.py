@@ -788,6 +788,7 @@ def test_combine_is_on_with_a_found_again_cheat(win, fake):  # spec-restart-comb
     connect(win)
     obj = pj.ObjectSpec("obj1", "Health", None, [pj.Field("health", 0x40, ValueType.INT32)])
     win.ctl.live.trackers["obj1"] = rf.Tracker(win.ctl.session, obj, HEALTH_ADDR - 0x40)
+    win.cheats.finder.ensure_project().put_object(obj)  # the game's notes are loaded
     raw = struct.pack("<i", 500)
     found = Cheat(
         "health",

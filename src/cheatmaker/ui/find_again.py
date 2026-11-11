@@ -229,15 +229,15 @@ class FindAgain(QObject):
             return
         cf = self.ctl.ensure_file()
         have = {c.anchor for c in cf.cheats if c.anchor}
-        have_parts = {tuple(loc.anchor for loc in c.learned_parts) for c in cf.cheats}
+        have_parts = {self._key(c.name, self._anchors(c)) for c in cf.cheats if c.learned_parts}
         for pc in p.cheats:
             if pc.parts:
-                if tuple(pc.anchors) in have_parts:
+                if self._key(pc.name, pc.anchors) in have_parts:
                     continue
                 cheat = self._combined_from(p, pc)
                 if cheat is not None:
                     cf.cheats.append(cheat)
-                    have_parts.add(tuple(pc.anchors))
+                    have_parts.add(self._key(pc.name, pc.anchors))
                 continue
             if (pc.object, pc.field) in have:
                 continue
@@ -300,6 +300,20 @@ class FindAgain(QObject):
             freeze=pc.action == "freeze",
             hint="Found again each time you connect.",
         )
+
+    @staticmethod
+    def _anchors(cheat: Cheat) -> list[tuple[str, str]]:
+        return [loc.anchor for loc in cheat.learned_parts if loc.anchor is not None]
+
+    @staticmethod
+    def _key(name: str, anchors: list[tuple[str, str]]) -> tuple:
+        """A combined cheat's notes entry: its name and learned parts (two combined
+        cheats may share the same parts)."""
+        return (name, tuple(anchors))
+
+    def _drop_entry(self, p: pj.Project, name: str, anchors: list[tuple[str, str]]) -> None:
+        key = self._key(name, anchors)
+        p.cheats = [c for c in p.cheats if not c.parts or self._key(c.name, c.anchors) != key]
 
     @staticmethod
     def uses(cheat: Cheat, obj_id: str) -> bool:
@@ -403,7 +417,8 @@ class FindAgain(QObject):
             return hints.COMBINED_NOT_FOUND.format(part=loc.part, name=cheat.name)
         secs = sum(seconds[o] for o in cheat.objects)
         n = len(cheat.learned_parts)
-        return hints.COMBINED_FOUND.format(name=cheat.name, n=n, secs=secs)
+        parts = hints.PART_COUNT[n == 1].format(n=n)
+        return hints.COMBINED_FOUND.format(name=cheat.name, parts=parts, secs=secs)
 
     def remove_hooks(self) -> None:
         with self._lock:
@@ -611,7 +626,7 @@ class FindAgain(QObject):
         if cheat.value is not None:
             rf.widen(f, cheat.value)
         p.put_object(obj)
-        p.cheats = [c for c in p.cheats if c.name != cheat.name and c.object != obj.id]
+        p.cheats = [c for c in p.cheats if c.parts or (c.name != cheat.name and c.object != obj.id)]
         p.cheats.append(
             pj.ProjectCheat(
                 cheat.name,
@@ -628,23 +643,36 @@ class FindAgain(QObject):
         self.save()
         self.ctl.cheats_changed.emit()
 
-    def forget(self, cheat: Cheat) -> None:
-        """A deleted cheat doesn't come back next time (the object's notes stay)."""
+    def forget(self, cheat: Cheat, save: bool = True) -> None:
+        """A deleted cheat doesn't come back next time (the object's notes stay).
+        ``save=False``: the caller saves once after several changes."""
         p = self.ctl.project
         if p is None:
             return
         if cheat.learned_parts:
-            anchors = [loc.anchor for loc in cheat.learned_parts]
-            p.cheats = [c for c in p.cheats if not c.parts or c.anchors != anchors]
+            self._drop_entry(p, cheat.name, self._anchors(cheat))
         elif cheat.anchor is not None:
             p.cheats = [c for c in p.cheats if c.parts or (c.object, c.field) != cheat.anchor]
         else:
             return
-        self.save()
+        if save:
+            self.save()
 
-    def remember_combined(self, cheat: Cheat) -> None:
+    def renamed(self, cheat: Cheat, old: str) -> None:
+        """A combined cheat's new name is kept in its notes entry (its key)."""
+        p = self.ctl.project
+        if p is None or not cheat.learned_parts:
+            return
+        key = self._key(old, self._anchors(cheat))
+        for pc in p.cheats:
+            if pc.parts and self._key(pc.name, pc.anchors) == key:
+                pc.name = cheat.name
+                self.save()
+                return
+
+    def remember_combined(self, cheat: Cheat, save: bool = True) -> None:
         """Save a combined cheat with nothing moving as one notes entry (its parts in
-        order), replacing an entry for the same learned parts."""
+        order), replacing an entry with the same name and learned parts."""
         p = self.ctl.project
         if p is None or not cheat.found_again or cheat.anchor is not None:
             return
@@ -673,12 +701,12 @@ class FindAgain(QObject):
             value = f.vtype.decode(loc.on)
             rf.widen(f, value)
             parts.append(pj.ProjectPart(loc.part or name, obj_id, name, value))
-        anchors = [loc.anchor for loc in cheat.learned_parts]
-        p.cheats = [c for c in p.cheats if not c.parts or c.anchors != anchors]
+        self._drop_entry(p, cheat.name, self._anchors(cheat))
         p.cheats.append(
             pj.ProjectCheat(cheat.name, action="freeze" if cheat.freeze else "set", parts=parts)
         )
-        self.save()
+        if save:
+            self.save()
 
     def adopt_parts(self, cheat: Cheat, results: list[PartLearned]) -> None:
         """Every moving part was learned (Find it next time on a combined cheat): its

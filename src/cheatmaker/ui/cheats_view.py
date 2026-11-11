@@ -33,6 +33,7 @@ from cheatmaker.ui.find_wizard import fmt_value
 log = logging.getLogger(__name__)
 
 COL_ON, COL_NAME, COL_VALUE, COL_KEEPS, COL_DETAILS = range(5)
+COMBINE_TIP = "Ctrl-click two or more cheats, then press Combine to make them one cheat"
 FOUND_AGAIN = "Found again each run"
 CHECK_AFTER_RESTART = "Check after restart"
 
@@ -100,9 +101,7 @@ class CheatsView(QWidget):
         self.lock_btn = QPushButton("Lock it")
         self.build_btn = QPushButton(hints.BUILD_BUTTON)
         self.combine_btn = QPushButton("Combine")
-        self.combine_btn.setToolTip(
-            "Ctrl-click two or more cheats, then press Combine to make them one cheat"
-        )
+        self.combine_btn.setToolTip(COMBINE_TIP)
         self.learn_btn = QPushButton("Find it next time")
         self.learn_btn.setToolTip(
             "Learn how the game keeps this value, so Cheat Maker finds it again by itself "
@@ -225,7 +224,9 @@ class CheatsView(QWidget):
         c = self.selected()
         picked = self.selected_all()
         self.delete_btn.setEnabled(bool(picked))
-        self.combine_btn.setEnabled(len(picked) > 1)
+        needs_notes = self._needs_notes(picked)
+        self.combine_btn.setEnabled(len(picked) > 1 and not needs_notes)
+        self.combine_btn.setToolTip(hints.COMBINE_NEEDS_NOTES if needs_notes else COMBINE_TIP)
         up = self.ctl.session.connected and self.ctl.session.game is not None
         located = c is not None and (c.anchor is None or c.anchor[0] in self.ctl.live.trackers)
         self.lock_btn.setEnabled(
@@ -253,11 +254,19 @@ class CheatsView(QWidget):
         if not c.combined:
             return located and c.session_only and c.value_type is not None
         moving = c.moving_parts
-        trackers = self.ctl.live.trackers
+        trackers = [self.ctl.live.trackers.get(o) for o in c.objects]
         return (
             bool(moving)
             and all(loc.vtype is not None for loc in moving)
-            and all(obj_id in trackers for obj_id in c.objects)
+            # found this run and not waiting on a "moved" question (no console reads)
+            and all(t is not None and t.address is not None and t.pending is None for t in trackers)
+        )
+
+    def _needs_notes(self, picked: list[Cheat]) -> bool:
+        """Found-again cheats are combined in the game's notes too: they must be loaded
+        (connected), or the combined cheat would be lost next run."""
+        return self.ctl.project is None and any(
+            c.anchor is not None or c.learned_parts for c in picked
         )
 
     def _item_changed(self, item: QTableWidgetItem) -> None:
@@ -278,7 +287,9 @@ class CheatsView(QWidget):
                 name = item.text().strip()
                 if not name:
                     raise ValueError("A cheat needs a name.")
-                c.name = name
+                old, c.name = c.name, name
+                if old != name:
+                    self.finder.renamed(c, old)
             elif item.column() == COL_VALUE:
                 c.set_value(parse_number(item.text()))
                 self.ctl.live.refresh(c)
@@ -322,8 +333,16 @@ class CheatsView(QWidget):
     def do_combine(self) -> None:
         """Replace the selected cheats with one cheat that does all of them."""
         picked = self.selected_all()
+        if self._needs_notes(picked):
+            self.ctl.message.emit(hints.COMBINE_NEEDS_NOTES)
+            return
+        game = self.ctl.session.game if self.ctl.session.connected else None
         try:
-            combined = combine(picked, addr_of=self._part_address)
+            combined = combine(
+                picked,
+                addr_of=self._part_address,
+                module_base=game.module_base if game is not None else None,
+            )
         except ValueError as exc:
             self.ctl.fail(exc, "combine")
             return
@@ -334,17 +353,28 @@ class CheatsView(QWidget):
         at = self.cheats.index(picked[0])
         for c in picked:
             self.cheats.remove(c)
-            self.finder.forget(c)
+            self.finder.forget(c, save=False)
         self.cheats.insert(at, combined)
         if combined.found_again:  # nothing moves: it comes back as one row next run
-            self.finder.remember_combined(combined)
-        if was_on:
-            try:
-                self.ctl.live.turn_on(combined)
-            except Exception as exc:
-                self.ctl.fail(exc, "toggle")
-        self.ctl.cheats_changed.emit()
+            self.finder.remember_combined(combined, save=False)
+        if self.ctl.project is not None:
+            self.finder.save()  # once, for every change above
         self.ctl.message.emit(f'Combined into "{combined.name}". One tick turns them all on.')
+        if was_on:
+            self._turn_on_combined(combined)
+        self.ctl.cheats_changed.emit()
+
+    def _turn_on_combined(self, combined: Cheat) -> None:
+        """A source was on: the combined cheat takes over, but a found-again part is
+        asked about first (one question) and its hook put back, as for a tick."""
+        try:
+            if combined.learned_parts:
+                if not self.finder.confirm(combined):
+                    return  # "OK, nothing was changed": it stays off
+                self.finder.before_on(combined)
+            self.ctl.live.turn_on(combined)
+        except Exception as exc:
+            self.ctl.fail(exc, "toggle")
 
     def _part_address(self, loc: Location) -> int | None:
         """Where a learned part is right now (to spot parts that overlap), or None."""
