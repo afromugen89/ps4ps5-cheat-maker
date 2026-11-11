@@ -13,7 +13,7 @@ import struct
 
 import pytest
 
-from tests.minicpu import AF, OF, STATUS, Cpu, FlatMemory, f32_bits
+from tests.minicpu import AF, OF, PF, SF, STATUS, ZF, Cpu, FlatMemory, f32_bits, f64_bits
 
 uc = pytest.importorskip("unicorn")
 x86 = pytest.importorskip("unicorn.x86_const")
@@ -119,3 +119,74 @@ def test_float_rounding_matches_for_halves():
     for bits in (0x3F800001, 0x3F800003, 0x00000001, 0x7F7FFFFF):
         half = struct.unpack("<I", struct.pack("<f", 0.5))[0]
         _same("f30f59c1", {"xmm0": bits, "xmm1": half}, 0x202)
+
+
+# The trace fixtures' game code: hex -> (operands are float32 "s" / float64 "d", flags
+# left undefined).
+TRACE = {
+    "f30f2cc0": ("s", 0),  # cvttss2si eax,xmm0
+    "f3480f2cc0": ("s", 0),  # cvttss2si rax,xmm0
+    "f30f2dc0": ("s", 0),  # cvtss2si eax,xmm0
+    "f20f2cc0": ("d", 0),  # cvttsd2si eax,xmm0
+    "f20f2dc0": ("d", 0),  # cvtsd2si eax,xmm0
+    "f30f2ac1": ("s", 0),  # cvtsi2ss xmm0,ecx
+    "f20f2ac1": ("d", 0),  # cvtsi2sd xmm0,ecx
+    "f30f5ac1": ("s", 0),  # cvtss2sd xmm0,xmm1
+    "f20f5ac1": ("d", 0),  # cvtsd2ss xmm0,xmm1
+    "f30f5ec1": ("s", 0),  # divss xmm0,xmm1
+    "f20f59c1": ("d", 0),  # mulsd xmm0,xmm1
+    "f20f5ec1": ("d", 0),  # divsd xmm0,xmm1
+    "f20f10c1": ("d", 0),  # movsd xmm0,xmm1
+    "66480f7ec0": ("d", 0),  # movq rax,xmm0
+    "66480f6ec1": ("d", 0),  # movq xmm0,rcx
+    "0f14c1": ("s", 0),  # unpcklps xmm0,xmm1
+    "0fb6c1": ("s", 0),  # movzx eax,cl
+    "0fbfc1": ("s", 0),  # movsx eax,cx
+    "4863c1": ("s", 0),  # movsxd rax,ecx
+    "6bc164": ("s", SF | ZF | AF | PF),  # imul eax,ecx,100
+    "4869c140420f00": ("s", SF | ZF | AF | PF),  # imul rax,rcx,1000000
+}
+DOUBLES = [0.0, -0.0, 1.0, -2.5, 1e308, -1e308, 5e-324, float("inf"), float("nan"), 0.87]
+
+
+@pytest.mark.parametrize("hexcode", TRACE)
+def test_trace_forms_match(hexcode):
+    width, undefined = TRACE[hexcode]
+    rnd = random.Random(hexcode)
+    for _ in range(300):
+        if width == "s":
+            pick = lambda: rnd.choice(FLOATS) if rnd.random() < 0.5 else rnd.uniform(-1e10, 1e10)  # noqa: E731
+            a, b = f32_bits(pick()), f32_bits(pick())
+        else:
+            pick = lambda: rnd.choice(DOUBLES) if rnd.random() < 0.5 else rnd.uniform(-1e19, 1e19)  # noqa: E731
+            a, b = f64_bits(pick()), f64_bits(pick())
+        hi = rnd.getrandbits(64) << 64
+        regs = {
+            "rax": rnd.getrandbits(64),
+            "rcx": rnd.choice(EDGE) if rnd.random() < 0.3 else rnd.getrandbits(64),
+            "xmm0": hi | a,
+            "xmm1": (rnd.getrandbits(64) << 64) | b,
+        }
+        if _nan(regs, width) and hexcode not in NAN_SAFE:
+            continue
+        _same(hexcode, regs, 0x202 | rnd.getrandbits(12) & STATUS, undefined)
+
+
+NAN_SAFE = {"f30f2cc0", "f3480f2cc0", "f30f2dc0", "f20f2cc0", "f20f2dc0", "f20f10c1"}
+"""Forms whose result with a NaN input doesn't depend on the NaN's payload."""
+
+
+def _nan(regs: dict[str, int], width: str) -> bool:
+    import math
+    import struct as st
+
+    for name in ("xmm0", "xmm1"):
+        v = regs[name]
+        x = (
+            st.unpack("<f", st.pack("<I", v & 0xFFFFFFFF))[0]
+            if width == "s"
+            else st.unpack("<d", st.pack("<Q", v & (1 << 64) - 1))[0]
+        )
+        if math.isnan(x):
+            return True
+    return False
