@@ -256,7 +256,9 @@ class FindAgain(QObject):
         have_parts = {self._key(c.name, self._anchors(c)) for c in rows}
         noted = {self._key(pc.name, pc.anchors) for pc in p.cheats if pc.parts}
         # Rows no notes entry names: renamed while the notes weren't loaded.
-        unnamed = [c for c in rows if self._key(c.name, self._anchors(c)) not in noted]
+        unnamed = [
+            c for c in rows if c.found_again and self._key(c.name, self._anchors(c)) not in noted
+        ]
         renamed = False
         for pc in p.cheats:
             if pc.parts:

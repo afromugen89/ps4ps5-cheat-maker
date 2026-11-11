@@ -222,3 +222,13 @@ notes entry: `test_rt05_*`.
 
 Retest verdict: BUG-01..05 verified fixed. One new Medium regression (BUG-06). The
 recommendation stays **Ready with known issues**.
+
+## Retest 2 (2026-11-11, after 8f0ce4a, 704a82d, e875c02)
+
+- BUG-06 **Fixed** (8f0ce4a): on connect, a row whose learned parts match a notes entry no
+  row names is that entry; the notes take the row's new name. `test_rt06_*` passes (xfail
+  removed). New UI tests: rename while disconnected, and rename while connected then restart.
+- pr-reviewer final verdict: Approve with suggestions. Its minor (a row with a moving part
+  could take over another combined cheat's notes entry on the rename match) fixed by only
+  matching rows that are found again.
+- Suite: 1671 passed, 2 skipped, 0 xfailed. Open bugs: none.
