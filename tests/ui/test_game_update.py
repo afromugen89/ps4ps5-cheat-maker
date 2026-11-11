@@ -12,9 +12,11 @@ from PySide6.QtCore import Qt
 from cheatmaker.core import anchor_hook as ah
 from cheatmaker.core import project as pj
 from cheatmaker.core import refind as rf
+from cheatmaker.core import updater as up
 from cheatmaker.core.cheats import Cheat, Location, LocationKind
 from cheatmaker.core.values import ValueType
 from cheatmaker.settings import Settings
+from cheatmaker.ui import carry as carry_ui
 from cheatmaker.ui import hints
 from cheatmaker.ui import main_window as mw
 from cheatmaker.ui.cheats_view import COL_KEEPS, COL_ON, FOUND_AGAIN, keeps_text
@@ -312,7 +314,7 @@ def test_adopt_carried_saves_tracks_unconfirmed_and_shows_check(win, console):
     seen = []
     win.cheats.finder.notes_changed.connect(lambda: seen.append(1))
     win.cheats.finder.adopt_carried(p, {"obj1": console.game.player})
-    assert win.ctl.project is p and seen == [1]
+    assert win.ctl.project is p and seen, "saved (the learner then saves its fingerprints)"
     assert path() == p
     tracker = win.ctl.live.trackers["obj1"]
     assert tracker.address == console.game.player and not tracker.confirmed
@@ -390,3 +392,140 @@ def test_keeps_text_for_brought_over_cheats():
     assert found == Cheat(
         "H", [Location(LocationKind.SESSION_ADDRESS, 0, raw, raw)], anchor=("o", "f")
     ), "carried is not part of the cheat's identity"
+
+
+# == AC-U2: fingerprints are learned while the notes' version runs ========================
+class V1Console(Console):
+    def __init__(self) -> None:
+        super().__init__(layout=fg.V1)
+
+
+@pytest.fixture
+def v1(qtbot, monkeypatch):
+    console = V1Console()
+    monkeypatch.setattr(rf.ah, "WATCH_SECONDS", 1)
+    monkeypatch.setattr(rf.ah, "PROVE_SECONDS", 1)
+    monkeypatch.setattr(rf, "SLOT_WAIT_S", 0.5)
+    reads = []
+    real = carry_ui.up.read_code_image
+
+    def counted(session, progress=None, cancel=None):
+        reads.append(1)
+        return real(session, progress, cancel)
+
+    monkeypatch.setattr(carry_ui.up, "read_code_image", counted)
+    ctl = Controller(lambda ip, port: console.game.fake, Settings.load(), TaskRunner(sync=True))
+    w = MainWindow(ctl)
+    qtbot.addWidget(w)
+    w.cheats.finder.ask_confirm = lambda text: True
+    w.cheats.finder.sleep = lambda _s: None
+    w.reads = reads
+    w.real_read = real
+    yield w, console
+    ctl.shutdown()
+
+
+def v1_notes(parts=False) -> pj.Project:
+    """Notes from before this change: a hook whose fingerprint was never checked."""
+    g = fg.build(1)
+    cand = ah.HookCandidate(
+        fg.READER, fg.VMOVSS_R, "vmovss xmm0,[r12+2ACh]", 2, "reader", "r12", fg.HP, True
+    )
+    hook = ah.plan_hook(g.session, cand, fg.PLAYER_VT - fg.BASE)
+    assert not hook.sig_unique
+    obj = pj.ObjectSpec(
+        "obj1",
+        "Health",
+        fg.PLAYER_VT - fg.BASE,
+        [pj.Field("Health", fg.HP, ValueType.FLOAT, (0, pj.CLASS_FLOAT_LIMIT), 100.0)],
+        [hook, pj.VtableAnchor()],
+    )
+    cheats = [pj.ProjectCheat("Infinite health", "obj1", "Health", "freeze", 999.0)]
+    if parts:
+        nop = pj.ProjectPart("no death", offset=fg.SUB_SITE - fg.BASE, on=b"\x90" * 6, off=fg.SUB_W)
+        cheats.append(
+            pj.ProjectCheat("God", parts=[pj.ProjectPart("health", "obj1", "Health", 999.0), nop])
+        )
+    p = pj.Project(fg.TITLE, fg.VERSION, objects=[obj], cheats=cheats)
+    pj.save(pj.project_path(fg.TITLE, fg.VERSION), p)
+    return p
+
+
+def test_connect_learns_a_unique_fingerprint_and_writes_only_the_hook(v1, caplog):
+    w, console = v1
+    v1_notes()
+    caplog.set_level("INFO")
+    console.game.fake.writes.clear()
+    connect(w)
+    saved = pj.load(pj.project_path(fg.TITLE, fg.VERSION))
+    h = saved.objects[0].hook
+    assert h.sig_unique and w.reads == [1]
+    img = w.real_read(w.ctl.session)
+    clean = img.overlay([(h.hook, h.orig)])
+    assert clean.find(up.Signature.from_text(h.signature), 2) == [h.hook]
+    hook_bytes = {fg.READER, fg.BASE + h.cave, fg.BASE + h.slot}
+    assert {a for _p, a, _d in console.game.fake.writes} <= hook_bytes, "only the hook went in"
+    assert "action=learn_signature source=notes object=obj1 offset=0x200" in caplog.text
+    assert "action=learn_signatures source=notes saved=1 version=03.000.005" in caplog.text
+    w.cheats.finder.save()
+    assert w.reads == [1], "once per version per run"
+
+
+def test_code_parts_go_to_the_signatures_file(v1):
+    w, _console = v1
+    v1_notes(parts=True)
+    connect(w)
+    sigs = up.load_signatures(up.signatures_path(fg.TITLE, fg.VERSION))
+    assert set(sigs) == {fg.SUB_SITE - fg.BASE}
+    assert sigs[fg.SUB_SITE - fg.BASE].text().startswith("29 88 B0 02 00 00")
+
+
+def test_nothing_to_learn_means_no_read(v1):
+    w, _console = v1
+    p = v1_notes()
+    p.objects[0].hook.sig_unique = True
+    pj.save(pj.project_path(fg.TITLE, fg.VERSION), p)
+    connect(w)
+    assert w.reads == []
+
+
+def test_disconnect_cancels_and_nothing_is_saved(v1, monkeypatch):
+    w, _console = v1
+    v1_notes()
+    real = carry_ui.up.read_code_image
+
+    def cut(session, progress=None, cancel=None):
+        w.ctl.run_before_disconnect()  # the player pressed Disconnect meanwhile
+        return real(session, progress, cancel)
+
+    monkeypatch.setattr(carry_ui.up, "read_code_image", cut)
+    connect(w)
+    assert not w.fingerprints.running and not w.ctl.code_reading
+    saved = pj.load(pj.project_path(fg.TITLE, fg.VERSION))
+    assert not saved.objects[0].hook.sig_unique
+    assert w.fingerprints._done == set(), "tried again on the next connect"
+
+
+def test_one_code_read_at_a_time(v1):
+    w, _console = v1
+    v1_notes()
+    w.ctl.code_reading = True  # v2's cheat-file learner is reading
+    connect(w)
+    assert (
+        w.reads == []
+        and not pj.load(pj.project_path(fg.TITLE, fg.VERSION)).objects[0].hook.sig_unique
+    )
+    w.ctl.code_reading = False
+    w.cheats.finder.save()
+    assert w.reads == [1]
+    assert pj.load(pj.project_path(fg.TITLE, fg.VERSION)).objects[0].hook.sig_unique
+
+
+def test_cheat_file_learner_waits_for_a_notes_read(v1, monkeypatch):
+    w, _console = v1
+    connect(w)
+    learned = []
+    monkeypatch.setattr(w.ctl.tasks, "run", lambda *a: learned.append(a))
+    w.ctl.code_reading = True
+    w.cheats._maybe_learn()
+    assert learned == []

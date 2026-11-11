@@ -438,7 +438,7 @@ class CheatsView(QWidget):
         """While the file's own version runs, learn a signature for each code line so
         the cheats can be moved after the next game update. Reads only."""
         cf, g = self.ctl.cheat_file, self.ctl.session.game
-        if self._learning or not (cf and g and self.ctl.session.connected):
+        if self._learning or self.ctl.code_reading or not (cf and g and self.ctl.session.connected):
             return
         if cf.title_id.upper() != g.title_id or versions_differ(cf.version, g.version):
             return
@@ -459,6 +459,7 @@ class CheatsView(QWidget):
         for off in todo:
             self._learn_tried.add((g.title_id, g.version, off))
         self._learning = True
+        self.ctl.code_reading = True  # one code read at a time (notes' fingerprints too)
         session, title_id, version = self.ctl.session, g.title_id, g.version
 
         def work() -> int:
@@ -468,10 +469,12 @@ class CheatsView(QWidget):
 
         def done(n: int) -> None:
             self._learning = False
+            self.ctl.code_reading = False
             log.info("action=learn_signatures saved=%d version=%s", n, version)
 
         def failed(exc: BaseException) -> None:
             self._learning = False
+            self.ctl.code_reading = False
             log.warning("action=learn_signatures reason=%s", exc)
 
         self.ctl.tasks.run(work, done, failed)
