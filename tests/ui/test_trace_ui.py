@@ -486,3 +486,125 @@ def test_suggesting_the_trace_turns_advanced_on(win, game):
     f._suggest(f.guide.after_put_back())
     assert f.advanced.isChecked() and f.trace_btn.isEnabled()
     assert "bold" in f.trace_btn.styleSheet()
+
+
+def dialog(win, game, **kw) -> TraceDialog:
+    kw.setdefault("frozen", {})
+    return TraceDialog(
+        win.ctl,
+        address=game.hud,
+        vtype=I32,
+        on_found=lambda r: None,
+        on_search_way=lambda r, s: None,
+        parent=win,
+        **kw,
+    )
+
+
+def freeze_at(win, game, addr: int) -> None:
+    win.ctl.freezer.freeze(f"find:{addr}", [(41, addr, game.g.fake.peek(41, addr, 4))])
+    win.ctl.frozen_addresses.add(addr)
+
+
+def test_release_failing_half_way_resumes_what_it_paused(win, game):
+    """Review finding 5."""
+    from cheatmaker.errors import ReadFailed
+
+    freeze_at(win, game, game.hud)
+    freeze_at(win, game, game.hud + 4)
+    d = dialog(win, game, frozen={game.hud: 4, game.hud + 4: 4})
+    real_read = game.g.fake.read
+
+    def read(pid, addr, size):
+        if addr == game.hud + 4:
+            raise ReadFailed("gone")
+        return real_read(pid, addr, size)
+
+    game.g.fake.read = read
+    with pytest.raises(ReadFailed):
+        d.release(game.hud, 8)
+    assert f"find:{game.hud}" in win.ctl.freezer.keys, "the first one is frozen again"
+
+
+def test_resume_puts_back_the_rest_when_one_fails(win, game):
+    freeze_at(win, game, game.hud)
+    freeze_at(win, game, game.hud + 4)
+    d = dialog(win, game, frozen={game.hud: 4, game.hud + 4: 4})
+    resume = d.release(game.hud, 8)
+    assert not win.ctl.freezer.keys
+    real_freeze = win.ctl.freezer.freeze
+
+    def freeze(key, writes):
+        if key == f"find:{game.hud}":
+            raise RuntimeError("boom")
+        real_freeze(key, writes)
+
+    win.ctl.freezer.freeze = freeze
+    resume()
+    assert f"find:{game.hud + 4}" in win.ctl.freezer.keys
+
+
+class StubTracker:
+    def __init__(self, at: int) -> None:
+        self.at = at
+
+    def field_address(self, _name: str) -> int:
+        return self.at
+
+
+def test_only_freezing_cheats_are_paused_and_anchored_ones_by_their_tracker(win, game):
+    """Review finding 6: a one-shot cheat on the copy isn't written again on resume."""
+    from cheatmaker.core.cheats import Cheat, Location, LocationKind
+
+    ctl = win.ctl
+    cf = ctl.ensure_file()
+    on = I32.encode(99)
+
+    def loc(offset: int) -> Location:
+        return Location(LocationKind.SESSION_ADDRESS, offset, on, on)
+
+    once = Cheat("Set once", [loc(game.hud)])
+    held = Cheat("Freeze", [loc(game.hud)], freeze=True)
+    anchored = Cheat("Anchored", [loc(0x10)], freeze=True, anchor=("obj1", "hp"))
+    elsewhere = Cheat("Elsewhere", [loc(game.obj)], freeze=True)
+    ctl.live.trackers["obj1"] = StubTracker(game.hud)
+    cf.cheats += [once, held, anchored, elsewhere]
+    for c in cf.cheats:
+        ctl.live.turn_on(c)
+    writes_before = list(game.g.fake.writes)
+    resume = dialog(win, game).release(game.hud, 4)
+    assert once.enabled and not held.enabled and not anchored.enabled and elsewhere.enabled
+    resume()
+    assert held.enabled and anchored.enabled
+    new = game.g.fake.writes[len(writes_before) :]
+    assert len(new) == 2, "the two freezing cheats were turned on again, not the one-shot"
+
+
+def test_not_restored_after_cancel_still_reaches_the_player(win, game):
+    """Review finding 8: the dialog is closed; the status line says what stayed."""
+    d = dialog(win, game)
+    said = []
+    win.ctl.message.connect(said.append)
+    d._rejected = True
+    d._done(R(tr.Outcome.CANCELLED, game.hud, not_restored=(0x20,)))
+    assert said == [hints.TRACE_NOT_RESTORED.format(addrs="0x20")]
+
+
+def test_disconnect_waits_for_the_trace_to_put_things_back(win, game, monkeypatch, caplog):
+    import threading
+    import time
+
+    from cheatmaker.ui import trace_dialog
+
+    d = dialog(win, game)
+    d._cancel = threading.Event()
+    d._job_done.clear()
+    threading.Timer(0.05, d._job_done.set).start()
+    t0 = time.monotonic()
+    d._stop_for_disconnect()
+    assert d._cancel.is_set() and d._job_done.is_set()
+    assert time.monotonic() - t0 < trace_dialog.STOP_WAIT_S
+    monkeypatch.setattr(trace_dialog, "STOP_WAIT_S", 0.01)
+    d._job_done.clear()
+    d._stop_for_disconnect()
+    assert "action=trace_stop_wait timed_out=True" in caplog.text

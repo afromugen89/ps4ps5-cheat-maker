@@ -36,6 +36,9 @@ from cheatmaker.ui.messages import report
 
 log = logging.getLogger(__name__)
 
+STOP_WAIT_S = 3.0
+"""Disconnect: how long to wait for a cancelled trace to put its test values back."""
+
 Found = Callable[[tr.TraceResult], None]
 SearchWay = Callable[[tr.TraceResult, float | int | None], None]
 """``on_search_way(result, the start row's value now)``."""
@@ -169,6 +172,8 @@ class TraceDialog(QDialog):
         self.sleep, self.clock = sleep, clock
         self.result: tr.TraceResult | None = None
         self._cancel: threading.Event | None = None
+        self._job_done = threading.Event()  # set on the worker thread when run() returns
+        self._job_done.set()
         self._rejected = False
         self.notice: Callable[[], bool] = self._notice  # tests replace this
         self._signals = _Signals()
@@ -252,9 +257,15 @@ class TraceDialog(QDialog):
         self.search_btn.setVisible(False)
         self.advanced.clear()
         self.result = None
-        self.ctl.tasks.run(
-            lambda: tracer.run(self._signals.progress.emit, cancel), self._done, self._failed
-        )
+        self._job_done.clear()
+        self.ctl.tasks.run(lambda: self._run(tracer, cancel), self._done, self._failed)
+
+    def _run(self, tracer: tr.Tracer, cancel: threading.Event) -> tr.TraceResult:
+        """The job (worker thread). ``_job_done`` lets a disconnect wait for it."""
+        try:
+            return tracer.run(self._signals.progress.emit, cancel)
+        finally:
+            self._job_done.set()
 
     def _on_progress(self, fraction: float, stage: tr.Stage, n: int) -> None:
         self.progress.setValue(int(fraction * 100))
@@ -295,6 +306,10 @@ class TraceDialog(QDialog):
         if r.outcome is tr.Outcome.LOST:
             self.ctl.handle_lost()
         if self._rejected:
+            # the dialog may be closed: the player still has to hear what stayed changed
+            if r.not_restored:
+                addrs = ", ".join(f"{a:#x}" for a in r.not_restored)
+                self.ctl.message.emit(hints.TRACE_NOT_RESTORED.format(addrs=addrs))
             return
         if self._usable(r):
             self.on_found(r)
@@ -321,9 +336,13 @@ class TraceDialog(QDialog):
         self.accept()
 
     def _stop_for_disconnect(self) -> None:
-        """Disconnect: stop the trace (it puts its test values back on its way out)."""
+        """Disconnect: stop the trace and give it up to STOP_WAIT_S to put its test
+        values back while the link still works."""
         if self._cancel is not None:
+            self._rejected = True
             self._cancel.set()
+            if not self._job_done.wait(STOP_WAIT_S):
+                log.warning("action=trace_stop_wait timed_out=True")
 
     def reject(self) -> None:
         """Cancel or close: the running trace stops and puts everything back."""
@@ -335,35 +354,52 @@ class TraceDialog(QDialog):
 
     # -- pausing the app's own writes on the watched copy (worker thread) ----------------
     def release(self, addr: int, size: int) -> Callable[[], None]:
-        """Pause Find's freezes and the cheats that write into [addr, addr+size); the
-        returned resume puts them back as they were."""
+        """Pause Find's freezes and the freezing cheats that write into
+        [addr, addr+size); the returned resume puts them back as they were. A cheat
+        written once isn't touched (resuming would write it again). If pausing fails
+        half way, what was already paused is resumed before the error goes on."""
         end = addr + size
         ctl = self.ctl
         refreeze: list[tuple[int, bytes]] = []
+        cheats: list[Cheat] = []
         try:
             g = ctl.session.require_game()
             client = ctl.session.require_client()
         except Exception as exc:  # nothing to pause without a game
             report(exc, "trace")
             return lambda: None
-        for a in sorted(ctl.frozen_addresses):
-            n = self.frozen.get(a, 4)
-            if a < end and addr < a + n:
-                data = client.read(g.pid, a, n)
-                ctl.freezer.unfreeze(f"find:{a}")
-                refreeze.append((a, data))
-        cheats: list[Cheat] = []
-        cf = ctl.cheat_file
-        for c in list(cf.cheats) if cf is not None else []:
-            if not c.enabled:
-                continue
-            hits = any(
-                loc.address(g.module_base) < end and addr < loc.address(g.module_base) + len(loc.on)
-                for loc in c.locations
-            )
-            if hits:
-                ctl.live.turn_off(c, restore=False)
-                cheats.append(c)
+
+        def resume() -> None:
+            for a, data in refreeze:
+                try:
+                    ctl.freezer.freeze(f"find:{a}", [(g.pid, a, data)])
+                except Exception as exc:  # the rest are still put back
+                    report(exc, "trace")
+            for c in cheats:
+                try:
+                    ctl.live.turn_on(c)
+                except Exception as exc:
+                    report(exc, "trace")
+            if cheats:
+                self._signals.cheats.emit()
+
+        try:
+            for a in sorted(ctl.frozen_addresses):
+                n = self.frozen.get(a, 4)
+                if a < end and addr < a + n:
+                    data = client.read(g.pid, a, n)
+                    ctl.freezer.unfreeze(f"find:{a}")
+                    refreeze.append((a, data))
+            cf = ctl.cheat_file
+            for c in list(cf.cheats) if cf is not None else []:
+                if not (c.enabled and c.freeze):
+                    continue
+                if any(a < end and addr < a + n for a, n in self._spans(c, g.module_base)):
+                    ctl.live.turn_off(c, restore=False)
+                    cheats.append(c)
+        except BaseException:
+            resume()
+            raise
         if cheats:
             self._signals.cheats.emit()
         log.info(
@@ -373,16 +409,19 @@ class TraceDialog(QDialog):
             len(refreeze),
             len(cheats),
         )
-
-        def resume() -> None:
-            for a, data in refreeze:
-                ctl.freezer.freeze(f"find:{a}", [(g.pid, a, data)])
-            for c in cheats:
-                ctl.live.turn_on(c)
-            if cheats:
-                self._signals.cheats.emit()
-
         return resume
+
+    def _spans(self, c: Cheat, module_base: int) -> list[tuple[int, int]]:
+        """(address, size) a cheat writes now. An anchored cheat writes where its
+        object's tracker says the field is (its location's offset is unused)."""
+        if c.anchor is None:
+            return [(loc.address(module_base), len(loc.on)) for loc in c.locations]
+        obj_id, field_name = c.anchor
+        tracker = self.ctl.live.trackers.get(obj_id)
+        at = tracker.field_address(field_name) if tracker is not None else None
+        if at is None or not c.locations:
+            return []
+        return [(at, len(c.locations[0].on))]
 
 
 __all__ = ["TraceDialog", "details", "result_text"]
