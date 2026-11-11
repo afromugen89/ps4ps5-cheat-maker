@@ -201,3 +201,29 @@ result, crash_mark) and `action=build_alive` if there are any.
 If a fix crashes the game: restart the game, Connect again, and send the hint the app
 shows ("Fix N crashed the game last time...") and the log. That fix is never tried again
 for that game version; run the same test again to see the next fix.
+
+## C20 Find the real one behind it (added 2026-11-11)
+
+Spec: docs/spec-trace.md, design: docs/architecture-trace.md. Save your game first: a
+trace writes test values and briefly pauses the game. The button is under **Advanced** as
+**Find the real one behind it (being tested)** until C20a passes. After each test, send
+the log lines starting `action=trace_` (start, hop, watch, writer, path, source, check,
+test, result, stop) and say how long it took.
+
+| # | Test | Steps | Pass when | Send back |
+|---|---|---|---|---|
+| C20a | Registers are right | Any game; find a value's screen copy; Advanced on; Find the real one behind it; change the number. | Advanced shows the writer and a source worked out "from the registers" that passes the memory check. If it never does, C10a registers are wrong. | `action=trace_*` lines incl. the raw packet. |
+| C20b | Returnal health from a screen copy | Search health as shown (whole number, 4 bytes) until a few copies; Check which is real marks copies; Find the real one behind it; take hits when asked. | Ends with a Decimal row marked checked: real/kept, Stored as shows the factor; Freeze on it holds health in game. No crash. | Log, the result row, hops count, total time. |
+| C20c | Returnal Obolites | Search Obolites as 4-byte whole number (the 4 copies of C3); Find the real one behind it; pick some up. | Ends at an 8-byte whole number (compare with C3's 0x...f34 style address); Set 1000 holds after a pickup. | Log, addresses. |
+| C20d | Execute breakpoint (setting on) | Set `trace_exec_breakpoint: true`; repeat C20b. | The log shows method=exec with hits that differ; the game keeps running; no "repeats" line. If it repeats or hangs, say so (we keep it off). | `trace_source` lines. |
+| C20e | Already real | Simple game; find money's real value (Set holds); Find the real one behind it. | "This is already the value the game uses." No row added. | Log. |
+| C20f | Cancel and recovery | Start a trace, Cancel during the watch; then run Lock it on the same row. | Cancel within 2 s; game runs; Lock it attaches normally (debugger was detached); no value left at a test value. | Log. |
+| C20g | PS4 game | A CUSA game, a value with a screen copy; trace it. | Same as C20b, or a clear AC-T8 message. | Log. |
+| C20h | Misaligned 8-byte watch | On C20c's real INT64 (4-aligned), run a trace or Lock it watch. | Writes are caught (hits > 0) when the count changes. | `trace_watch` lines. |
+| C20i | Timing | During C20b/C20c note times. | Each hop no more than 15 s plus the player's change; whole trace no more than 4 min. | Times. |
+
+Facts the app assumes but hasn't seen on a console yet, each logged when it is used:
+the registers in a watch hit (C20a, logged with the raw packet); that a `rep movs` write
+reports the RIP of the `rep movs` itself (`rep_at_rip=True (UNVERIFIED...)`, C20a/C20b);
+and that an execute breakpoint doesn't fire again on the same instruction (C20d: a line
+saying "the breakpoint repeats" means it does, and the setting stays off).

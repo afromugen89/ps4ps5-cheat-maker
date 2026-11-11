@@ -230,7 +230,9 @@ Three ways to find the real one:
   is marked **checked: real** and moves to the top of its group (so Set, Freeze and Make
   a cheat use it); others show **checked: copy** or **checked: kept the test value**.
   Every value the game didn't put back itself gets its own value back. A group of 5
-  takes about 8 seconds.
+  takes about 8 seconds. If every row comes out **checked: copy**, the real value isn't
+  in the list at all: the hint then suggests **Find the real one behind it** (section
+  5.10).
 - **Set test**: pick a row, type a new value, press **Set**. If the number on screen
   jumps back the next time it changes, that row was a copy.
 - **Test the hits** (easier): the app writes a test value to half of the matches for a
@@ -281,6 +283,65 @@ uses that value instead.
   PS5Debug-NG to read the game's memory in place. If a search ever hangs or the game
   stutters, set `"scan_connections": 1` and/or `"fast_scan": false` in the same
   `settings.json` and reconnect.
+
+### 5.10 Find the real one behind it
+
+Sometimes everything you can find is a copy: the screen shows 87, but the game keeps
+health as 0.87 or as 870, or as a number of a different size, and your search only found
+the HUD's copies. **Find the real one behind it** follows the copy back to the value the
+game really uses.
+
+It is still being tested on a real PS5, so for now it's under **Advanced**, labelled
+**Find the real one behind it (being tested)**. The hint suggests it (and the button
+turns bold) when **Check which is real** marks every row a copy, or when a value you
+Set or Freeze is put back by the game within 2 seconds.
+
+1. Pick **one row** in the list (a copy is fine: that's the point) and press the button.
+   The first time, it asks you to **save your game first**: it writes test values and
+   briefly pauses the game.
+2. Press **Start** and keep playing. When it says so, make the number change (take a
+   hit, spend some) within 30 seconds. The app watches which bit of the game's code
+   writes the copy, reads that code to see where the number comes from, and checks the
+   place it found.
+3. It may ask you to **change the number once more** so it can check what it found, and
+   then puts a test value in for about a second to see that the game really uses it.
+   Every value it changes is put back.
+4. If the place it found is itself a copy, it follows that one too (up to 4 steps, at
+   most about 4 minutes). **Cancel** stops it at any time and leaves nothing changed.
+
+When it finds the real value it says how the game keeps it, for example *"Found the
+value the game uses: 0.87, a decimal; the screen shows it x100."* and adds it to the
+list, marked **checked: real** (or **not sure** if it couldn't test it).
+
+**On a found row, you type what the screen shows.** Value now shows both, like
+`0.87 (screen: 87)`; Stored as shows how the game keeps it; Notes say which copy it was
+found behind. Set, Freeze and Make a cheat take the number as you see it on screen, so
+typing 100 sets the game's 1.0. A cheat saved from it holds the game's own number.
+
+**Search for it that way**: the result also offers to start a new search with the right
+number type and "Game stores it as" already filled in, and today's on-screen number typed
+in. Press **Search**, then narrow it down as usual. Useful next time the game starts,
+when the found address is somewhere else.
+
+Other answers you may see:
+
+| Message | What it means |
+|---|---|
+| This is already the value the game uses. | The row you picked is the real one. Use it. |
+| Nothing wrote to it. Make the number change while it watches, then try again. | The number didn't change during the 30 s watch. |
+| The game works this number out in a way the app can't follow yet. | Try Check which is real, or I don't know the number (section 5.5). |
+| The game scrambles this value, which isn't supported yet. | The game hides this value on purpose. |
+| Followed it N steps without reaching the real value. | The last place it checked is added to the list, marked not sure. |
+| This address can't be watched. | Pick another row of the same group. |
+
+The button waits while a search or a check is still running. A frozen row or a cheat on
+the same value is paused during the trace and put back afterwards.
+**Advanced: show details** in its window lists each step: what it watched, which code
+wrote it, how it worked out the place, and why other places were dropped.
+
+For the curious: one step uses an execute breakpoint as a last resort. It's off until
+it's been checked on a console; to try it, set `"trace_exec_breakpoint": true` in
+`%APPDATA%\CheatMaker\settings.json`.
 
 ---
 
@@ -528,7 +589,7 @@ health cheat for CheatRunner.
 | No game running. | Start the game, get into gameplay, press **Refresh**. |
 | Lost connection to the PS5. | Check the PS5 is on, press **Connect**. |
 | Nothing found. | Check the number, then press **Try it** to search another way (section 5.6). |
-| The value keeps going back after Set or Freeze. | You found a copy. See section 5.7 and the Obolites example. |
+| The value keeps going back after Set or Freeze. | You found a copy. See section 5.7 and the Obolites example; if every match is a copy, use Find the real one behind it (section 5.10). |
 | Couldn't send the file to the PS5. | Load the ftpsrv payload, or copy the saved file yourself. |
 | The PS5 answered in a way we didn't expect. | Restart PS5Debug-NG and try again. |
 | Something went wrong. | Press **Copy log** and send it with your bug report. |
@@ -555,6 +616,7 @@ health cheat for CheatRunner.
 - **This session only**: the value is somewhere different each time the game starts.
 - **Lock it**: switch off the bit of game code that changes the value.
 - **Make it work**: let the app find, test and keep a safe fix for a value by itself.
+- **Find the real one behind it**: follow a screen copy back to the value the game uses.
 - **Only me**: a cheat that changes your character's value but not the enemies'.
 - **CheatRunner**: the program on the PS5 that runs saved cheat files without the PC.
 
@@ -562,6 +624,6 @@ health cheat for CheatRunner.
 
 ## Good to know
 
-Some of the newer features (Make it work, Lock it, Player only, Find it next time, Test
+Some of the newer features (Make it work, Find the real one behind it, Lock it, Player only, Find it next time, Test
 the hits and the percent search with It's full now) are still being checked on a real PS5. If one of them doesn't behave as described, press
 **Copy log** and report it.

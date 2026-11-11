@@ -210,3 +210,46 @@ results carry their `vtype`. The Scanner's `vtype` is None while more than one t
 left (`Scanner.mixed`); scan files then add a Type column. If no second connection can
 be opened, the search runs on the first type only. FakeConsole uses `MultiScan`.
 Console test C14.
+
+## Find the real one behind it (2026-11-11)
+
+Spec: docs/spec-trace.md, design: docs/architecture-trace.md (steps 1-13, one commit
+each). New core modules `trace_way` (how a real value becomes the shown one, float32
+faithful, with an inverse that nudges up to 8 ULP), `trace_flow` (decode a window around
+the writer, follow the stored register back, work out source addresses, one caller up)
+and `tracer` (the hop driver). UI: `ui/trace_dialog.py`, traced rows in the Find tab,
+guide `Action.TRACE`. Test tooling: `tests/asm.py`, `tests/tracegame.py`, minicpu
+extended (checked against unicorn by `tests/qa/test_minicpu_vs_unicorn.py`).
+
+Choices inside the design, and where it differs from the sketch:
+
+- `trace_flow.follow` takes the shown type (`shown`) so a step's `to` type is known
+  without a second pass; `follow_reg`, `store_address`, `caller_window` and `Path.lane`
+  are extra helpers. `follow_into_caller` takes the return address, register, lane and
+  the hit instead of a prepared caller window. `Candidate.expr` is always an address
+  expression without outer brackets (`rbx+10h`, `[[rbx+30h]+8h]+10h`, `watched+(rsi-rdi)`).
+- `Tracer` takes `settle_s` (for tests); `TraceResult` carries no message text, only the
+  outcome plus `value`, `max_now` and `reason`; progress reports a `Stage`, and every word
+  lives in `ui/hints.py`. The "change it once more" wording (`TRACE_CHANGE`) is ours.
+- A load-then-store of the same address (read-modify-write) is detected from the
+  instructions, not from addresses. The circle check (a source we watched already) runs
+  before the write test; a read-modify-write found at hop 2 or later ends FOUND with no
+  verdict (shown as "not sure").
+- `TraceDialog` takes `frozen={addr: size}` from the Find tab, because the Freezer's
+  entries are private. Overlapping freezes and enabled cheats are released during the
+  trace (cheats off with `restore=False`) and put back afterwards.
+- When Check which is real marks every row a copy, the guide's TRACE hint replaces
+  `CHECK_REAL_NONE` (AC-T1). Spotting a Set/Freeze put back by the game is best effort: one
+  look 2 s later (`PUT_BACK_S`).
+- Step 10 briefly mapped `Action.TRACE` to the Check button until step 11 added
+  `trace_btn`.
+- Known limitation: a `movzx` of an unsigned 1- or 2-byte number is treated as the signed
+  `ValueType` of that size, so values above 127 / 32767 would read wrong.
+
+Unverified console facts, each logged where it is used rather than assumed silently:
+registers in a trap (`action=trace_*` with the raw packet, C10a/C20a); `rep movs` reports
+its own RIP mid-copy (`rep_at_rip=True (UNVERIFIED ...)`); whether NG sets RF when it
+continues after an execute breakpoint (a repeating hit is logged as "the breakpoint
+repeats" and ends the fallback; `trace_exec_breakpoint` stays off until C20d). The button
+stays under Advanced "(being tested)" until C20a passes (`hints.TRACE_TESTED`).
+Console tests C20a-i.
