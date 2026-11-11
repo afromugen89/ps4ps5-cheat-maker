@@ -818,3 +818,14 @@ def test_the_kept_fix_is_marked_on_without_writing_again(monkeypatch):
     assert cheat.enabled and live.active[id(cheat)] is cheat
     room = cheat.locations[0].offset + fg.BASE
     assert writes.count(fg.WRITER) == 1 and writes.count(room) == 1, "each written once"
+
+
+def test_collect_not_taken_says_so_and_puts_back():
+    g, _clock, bl = setup(only_me=True)
+    bl.watch()
+    before = module(g)
+    g.fake.drop_code_writes = True
+    with pytest.raises(BuildFailed, match="Couldn't start Collect: the PS5 didn't take"):
+        bl.collect()
+    g.fake.drop_code_writes = False
+    assert module(g) == before and notes.current_note() is None

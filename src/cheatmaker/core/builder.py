@@ -714,7 +714,7 @@ class Builder:
                 raise BuildFailed(RESTART)
             if failed.result is TryResult.CANCELLED:
                 raise ScanCancelled("collecting cancelled")
-            raise BuildFailed(CANT_TELL_APART)
+            raise BuildFailed(f"Couldn't start Collect: {failed.hint}.")
         try:
             waited = 0.0
             while waited < COLLECT_S:
