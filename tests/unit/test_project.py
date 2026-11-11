@@ -270,6 +270,7 @@ def test_format_4_keys_round_trip(tmp_path):
     p.carried_from = "03.000.004"
     player = p.object("player")
     player.check = player.relearn_class = True
+    player.carried_from = "03.000.003"  # this value came from another version (Advanced)
     player.hook.sig_unique = True
     combined = _combined()
     combined.test = True
@@ -281,6 +282,8 @@ def test_format_4_keys_round_trip(tmp_path):
     assert list(doc)[:5] == ["format", "format_version", "title_id", "version", "carried_from"]
     obj = doc["objects"][0]
     assert obj["check"] is True and obj["relearn_class"] is True
+    assert obj["carried_from"] == "03.000.003"
+    assert all("carried_from" not in o for o in doc["objects"][1:]), "only when set"
     assert obj["anchors"][0]["signature_unique"] is True
     assert doc["cheats"][1]["test"] is True and "test" not in doc["cheats"][0]
     assert pj.load(path) == p
@@ -292,6 +295,7 @@ def test_format_4_keys_round_trip(tmp_path):
         lambda d: d.update(carried_from=5),
         lambda d: d["objects"][0].update(check="yes"),
         lambda d: d["objects"][0].update(relearn_class=1),
+        lambda d: d["objects"][0].update(carried_from=3),
         lambda d: d["objects"][0]["anchors"][0].update(signature_unique="true"),
         lambda d: d["cheats"].append(
             {

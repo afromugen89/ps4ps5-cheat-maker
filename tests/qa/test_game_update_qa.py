@@ -77,9 +77,6 @@ def test_tc01_version_compare_rules():
     assert src is not None and src.project.version == "03.000.005" and not src.newer
 
 
-@pytest.mark.xfail(
-    reason="BUG-01: a version with a superscript digit crashes version_key", strict=True
-)
 def test_tc02_odd_version_text_never_crashes():
     """TC-02: version text from the console or a notes file is compared, never a crash.
     "²" is a digit to str.isdigit() but not to int(): version_key raises ValueError,
@@ -244,10 +241,6 @@ def test_tc12_bring_over_read_takes_the_one_code_read_slot(make, monkeypatch):
     assert seen == [True], "the bring-over's own read holds the slot"
 
 
-@pytest.mark.xfail(
-    reason="BUG-02: Bring them over reads the game's code without taking the one-read slot",
-    strict=True,
-)
 def test_tc13_advanced_waits_while_another_code_read_runs(make, monkeypatch):
     """TC-13: a learner holds the read (ctl.code_reading): Advanced must not read too."""
     tc.learned_v1(3)
@@ -298,11 +291,6 @@ def _merge_setup(extra_cheat: pj.ProjectCheat | None = None):
     return old
 
 
-@pytest.mark.xfail(
-    reason="BUG-03: Advanced merge silently drops a new-named cheat on a value already "
-    "in the notes",
-    strict=True,
-)
 def test_tc15_merge_keeps_new_named_cheats_on_values_already_here(make):
     """TC-15 (AC-U7): Advanced adds cheats whose *names* aren't in the new notes. "Health
     500" (new name, on Health, which the new notes already hold) must be added, or at
@@ -465,15 +453,10 @@ def test_tc22_advanced_repeats_a_failed_bring_over(make):
 
 
 # == AC-U9 Update for this version with the notes' hook in the file ==========================
-@pytest.mark.xfail(
-    reason="BUG-07: Update for this version drops a moved cheat when another cheat has the "
-    "same name and fails (files with the notes' hook)",
-    strict=True,
-)
 def test_tc23_update_with_hooks_keeps_a_moved_cheat_whose_name_repeats():
     """TC-23: a file with the find-it-again hook and two cheats both named "No death": one
     moves, one can't (its code is gone). v2 alone keeps the one that moved; with the hook
-    lines (AC-U9) both disappear from the updated file."""
+    lines (AC-U9) both used to disappear from the updated file (BUG-07)."""
     from cheatmaker.core.cheats import Cheat, Location, LocationKind
 
     old = tc.learned_v1(1)
@@ -490,16 +473,12 @@ def test_tc23_update_with_hooks_keeps_a_moved_cheat_whose_name_repeats():
     v2_only, _r = up.update_file(rest, sigs, image, NEW)
     assert [c.name for c in v2_only.cheats] == ["No death"], "v2 keeps the one that moved"
     _plan, new, _rep, _inst = tc.run_carry(old, g, pick=lambda _n: g.player)
+    new.objects[0].check = False  # confirmed: the PC-off line is rebuilt too (review m9)
     out, _rep = cr.update_with_hooks(g.session, cf, sigs, image, NEW, old, new)
     assert [c.name for c in out.cheats] == ["Find Health again", "No death", "Health (PC off)"]
 
 
 # == AC-U4 field shift: fields before the hooked one ==========================================
-@pytest.mark.xfail(
-    reason="BUG-08: the field shift can move a field before the start of the object "
-    "(negative offset) and the value still counts as brought over",
-    strict=True,
-)
 def test_tc24_field_shift_never_gives_a_negative_offset():
     """TC-24: the hooked field moved 0x20 *down* (0x2AC -> 0x28C). A second field at +8
     becomes -0x18: before the object. A cheat on it would write into the memory in front
@@ -516,11 +495,6 @@ def test_tc24_field_shift_never_gives_a_negative_offset():
 
 
 # == wording of reasons from the slot check (AC-U3 summary line) ==============================
-@pytest.mark.xfail(
-    reason="BUG-09: a slot-check reason shows as a capitalised sentence inside the summary's "
-    "brackets, ending '.).'",
-    strict=True,
-)
 def test_tc25_slot_check_reason_reads_as_part_of_the_summary(make, monkeypatch):
     """TC-25: the game writes to the spare memory during the 60 s check. The summary line
     must stay one v2-style sentence: "Not brought over: Infinite health (<reason>)."."""

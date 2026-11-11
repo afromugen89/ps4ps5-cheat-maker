@@ -70,6 +70,10 @@ NO_OBJECT = "its value isn't in the notes any more"
 NOT_PICKED = "none of the places was picked"
 HOOK_FILE_FIRST = "bring your notes over first (My cheats)"
 PC_OFF_AGAIN = "make the PC-off cheat again (Find it next time)"
+FIELDS_MOVED = "its numbers moved in a way that can't be followed"
+NO_ROOM = "there was no spare room in the game's memory for it"
+ROOM_USED = "the game used the spare memory it needs; restart the game and try again"
+NOT_PUT_IN = "it couldn't be put in the game; turn other cheats off and try again"
 CONFIRM_FIRST = "confirm {label} in My cheats first, then update again"
 # the new hook is in but the game hasn't run that code yet (a sentence of its own)
 WAITING = (
@@ -88,7 +92,9 @@ def version_key(v: str) -> tuple:
     """Sort key for game versions: numbers as numbers (``1.05`` = ``01.05``,
     ``03.000.005`` < ``03.001.000``), other text as text."""
     return tuple(
-        (0, int(t)) if t.isdigit() else (1, t.casefold()) for t in _TOKEN.findall(v.strip())
+        # isdecimal, not isdigit: "²" is a digit to isdigit() but int() refuses it
+        (0, int(t)) if t.isdecimal() else (1, t.casefold())
+        for t in _TOKEN.findall(v.strip())
     )
 
 
@@ -262,10 +268,17 @@ def carried_object(obj: ObjectSpec) -> ObjectSpec:
     return new
 
 
-def shift_fields(obj: ObjectSpec, shift: int) -> None:
-    """Every field moves like the hooked field did (spec AC-U4 default)."""
+def shift_fields(obj: ObjectSpec, shift: int) -> list[str]:
+    """Every field moves like the hooked field did (spec AC-U4 default). A field that
+    would land before the object's start stays where it was; their names are returned
+    (the object can't be trusted then)."""
+    stuck = []
     for f in obj.fields:
-        f.off += shift
+        if f.off + shift < 0:
+            stuck.append(f.name)
+        else:
+            f.off += shift
+    return stuck
 
 
 def reset_class(obj: ObjectSpec) -> None:
@@ -391,17 +404,23 @@ def _object_reason(plan: Plan, obj_id: str, reasons: dict[str, str]) -> str:
 
 
 def assemble(
-    plan: Plan, found: dict[str, int | None], reasons: dict[str, str]
+    plan: Plan,
+    found: dict[str, int | None],
+    reasons: dict[str, str],
+    have: Iterable[str] = (),
 ) -> tuple[Project, CarryReport]:
     """The new notes (format 4) and the report. Every object is saved, found or not
     (AC-U7); single cheats are always copied; a combined cheat only if every fixed part
     moved. ``found``: object id -> where it is now (None: not found); ``reasons``:
     object id -> why not. An object whose new hook went in but wasn't seen yet counts
-    as brought over (it is found once the game runs that code)."""
+    as brought over (it is found once the game runs that code). ``have``: ids of values
+    the notes brought into already hold (Advanced): cheats on them come over too."""
     old = plan.old
     objects = [it.obj for it in plan.items]
     for o in objects:
         o.check = True
+        o.carried_from = old.version
+    kept = set(have)
     waiting = {
         it.obj.id: it.obj.label
         for it in plan.items
@@ -430,13 +449,13 @@ def assemble(
                 new.test = any(p.kind == "code_patch" for p in new.parts if not p.learned)
         cheats.append(new)
         objs = [o for o, _f in new.anchors if o]
-        missing = [o for o in objs if not found.get(o) and o not in waiting]
+        missing = [o for o in objs if not found.get(o) and o not in waiting and o not in kept]
         if missing:
             why = _object_reason(plan, missing[0], reasons)
             report.failed[pc.name] = why
             continue
         report.carried.append(pc.name)
-        if objs:
+        if any(o not in kept for o in objs):
             report.check.append(pc.name)
         if any(o in guessed_objs for o in objs) or i in plan.guessed_parts:
             report.guessed.append(pc.name)
@@ -453,22 +472,31 @@ def assemble(
 
 
 def for_merge(source: Project, into: Project, avoid: Iterable[str] = ()) -> Project:
-    """``source`` with only the objects and cheats whose names ``into`` doesn't have
-    yet, object ids remapped to ids neither ``into`` nor ``avoid`` (e.g. objects whose
-    hook is still in the game) uses (Advanced, AC-U7)."""
-    labels = {o.label for o in into.objects}
+    """``source`` with only what ``into`` doesn't have yet (Advanced, AC-U7): objects
+    whose label is new, and cheats whose name is new. A cheat on a value ``into``
+    already holds uses that value. A value a failed bring-over left in ``into`` (still
+    to be checked, no way to be found) is brought again under its own id, replacing it;
+    the player's own values are never replaced. Other object ids
+    are remapped to ids neither ``into`` nor ``avoid`` (e.g. objects whose hook is still
+    in the game) uses."""
+    here = {o.label: o for o in into.objects}
     names = {c.name for c in into.cheats}
     used = {o.id for o in into.objects} | set(avoid)
     ids: dict[str, str] = {}
     objects = []
     n = 1
     for o in source.objects:
-        if o.label in labels:
+        mine = here.get(o.label)
+        if mine is not None and (mine.anchors or not mine.check):  # kept; new cheats use it
+            ids[o.id] = mine.id
             continue
-        while f"obj{n}" in used:
-            n += 1
-        new_id = f"obj{n}"
-        used.add(new_id)
+        if mine is not None:  # a failed bring-over (no way to be found): brought again
+            new_id = mine.id
+        else:
+            while f"obj{n}" in used:
+                n += 1
+            new_id = f"obj{n}"
+            used.add(new_id)
         ids[o.id] = new_id
         copy = ObjectSpec.from_json(o.to_json())
         copy.id = new_id
@@ -551,7 +579,17 @@ def prepare(
         except CarryFailed as exc:
             drop_hook(it, exc.reason)
             continue
-        shift_fields(it.obj, it.shift)
+        stuck = shift_fields(it.obj, it.shift)
+        if stuck:  # a cheat on such a field would write in front of the object
+            it.site = None
+            drop_hook(it, FIELDS_MOVED)
+            it.obj.anchors = []
+            log.info(
+                "action=carry_fields object=%s shift=%d result=failed fields=%s",
+                it.obj.id,
+                it.shift,
+                ",".join(stuck),
+            )
     _carry_parts(plan, plan.image)
     return plan
 
@@ -681,7 +719,7 @@ def collect_classes(
             session, writer, seconds, cancel, sleep=sleep, extra_reserved=reserved or ()
         )
     except LockFailed as exc:
-        raise CarryFailed(str(exc)) from exc
+        raise _failed(item.obj, "collect", NO_ROOM, exc) from exc
     maps = rf.MapIndex(session.require_client().maps(game.pid))
     probe = _probe(item)
     had_class = item.old.vtable is not None
@@ -769,6 +807,13 @@ def answer(session: Session, classes: Classes, need: NeedPick, address: int | No
     raise CarryFailed(NOT_PICKED)
 
 
+def _failed(obj: ObjectSpec, step: str, reason: str, exc: Exception) -> CarryFailed:
+    """A short reason for the summary (it reads inside its brackets); the app's own
+    message goes to the log."""
+    log.info("action=carry_hook object=%s step=%s result=failed error=%s", obj.id, step, exc)
+    return CarryFailed(reason)
+
+
 def place_hook(
     session: Session,
     item: Item,
@@ -792,9 +837,12 @@ def place_hook(
     )
     try:
         anchor = ah.plan_hook(session, cand, choice.vtable, choice.filter, reserved)
+    except (LockFailed, FindFailed) as exc:
+        raise _failed(obj, "plan", NO_ROOM, exc) from exc
+    try:
         ah.prove_slot(session, game.module_base + anchor.slot, prove_seconds, cancel=cancel)
     except (LockFailed, FindFailed) as exc:
-        raise CarryFailed(str(exc)) from exc
+        raise _failed(obj, "prove", ROOM_USED, exc) from exc
     obj.vtable = choice.vtable
     others = [a for a in obj.anchors if not isinstance(a, HookAnchor | VtableAnchor)]
     obj.anchors = [anchor, *others]
@@ -813,7 +861,7 @@ def place_hook(
     try:
         state = ah.install(session, obj)
     except FindFailed as exc:
-        raise CarryFailed(str(exc)) from exc
+        raise _failed(obj, "install", NOT_PUT_IN, exc) from exc
     item.placed = True
     if on_install is not None:
         on_install(obj, state)
@@ -1140,10 +1188,14 @@ __all__ = [
     "CODE_CHANGED",
     "CONFIRM_FIRST",
     "DATA_VALUE",
+    "FIELDS_MOVED",
     "NOTHING_TOUCHED",
     "NOT_FOUND",
+    "NOT_PUT_IN",
+    "NO_ROOM",
     "OTHER_MODULE",
     "PART_FAILED",
+    "ROOM_USED",
     "WAITING",
     "CarryFailed",
     "CarryReport",

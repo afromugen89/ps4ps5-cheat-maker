@@ -94,6 +94,7 @@ def test_version_key_compares_numbers_as_numbers_and_text_as_text():
     assert k("1.05a") < k("1.05b")
     assert k("1.05") < k("1.05a"), "a text part comes after the plain number"
     assert sorted(["2.0", "1.10", "1.9", "v1.2"], key=k)[-1] == "v1.2", "text after numbers"
+    assert k("1.0²") == ((0, 1), (0, 0), (1, "²")), "a digit int() can't read is text"
 
 
 @pytest.mark.parametrize("v", ["", "  ", "unknown", "UNKNOWN", "..."])
@@ -234,6 +235,30 @@ def test_shift_fields_and_reset_class():
     plain = obolites()
     cr.reset_class(plain)
     assert not plain.relearn_class, "nothing to learn again without a class"
+    down = health()
+    down.fields.append(pj.Field("Ident", 8, ValueType.INT32))
+    assert cr.shift_fields(down, -0x20) == ["Ident"]
+    assert [f.off for f in down.fields] == [fg.HP - 0x20, fg.HP32 - 0x20, 8], "never below 0"
+
+
+def test_a_field_that_would_move_before_the_object_fails_it():
+    old = learned_v1(3)
+    old.objects[0].fields.append(pj.Field("Ident", 8, ValueType.INT32, None, 0x40048))
+    g = fg.build(3, layout=dataclasses.replace(fg.V2, field_shift=-0x20))
+    _plan, new, report, installed = run_carry(old, g)
+    assert installed == [] and new.objects[0].anchors == []
+    assert report.failed == {"Infinite health": cr.FIELDS_MOVED}
+
+
+def test_reasons_read_inside_the_summary_brackets():
+    import re
+
+    jargon = re.compile(r"vtable|\bcave|pointer|signature|\bslot\b|\bhook", re.I)
+    for r in (cr.FIELDS_MOVED, cr.NO_ROOM, cr.ROOM_USED, cr.NOT_PUT_IN, cr.WAITING):
+        text = r.format(label="Health")
+        assert not jargon.search(text), text
+    for r in (cr.FIELDS_MOVED, cr.NO_ROOM, cr.ROOM_USED, cr.NOT_PUT_IN, cr.CONFIRM_FIRST):
+        assert r[0].islower() and not r.endswith("."), r
 
 
 def test_order_items_hooks_then_static_then_paths():
@@ -322,17 +347,19 @@ def test_summary_without_cheats_counts_values():
 
 # -- Advanced: add to notes that already hold objects -----------------------------------------
 def test_for_merge_skips_names_and_remaps_ids():
-    into = pj.Project(fg.TITLE, "03.001.000", objects=[pj.ObjectSpec("obj1", "Health", None)])
+    found_here = pj.ObjectSpec("obj1", "Health", None, anchors=[pj.StaticAnchor(0x10)])
+    into = pj.Project(fg.TITLE, "03.001.000", objects=[found_here])
     into.cheats.append(pj.ProjectCheat("Infinite health", "obj1", "Health"))
     src = notes()
     src.objects.append(pj.ObjectSpec("obj3", "Ammo", None, [pj.Field("Ammo", 0, ValueType.INT32)]))
     src.cheats.append(pj.ProjectCheat("Ammo", "obj3", "Ammo"))
     src.cheats.append(pj.ProjectCheat("Both", parts=[pj.ProjectPart("a", "obj3", "Ammo", 1)]))
-    src.cheats.append(pj.ProjectCheat("Max", "obj1", "Health"))  # its object is skipped
+    src.cheats.append(pj.ProjectCheat("Max", "obj1", "Health"))  # on the Health already here
     out = cr.for_merge(src, into)
     assert [o.label for o in out.objects] == ["Obolites", "Ammo"]
     assert [o.id for o in out.objects] == ["obj2", "obj3"]
-    assert [c.name for c in out.cheats] == ["Rich", "Ammo", "Both"]
+    assert [c.name for c in out.cheats] == ["Rich", "Ammo", "Both", "Max"]
+    assert out.cheats[3].object == "obj1", "a new cheat uses the value already here"
     assert out.cheats[0].object == "obj2" and out.cheats[1].object == "obj3"
     assert out.cheats[2].parts[0].object == "obj3"
     assert src.objects[1].id == "obj2" and src.cheats[0].name == "Infinite health", "untouched"
@@ -340,6 +367,30 @@ def test_for_merge_skips_names_and_remaps_ids():
     again = cr.for_merge(src, into)
     assert [o.id for o in again.objects] == ["obj3", "obj4"]
     assert again.cheats[0].object == "obj3"
+    assert [o.id for o in cr.for_merge(src, into, avoid={"obj3"}).objects] == ["obj4", "obj5"]
+
+
+def test_for_merge_brings_a_value_with_no_way_to_be_found_again_in_its_place():
+    lost = pj.ObjectSpec("obj7", "Health", None, check=True)  # a failed bring-over
+    into = pj.Project(fg.TITLE, "03.001.000", objects=[lost])
+    into.cheats.append(pj.ProjectCheat("Infinite health", "obj7", "Health"))
+    out = cr.for_merge(notes(), into)
+    assert [(o.id, o.label) for o in out.objects] == [("obj7", "Health"), ("obj1", "Obolites")]
+    assert out.objects[0].anchors == notes().objects[0].anchors
+    assert [c.name for c in out.cheats] == ["Rich"] and out.cheats[0].object == "obj1"
+    lost.check = False  # the player's own value with no way yet: never replaced
+    assert [o.label for o in cr.for_merge(notes(), into).objects] == ["Obolites"]
+
+
+def test_assemble_counts_cheats_on_values_already_here_and_names_each_ones_version():
+    old = notes()
+    plan = _plan(old)
+    plan.items = plan.items[1:]  # Health is already in the notes (Advanced)
+    new, report = cr.assemble(plan, {"obj2": 0x200}, {}, have={"obj1"})
+    assert report.carried == ["Infinite health", "Rich"] and report.check == ["Rich"]
+    assert [o.carried_from for o in new.objects] == [fg.VERSION]
+    _, lost = cr.assemble(_plan(old), {"obj2": 0x200}, {})
+    assert "Infinite health" in lost.failed, "without have, its value must be found"
 
 
 # -- fingerprints for the notes (AC-U2) -------------------------------------------------------
@@ -597,7 +648,7 @@ def test_slot_written_by_the_game_fails_the_proof_and_nothing_goes_in():
 
     g.session.reserved_rooms = list(plan.reserved)
     g.fake.write_hits[cv.find_slot(g.session)] = [WatchHit(fg.BASE + 0x500)]
-    with pytest.raises(cr.CarryFailed, match="uses the spare memory"):
+    with pytest.raises(cr.CarryFailed, match=r"^the game used the spare memory it needs"):
         cr.place_hook(g.session, it, choice, reserved=plan.reserved, prove_seconds=1)
     assert g.fake.peek(fg.PID, fg.V2.reader, 10) == fg.V2.vmovss_r
 

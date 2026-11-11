@@ -34,9 +34,10 @@ FORMAT = "cheatmaker-project"
 # Hooks saved by format 1 don't, so they are dropped on load (found again by memory
 # search until the player presses Find it next time again).
 # 3: a cheat may be combined: its "parts" are learned fields and fixed byte patches.
-# 4: notes brought over from another game version ("carried_from", per object "check" and
-# "relearn_class", per hook "signature_unique", per cheat "test"). Each key is written
-# only when set, so a file that never was brought over reads the same as format 3.
+# 4: notes brought over from another game version ("carried_from", per object "check",
+# "relearn_class" and "carried_from", per hook "signature_unique", per cheat "test"). Each
+# key is written only when set, so a file that never was brought over reads the same as
+# format 3.
 FORMAT_VERSION = 4
 CLASS_FLOAT_LIMIT = 1e9  # top of a float's plausible range when the class is checked
 EXTENSION = ".cmproj"
@@ -274,6 +275,7 @@ class ObjectSpec:
     anchors: list[Anchor] = field(default_factory=list)
     check: bool = False  # brought over from another version, not confirmed by the player yet
     relearn_class: bool = False  # class cleared when brought over: learn it at the first Yes
+    carried_from: str | None = None  # the version this object was brought over from
 
     def field(self, name: str) -> Field:
         for f in self.fields:
@@ -306,6 +308,8 @@ class ObjectSpec:
             d["check"] = True
         if self.relearn_class:
             d["relearn_class"] = True
+        if self.carried_from is not None:
+            d["carried_from"] = self.carried_from
         return d
 
     @classmethod
@@ -321,6 +325,7 @@ class ObjectSpec:
             [anchor_from_json(a) for a in _list(d.get("anchors", []), "anchors")],
             _flag(d, "check"),
             _flag(d, "relearn_class"),
+            None if "carried_from" not in d else _str(d["carried_from"], "carried_from"),
         )
 
 
