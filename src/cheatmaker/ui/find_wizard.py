@@ -128,6 +128,9 @@ class FindWizard(QWidget):
         self._tree_pick: tuple[int, ValueType, bool] | None = None
         self.manual: dict[int, ValueType] = {}  # addresses the player typed in
         self.traced: dict[int, TracedRow] = {}  # manual rows found by a trace
+        # the type each Find freeze was made as: two rows at one address (a search
+        # match and a traced row) are told apart by (address, type)
+        self._frozen_type: dict[int, ValueType] = {}
         self._trace_max: dict[int, dict[int, float | int] | None] = {}  # per refresh
         self._traced_scale: Scale | None = None  # Search for it that way's factor
         # Check which is real: what each checked match did with its test value
@@ -455,10 +458,10 @@ class FindWizard(QWidget):
         m = self.selected()
         i = self._selected_row()
         is_ptr = i is not None and i < len(self.row_chains) and self.row_chains[i] is not None
-        self.remove_btn.setEnabled(ready and m is not None and (m.address in self.manual or is_ptr))
+        self.remove_btn.setEnabled(ready and m is not None and (self._is_added(i) or is_ptr))
         self.pointer_btn.setEnabled(ready)
         self.freeze_btn.setText(
-            "Unfreeze" if m and m.address in self.ctl.frozen_addresses else "Freeze"
+            "Unfreeze" if m and i is not None and self._is_frozen(i) else "Freeze"
         )
 
     @property
@@ -877,9 +880,9 @@ class FindWizard(QWidget):
 
     def _row_text(self, i: int) -> str:
         m = self.rows[i]
-        frozen = " (frozen)" if m.address in self.ctl.frozen_addresses else ""
+        frozen = " (frozen)" if self._is_frozen(i) else ""
         t = self._traced_for(m.address, self.row_types[i])
-        if m.address in self.manual:
+        if self._is_added(i):
             frozen += f" (added, {self.manual[m.address].label})"
         if t is not None and not self.grouped:  # the tree says these in its columns
             frozen += f" ({t.way.label()}, {t.notes()})"
@@ -892,6 +895,26 @@ class FindWizard(QWidget):
         if r is not None and not self.grouped:  # the tree says it in Notes
             frozen += f" ({r.verdict.short})"
         return self._value_text(m.address, self.row_types[i], m.value) + frozen
+
+    def _is_added(self, i: int | None) -> bool:
+        """Row ``i`` is the typed-in (or traced) row: its address *and* type."""
+        if i is None or not 0 <= i < len(self.rows):
+            return False
+        return self.manual.get(self.rows[i].address) is self.row_types[i]
+
+    def _is_frozen(self, i: int) -> bool:
+        """Row ``i``'s address is frozen as this row's type (a freeze made before the
+        type was noted counts for every row at the address)."""
+        addr = self.rows[i].address
+        if addr not in self.ctl.frozen_addresses:
+            return False
+        vt = self._frozen_type.get(addr)
+        return vt is None or vt is self.row_types[i]
+
+    def _unfreeze(self, addr: int) -> None:
+        self.ctl.freezer.unfreeze(f"find:{addr}")
+        self.ctl.frozen_addresses.discard(addr)
+        self._frozen_type.pop(addr, None)
 
     def _traced_for(self, addr: int, vt: ValueType) -> TracedRow | None:
         """The trace behind a row, only for a row of the traced type: a search match
@@ -1359,18 +1382,17 @@ class FindWizard(QWidget):
         i = self._selected_row()
         if i is not None and i < len(self.row_chains) and self.row_chains[i] is not None:
             m = self.rows[i]
-            if m.address in self.ctl.frozen_addresses:
-                self.ctl.freezer.unfreeze(f"find:{m.address}")
-                self.ctl.frozen_addresses.discard(m.address)
+            if self._is_frozen(i):
+                self._unfreeze(m.address)
             del self.pointers[self.row_chains[i]]
             self.refresh_live()
             return
-        m = self.selected()
-        if m is None or m.address not in self.manual:
+        if not self._is_added(i):  # a search match at an added address isn't removed
             return
-        if m.address in self.ctl.frozen_addresses:
-            self.ctl.freezer.unfreeze(f"find:{m.address}")
-            self.ctl.frozen_addresses.discard(m.address)
+        assert i is not None
+        m = self.rows[i]
+        if self._is_frozen(i):
+            self._unfreeze(m.address)
         del self.manual[m.address]
         self.traced.pop(m.address, None)
         self.refresh_live()
@@ -1392,13 +1414,14 @@ class FindWizard(QWidget):
                 data.hex(),
             )
             self.ctl.session.require_client().write(g.pid, m.address, data)
-            if m.address in self.ctl.frozen_addresses:
+            frozen = self._is_frozen(self._selected_row())
+            if frozen:
                 self.ctl.freezer.freeze(f"find:{m.address}", [(g.pid, m.address, data)])
         except Exception as exc:
             self.ctl.fail(exc, "write")
             return
         self.refresh_live()
-        if m.address not in self.ctl.frozen_addresses:
+        if not frozen:
             self._watch_put_back(m.address, data)
 
     def _real_value(self, addr: int, vt: ValueType, typed: float | int) -> float | int:
@@ -1440,14 +1463,14 @@ class FindWizard(QWidget):
         return True
 
     def do_freeze(self) -> None:
-        m = self.selected()
-        if m is None:
+        i = self._selected_row()
+        if i is None:
             return
+        m = self.rows[i]
         key = f"find:{m.address}"
-        if m.address in self.ctl.frozen_addresses:
-            self.ctl.freezer.unfreeze(key)
-            self.ctl.frozen_addresses.discard(m.address)
-        else:
+        if self._is_frozen(i):
+            self._unfreeze(m.address)
+        else:  # a freeze of the other row at this address is replaced (same key)
             try:
                 g = self.ctl.session.require_game()
                 raw = self.ctl.session.require_client().read(
@@ -1458,6 +1481,7 @@ class FindWizard(QWidget):
                 return
             self.ctl.freezer.freeze(key, [(g.pid, m.address, raw)])
             self.ctl.frozen_addresses.add(m.address)
+            self._frozen_type[m.address] = self.row_types[i]
             # best effort: the freezer may win the race with the game's own write
             self._watch_put_back(m.address, raw)
         self._fill_table()
@@ -1489,17 +1513,11 @@ class FindWizard(QWidget):
             self.ctl.message.emit(hints.TRACE_PICK_ONE)
             return
         vt = self._row_type()
-        frozen = {
-            a: self.row_types[i].size
-            for i, row in enumerate(self.rows)
-            if (a := row.address) in self.ctl.frozen_addresses
-        }
         self.open_trace(
             address=m.address,
             vtype=vt,
             on_found=self.use_traced,
             on_search_way=self.search_traced_way,
-            frozen=frozen,
         )
 
     def use_traced(self, result: TraceResult) -> None:

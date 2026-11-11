@@ -494,7 +494,6 @@ def test_suggesting_the_trace_turns_advanced_on(win, game):
 
 
 def dialog(win, game, **kw) -> TraceDialog:
-    kw.setdefault("frozen", {})
     return TraceDialog(
         win.ctl,
         address=game.hud,
@@ -513,28 +512,28 @@ def freeze_at(win, game, addr: int) -> None:
 
 def test_release_failing_half_way_resumes_what_it_paused(win, game):
     """Review finding 5."""
-    from cheatmaker.errors import ReadFailed
-
     freeze_at(win, game, game.hud)
     freeze_at(win, game, game.hud + 4)
-    d = dialog(win, game, frozen={game.hud: 4, game.hud + 4: 4})
-    real_read = game.g.fake.read
+    d = dialog(win, game)
+    real_unfreeze = win.ctl.freezer.unfreeze
+    calls = []
 
-    def read(pid, addr, size):
-        if addr == game.hud + 4:
-            raise ReadFailed("gone")
-        return real_read(pid, addr, size)
+    def unfreeze(key):
+        calls.append(key)
+        if len(calls) == 2:
+            raise RuntimeError("boom")
+        real_unfreeze(key)
 
-    game.g.fake.read = read
-    with pytest.raises(ReadFailed):
+    win.ctl.freezer.unfreeze = unfreeze
+    with pytest.raises(RuntimeError):
         d.release(game.hud, 8)
-    assert f"find:{game.hud}" in win.ctl.freezer.keys, "the first one is frozen again"
+    assert win.ctl.freezer.keys == {f"find:{game.hud}", f"find:{game.hud + 4}"}, "resumed"
 
 
 def test_resume_puts_back_the_rest_when_one_fails(win, game):
     freeze_at(win, game, game.hud)
     freeze_at(win, game, game.hud + 4)
-    d = dialog(win, game, frozen={game.hud: 4, game.hud + 4: 4})
+    d = dialog(win, game)
     resume = d.release(game.hud, 8)
     assert not win.ctl.freezer.keys
     real_freeze = win.ctl.freezer.freeze
@@ -637,3 +636,41 @@ def test_share_of_max_with_a_max_of_0_shows_a_question_mark(win, game):
     f.refresh_live()
     i = next(i for i, m in enumerate(f.rows) if m.address == real)
     assert "(screen: 87)" in f._row_text(i)
+
+
+def test_an_unlisted_freeze_is_paused_with_its_own_bytes(win, game):
+    """QA BUG-10: an 8-byte freeze that isn't a Find row any more, watched at its high
+    half, is paused and put back with all 8 bytes."""
+    x = game.obj + 0x20
+    data = bytes(range(8))
+    win.ctl.freezer.freeze(f"find:{x}", [(41, x, data)])
+    win.ctl.frozen_addresses.add(x)
+    resume = dialog(win, game).release(x + 4, 4)
+    assert f"find:{x}" not in win.ctl.freezer.keys
+    resume()
+    assert win.ctl.freezer._entries[f"find:{x}"] == [(41, x, data)]
+    resume = dialog(win, game).release(x + 8, 4)
+    assert f"find:{x}" in win.ctl.freezer.keys, "not overlapping: left running"
+
+
+def test_match_and_traced_rows_freeze_and_remove_by_type(win, game):
+    """Re-review nits / QA BUG-07, BUG-08: the two rows at one address are separate."""
+    f = win.find
+    f.vtype.setCurrentIndex(f.vtype.findData(I32))
+    f.number.setText("87")
+    f.search_btn.click()
+    f.use_traced(R(tr.Outcome.FOUND, 1, game.hud, F, X100_CUT, Verdict.REAL, value=0.87))
+    match_row, traced_row = (i for i, m in enumerate(f.rows) if m.address == game.hud)
+    assert "added" not in f._row_text(match_row) and "added" in f._row_text(traced_row)
+    f._select_row(match_row)
+    f._update_buttons()
+    assert not f.remove_btn.isEnabled()
+    f.do_remove_address()
+    assert game.hud in f.traced
+    f.freeze_btn.click()
+    assert "(frozen)" in f._row_text(match_row) and "(frozen)" not in f._row_text(traced_row)
+    f._select_row(traced_row)
+    f._update_buttons()
+    assert f.freeze_btn.text() == "Freeze" and f.remove_btn.isEnabled()
+    f.do_remove_address()
+    assert game.hud not in f.traced and game.hud in win.ctl.frozen_addresses, "match freeze kept"

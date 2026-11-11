@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
 
 from cheatmaker.core import tracer as tr
 from cheatmaker.core.cheats import Cheat
+from cheatmaker.core.freezer import Freezer
 from cheatmaker.core.values import ValueType
 from cheatmaker.ui import hints
 from cheatmaker.ui.controller import Controller
@@ -163,7 +164,6 @@ class TraceDialog(QDialog):
         vtype: ValueType,
         on_found: Found,
         on_search_way: SearchWay,
-        frozen: dict[int, int] | None = None,
         parent=None,
         sleep: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.monotonic,
@@ -172,7 +172,6 @@ class TraceDialog(QDialog):
         self.setWindowTitle(hints.TRACE_TITLE)
         self.ctl, self.address, self.vtype = ctl, address, vtype
         self.on_found, self.on_search_way = on_found, on_search_way
-        self.frozen = dict(frozen or {})
         self.sleep, self.clock = sleep, clock
         self.result: tr.TraceResult | None = None
         self._cancel: threading.Event | None = None
@@ -364,19 +363,18 @@ class TraceDialog(QDialog):
         half way, what was already paused is resumed before the error goes on."""
         end = addr + size
         ctl = self.ctl
-        refreeze: list[tuple[int, bytes]] = []
+        refreeze: list[tuple[str, list[tuple[int, int, bytes]]]] = []
         cheats: list[Cheat] = []
         try:
             g = ctl.session.require_game()
-            client = ctl.session.require_client()
         except Exception as exc:  # nothing to pause without a game
             report(exc, "trace")
             return lambda: None
 
         def resume() -> None:
-            for a, data in refreeze:
+            for key, writes in refreeze:
                 try:
-                    ctl.freezer.freeze(f"find:{a}", [(g.pid, a, data)])
+                    ctl.freezer.freeze(key, writes)  # exactly as it was, every byte
                 except Exception as exc:  # the rest are still put back
                     report(exc, "trace")
             for c in cheats:
@@ -388,12 +386,10 @@ class TraceDialog(QDialog):
                 self._signals.cheats.emit()
 
         try:
-            for a in sorted(ctl.frozen_addresses):
-                n = self.frozen.get(a, 4)
-                if a < end and addr < a + n:
-                    data = client.read(g.pid, a, n)
-                    ctl.freezer.unfreeze(f"find:{a}")
-                    refreeze.append((a, data))
+            for key, writes in _find_freezes(ctl.freezer).items():
+                if any(a < end and addr < a + len(data) for _pid, a, data in writes):
+                    ctl.freezer.unfreeze(key)
+                    refreeze.append((key, writes))
             cf = ctl.cheat_file
             for c in list(cf.cheats) if cf is not None else []:
                 if not (c.enabled and c.freeze):
@@ -426,6 +422,19 @@ class TraceDialog(QDialog):
         if at is None or not c.locations:
             return []
         return [(at, len(c.locations[0].on))]
+
+
+def _find_freezes(freezer: Freezer) -> dict[str, list[tuple[int, int, bytes]]]:
+    """Find's freezes (``find:<address>``) with the bytes each one holds, listed or
+    not. The Freezer has no public view of its entries and core/freezer.py is owned
+    by another branch for now, so they are read under its lock here."""
+    with freezer._lock:
+        entries = dict(freezer._entries)
+    return {
+        key: list(writes)
+        for key, writes in entries.items()
+        if key.startswith("find:") and not callable(writes)
+    }
 
 
 __all__ = ["TraceDialog", "details", "result_text"]

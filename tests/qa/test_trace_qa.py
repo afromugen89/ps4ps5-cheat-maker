@@ -731,10 +731,6 @@ def _match_and_traced(twin, tgame):
     return rows[0][0], rows[1][0]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG-07: Remove on a search match removes the traced row at the same address",
-)
 def test_tc12a_remove_is_not_offered_on_the_search_match_row(twin, tgame):
     f = twin.find
     match_row, _traced_row = _match_and_traced(twin, tgame)
@@ -745,10 +741,6 @@ def test_tc12a_remove_is_not_offered_on_the_search_match_row(twin, tgame):
     assert tgame.hud in f.traced and f.manual.get(tgame.hud) is F, "the traced row stays"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG-08: the search match row at a traced address says '(added, Decimal (4 bytes))'",
-)
 def test_tc12b_search_match_row_doesnt_claim_to_be_the_added_row(twin, tgame):
     f = twin.find
     match_row, _traced_row = _match_and_traced(twin, tgame)
@@ -858,15 +850,10 @@ def _unlisted_8_byte_freeze(twin, tgame):
         vtype=I32,
         on_found=lambda r: None,
         on_search_way=lambda r, s: None,
-        frozen={},
     )
     return ctl, x, d
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG-10: an unlisted 8-byte freeze is taken as 4 bytes: missed or cut in half",
-)
 def test_tc14_an_unlisted_8_byte_freeze_over_the_copy_is_paused_and_put_back_whole(twin, tgame):
     ctl, x, d = _unlisted_8_byte_freeze(twin, tgame)
     resume = d.release(x + 4, 4)  # the high half: the freeze writes it too
