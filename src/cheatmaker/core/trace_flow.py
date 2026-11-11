@@ -67,7 +67,7 @@ _FULL_MOVES = {
 }
 _SCALAR_MOVES = {M.MOVSS: 4, M.VMOVSS: 4, M.MOVD: 4, M.VMOVD: 4}
 _SCALAR_MOVES |= {M.MOVSD: 8, M.VMOVSD: 8, M.MOVQ: 8, M.VMOVQ: 8}
-_STORES = {M.MOV, *_FULL_MOVES, *_SCALAR_MOVES}
+_STORES = {M.MOV, M.XCHG, *_FULL_MOVES, *_SCALAR_MOVES}
 _EXTENDS = {M.MOVZX: False, M.MOVSX: True, M.MOVSXD: True}
 _TO_WHOLE = {
     M.CVTTSS2SI: (ValueType.FLOAT, "cut"),
@@ -400,7 +400,9 @@ def follow(win: Window, lane: int, read: Read, is_const: IsConst, shown: ValueTy
     watched ``shown`` number) back to where it came from."""
     w = win.writer
     first = text(w)
-    if any(
+    # xchg [m],reg (an atomic store) reads the old value only to hand it back in the
+    # register: what it stores is the register, so it isn't a read-modify-write
+    if not _is_xchg_store(w) and any(
         m.access in (ix.OpAccess.READ_WRITE, ix.OpAccess.READ_COND_WRITE)
         for m in _INFO.info(w).used_memory()
     ):
@@ -428,6 +430,15 @@ def follow(win: Window, lane: int, read: Read, is_const: IsConst, shown: ValueTy
     high = 1 if src in _HIGH_BYTES else 0  # mov [m],ah stores byte 1 of rax
     return follow_reg(
         win, full_name(src), lane + high, read, is_const, shown, width=store_size + high
+    )
+
+
+def _is_xchg_store(w: ix.Instruction) -> bool:
+    return (
+        w.mnemonic == M.XCHG
+        and w.op_count == 2
+        and ix.OpKind.MEMORY in (w.op0_kind, w.op1_kind)
+        and ix.OpKind.REGISTER in (w.op0_kind, w.op1_kind)
     )
 
 
@@ -678,6 +689,13 @@ def _muldiv(walk: _Walk, insn: ix.Instruction, i: int, kind: Kind) -> Path | Non
         const, max_load = _constant(walk, insn, i, 1)
         if const is not None:
             value_op = 2
+    if const is None and kind is Kind.MUL and insn.op_kind(other) == ix.OpKind.MEMORY:
+        # movss xmm0,[K100] ; mulss xmm0,[rbx+10h]: the register holds the constant and
+        # the value is the memory operand (multiplying commutes)
+        reg_const, _load_of = _constant(walk, insn, i, value_op)
+        if reg_const is not None:
+            walk.steps.append(Step(kind, walk.cur, const=reg_const))
+            return _load(walk, insn, i, walk.lane, ix.MemorySizeInfo(insn.memory_size).size)
     if const is not None:
         walk.steps.append(Step(kind, walk.cur, const=const))
     elif kind is Kind.DIV and max_load is not None:

@@ -323,10 +323,6 @@ def test_tc06b_slow_player_whole_trace_stays_within_4_minutes():
 
 
 # -- TC-07 x86 patterns (AC-T3) -----------------------------------------------------------------
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG-01: an atomic store (xchg [m],reg) is taken for read-modify-write",
-)
 def test_tc07a_xchg_store_of_a_copy_is_not_already_real():
     p = flow(
         ins("MOV_R32_RM32", "eax", mem("rbx", 0x10)),
@@ -336,10 +332,6 @@ def test_tc07a_xchg_store_of_a_copy_is_not_already_real():
     assert p.end is not tf.End.ALREADY_REAL, p.reason
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG-01: an atomic store (xchg [m],reg) makes a screen copy 'already real'",
-)
 def test_tc07a2_tracer_on_an_xchg_copy_does_not_say_already_real():
     g = TraceGame()
     obj, hud = g.alloc(0x40), g.alloc(0x40)
@@ -362,10 +354,6 @@ def test_tc07a2_tracer_on_an_xchg_copy_does_not_say_already_real():
     assert r.outcome is Outcome.FOUND and r.address == obj + 0x10
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG-02: x100 written as 'load the constant, multiply by the value' isn't followed",
-)
 @pytest.mark.parametrize("vex", [False, True], ids=["sse", "vex"])
 def test_tc07b_constant_first_multiply_is_followed(vex):
     if vex:
