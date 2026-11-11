@@ -201,3 +201,15 @@ result, crash_mark) and `action=build_alive` if there are any.
 If a fix crashes the game: restart the game, Connect again, and send the hint the app
 shows ("Fix N crashed the game last time...") and the log. That fix is never tried again
 for that game version; run the same test again to see the next fix.
+
+## C19 Combined cheats found again after a restart (added 2026-11-11)
+
+Spec: docs/spec-restart-combined.md, design: docs/architecture-restart-combined.md. Game:
+Returnal (PPSA01285 03.000.005), health as two parts. Save your game first.
+
+| # | Test | Steps | Pass when | Send back |
+|---|---|---|---|---|
+| C19a | Learn both parts | Find health (`health / 100`, 3.00 at max 300) and the health fraction (1.00 when full); make a cheat for each. Ctrl-click both, **Combine**. Select the combined cheat, **Find it next time**, **Start**; play and take hits until the hint says Ready. | The hint goes "Part 1 of 2", then "Part 2 of 2", then "Ready: health will be ...; fraction will be ...". **Works after restart?** says **Found again each run**. About 70 s per part. | The `action=learn` lines (they show whether both parts are in one object: user guide 7.2 says they sit side by side), the `action=hook_plan` lines, and the Ready hint. |
+| C19b | Three restarts | Close the game, start it again, **Connect**. Tick the combined cheat, answer the question, take hits. Do this 3 times. | Each run: one row comes back (not two); both parts are found within 20 s of Connect; one "Is this your ...?" question; health stays full through hits; no crash; no wrong write. | The status line, the `action=refind` lines and the time from Connect to Ready. |
+| C19c | Biome change and death | With the cheat on, go to the next biome; then die once. | Freeze pauses while the parts are rebuilt and resumes on its own (within 5 s); health is full again after each; no crash, no wrong write. If a "moved" question names a part, say which. | The `action=freeze` lines (`part=... paused` / `resumed`) and the `action=tracker` lines. |
+| C19d | Cancel | On a fresh pair of session cheats, Combine, **Find it next time**, **Start**, then **Cancel** during part 2. | Stops within 2 s; the hint says "Couldn't learn ... (part 2 of 2): you pressed Cancel. Nothing was changed."; the cheat still says **This session only**; the game is unchanged. | The hint and any `action=hook_remove` lines. |

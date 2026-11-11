@@ -140,6 +140,10 @@ class LiveCheats:
         self.freezer = freezer
         self.active: dict[int, Cheat] = {}
         self.trackers: dict[str, Tracker] = {}  # object id -> where it is now (v3)
+        # Learned parts of combined cheats not written right now (id(cheat) -> part
+        # names). Touched by the freezer thread and by turn_off: guarded by the lock.
+        self._part_paused: dict[int, set[str]] = {}
+        self._parts_lock = threading.Lock()
 
     def _tracked(self, cheat: Cheat, on: bool) -> Writes | None:
         """Writes for an anchored cheat at the object's verified address, or None."""
@@ -153,7 +157,73 @@ class LiveCheats:
         loc = cheat.locations[0]  # its offset is unused: the Tracker holds the address
         return [(game.pid, addr, loc.on if on else loc.off)]
 
+    def _part_writes(self, cheat: Cheat, on: bool, strict: bool) -> Writes | None:
+        """Writes for a combined cheat with learned parts. A learned part goes only to
+        its tracker's verified address (never to its unused ``offset``); fixed and
+        moving parts go where they are. ``strict``: a learned part that isn't found
+        raises FindFailed and nothing is written. Otherwise that part is skipped
+        (logged once as paused) and the rest is written; None when nothing is left."""
+        game = self.session.require_game()
+        bases: dict[str, int | None] = {}  # each object is checked once per call
+        writes: Writes = []
+        lost: list[str] = []
+        found: list[str] = []
+        for loc in cheat.locations:
+            data = loc.on if on else loc.off
+            if loc.anchor is None:
+                writes.append((game.pid, loc.address(game.module_base), data))
+                continue
+            addr = self._part_address(loc.anchor, bases)
+            name = loc.part or loc.anchor[1]
+            if addr is None:
+                if strict:
+                    raise FindFailed(
+                        f"{cheat.name}: {name} isn't found right now, so nothing was "
+                        "changed. Press Find it again."
+                    )
+                lost.append(name)
+                continue
+            found.append(name)
+            writes.append((game.pid, addr, data))
+        if not strict:
+            self._note_paused(cheat, lost, found)
+        return writes or None
+
+    def _part_address(self, anchor: tuple[str, str], bases: dict[str, int | None]) -> int | None:
+        """A learned part's verified address now, or None."""
+        obj_id, field_name = anchor
+        tracker = self.trackers.get(obj_id)
+        if tracker is None:
+            return None
+        if obj_id not in bases:
+            bases[obj_id] = tracker.current()
+        base = bases[obj_id]
+        if not base:
+            return None
+        try:
+            return base + tracker.obj.field(field_name).off
+        except KeyError:
+            return None
+
+    def _note_paused(self, cheat: Cheat, lost: list[str], found: list[str]) -> None:
+        key = str(id(cheat))
+        with self._parts_lock:
+            if id(cheat) not in self.active:  # turned off meanwhile: leave nothing behind
+                return
+            paused = self._part_paused.setdefault(id(cheat), set())
+            for name in lost:
+                if name not in paused:
+                    paused.add(name)
+                    log.info("action=freeze key=%s part=%s paused", key, name)
+            for name in found:
+                if name in paused:
+                    paused.discard(name)
+                    log.info("action=freeze key=%s part=%s resumed", key, name)
+
     def _writes(self, cheat: Cheat, on: bool) -> Writes:
+        if cheat.learned_parts:
+            writes = self._part_writes(cheat, on, strict=True)
+            return writes or []
         if cheat.anchor is not None:
             writes = self._tracked(cheat, on)
             if writes is None:
@@ -177,7 +247,11 @@ class LiveCheats:
 
     def turn_on(self, cheat: Cheat) -> None:
         self.set_once(cheat)
-        if cheat.freeze and cheat.anchor is not None:
+        if cheat.freeze and cheat.learned_parts:
+            self.freezer.freeze_tracked(
+                str(id(cheat)), lambda: self._part_writes(cheat, True, strict=False)
+            )
+        elif cheat.freeze and cheat.anchor is not None:
             self.freezer.freeze_tracked(str(id(cheat)), lambda: self._tracked(cheat, True))
         elif cheat.freeze:
             self.freezer.freeze(str(id(cheat)), self._writes(cheat, True))
@@ -196,9 +270,18 @@ class LiveCheats:
         self.freezer.unfreeze(str(id(cheat)))
         cheat.enabled = False
         self.active.pop(id(cheat), None)
+        with self._parts_lock:
+            self._part_paused.pop(id(cheat), None)
         if restore and self.session.client is not None:
             client = self.session.client
-            if cheat.anchor is not None:  # only where it's verified to be right now
+            if cheat.learned_parts:  # learned parts are left as they are
+                game = self.session.require_game()
+                writes = [
+                    (game.pid, loc.address(game.module_base), loc.off)
+                    for loc in cheat.locations
+                    if loc.anchor is None
+                ]
+            elif cheat.anchor is not None:  # only where it's verified to be right now
                 writes = self._tracked(cheat, False) or []
             else:
                 writes = self._writes(cheat, False)
@@ -214,6 +297,8 @@ class LiveCheats:
     def mark_all_off(self) -> list[Cheat]:
         """After a lost connection: nothing is running any more (AC-1.4)."""
         self.freezer.clear()
+        with self._parts_lock:
+            self._part_paused.clear()
         cheats = list(self.active.values())
         for c in cheats:
             c.enabled = False

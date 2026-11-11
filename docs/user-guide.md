@@ -301,8 +301,25 @@ Each cheat has:
 
 **Combine**: some games need two values kept at once (Returnal's health needs two). Make
 a cheat for each, Ctrl-click both in **My cheats**, and press **Combine**. You get one
-cheat that turns both on with a single tick. A combined cheat's value can't be edited,
-and Lock it works on one address at a time, so run Lock it before combining.
+cheat that turns both on with a single tick. Each value it changes is a **part**, named
+after the cheat it came from (for example "health" and "fraction").
+
+- You can combine any cheats: ones that work after a restart, ones for this session
+  only, and ones found again each run. Up to 4 of the parts can be values that move
+  (session only or found again); parts that don't move have no limit.
+- To combine cheats that are found again each run, connect to the game first: the app
+  keeps the combined cheat in the game's notes.
+- Two cheats that change the same bytes can't be combined ("health and fraction overlap
+  in memory").
+- **Works after restart?** says **This session only** while any part is session only,
+  **Found again each run** when every moving part has been learned, and **Yes** when no
+  part moves.
+- For values that move every restart, **combine first, then press Find it next time once
+  on the combined cheat** (6.4). It learns every part in one go.
+- A combined cheat's value can't be edited. Lock it and Make it work each need a single
+  value, so use them before combining.
+- If a combined cheat's part isn't found after a restart, delete the combined cheat and
+  make it again (search for that part, make its cheat, Combine, Find it next time).
 
 ### 6.1 Lock it
 
@@ -415,6 +432,23 @@ when you disconnect or close Cheat Maker.
 cheat from the same place in the game's code that keeps your value (only yours), which
 CheatRunner can run with the PC off.
 
+**A combined cheat** (6, Combine): press **Find it next time** once on the combined
+cheat, not on each value. One **Start** learns each part that moves, one after another,
+about a minute (70 s) per part; the hint says which part it's on ("Part 1 of 2: health").
+Parts that don't move, or are already found again, are skipped. When all are done it
+lists each part ("Ready: health will be found by the game's code; fraction will be found
+by a memory path.") and the cheat says **Found again each run**. If one part can't be
+learned, or you press **Cancel**, nothing is changed and the hint says which part and
+why. *Also make a PC-off cheat* isn't offered for a combined cheat.
+
+Next time you connect, the combined cheat comes back as one row. The app finds every
+part, then asks one question for the whole cheat before changing anything (*"Is this
+your Health? health shows 3.00, fraction shows 1.00 right now."*). The numbers may not
+match the screen: a part can be stored as health / 100 or as a fraction, so just watch
+them change when you take a hit. If a part isn't found, nothing is changed; the status
+line names the part. Delete the combined cheat and make it again: search for that part,
+make a cheat for it, Combine, and press Find it next time.
+
 ### 6.5 Save and send
 
 Press **Save...**:
@@ -499,9 +533,20 @@ restart or reach a new biome. You have two ways to keep it:
   seconds. Test the options one by one. In games like Returnal, the code that lowers your
   health usually lowers enemies' health too. If enemies stop dying, use **Player only...**
   so only you are protected.
-- **Find it next time** (needs the PC): press it, press **Start** and play for a minute,
-  taking a hit or two. Next time you play, press **Connect**, then **Find it again**;
-  answer *"Is this your health?"* by taking a hit and watching the number.
+- **Find it next time** (needs the PC): Returnal keeps health in two places, side by
+  side: `health / 100` (3.00 at a max of 300) and the health **fraction** (1.00 when
+  full). Keep both, or the game puts health back:
+  1. Make a cheat for each (search the fraction as a decimal too: it's 1 when full).
+  2. Ctrl-click both in **My cheats** and press **Combine**. Name the result "Health"
+     if you like.
+  3. Select the combined cheat, press **Find it next time**, press **Start** and play
+     for about 2 minutes (a minute per part), taking a hit or two.
+  4. Next time you play, press **Connect**. The Health cheat comes back as one row; tick
+     it and answer *"Is this your Health?"* by taking a hit and watching both numbers
+     change.
+
+  If after a restart the status says *"Couldn't find fraction (part of Health)"*,
+  delete the Health cheat and make it again (steps 1 to 3).
 
 Finally press **Save...**, then **Send to PS5**, to keep the Obolites cheat and any locked
 health cheat for CheatRunner.

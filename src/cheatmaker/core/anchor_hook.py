@@ -20,13 +20,14 @@ from __future__ import annotations
 
 import logging
 import struct
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
 import iced_x86 as ix
 
-from cheatmaker.console.client import WatchHit
+from cheatmaker.console.client import WatchHit, WatchUntil
 from cheatmaker.core import cave as cv
 from cheatmaker.core import updater as up
 from cheatmaker.core.cheats import Cheat, Location, LocationKind, value_positions
@@ -34,7 +35,7 @@ from cheatmaker.core.locker import MAX_INSN, instruction_before, touches_memory,
 from cheatmaker.core.project import HookAnchor, HookFilter, ObjectSpec, Role
 from cheatmaker.core.session import Session
 from cheatmaker.core.values import ValueType
-from cheatmaker.errors import FindFailed, LockFailed, ReadFailed
+from cheatmaker.errors import FindFailed, LockFailed, ReadFailed, ScanCancelled
 
 log = logging.getLogger(__name__)
 
@@ -124,13 +125,24 @@ def candidates_from_hits(hits: list[WatchHit], address: int, read: Read) -> list
     return out
 
 
+def _until_cancelled(cancel: threading.Event | None) -> WatchUntil | None:
+    """A watch's ``until`` that ends it when the player presses Cancel."""
+    return None if cancel is None else lambda _hits, _secs: cancel.is_set()
+
+
 def find_hooks(
-    session: Session, address: int, size: int, seconds: float = WATCH_SECONDS
+    session: Session,
+    address: int,
+    size: int,
+    seconds: float = WATCH_SECONDS,
+    *,
+    cancel: threading.Event | None = None,
 ) -> list[HookCandidate]:
-    """Watch ``address`` for reads and writes while the player plays."""
+    """Watch ``address`` for reads and writes while the player plays. ``cancel`` ends
+    the watch early (the hits so far are used; the caller checks ``cancel``)."""
     game = session.require_game()
     client = session.require_client()
-    hits = client.watch(game.pid, address, size, "access", seconds)
+    hits = client.watch(game.pid, address, size, "access", seconds, until=_until_cancelled(cancel))
     log.info("action=hook_watch address=%#x hits=%d", address, len(hits))
     read = lambda a, n: client.read(game.pid, a, n)  # noqa: E731
     cands = [
@@ -379,16 +391,25 @@ def read_slot(session: Session, anchor: HookAnchor) -> tuple[int, int]:
     return obj, count
 
 
-def prove_slot(session: Session, slot: int, seconds: float = PROVE_SECONDS) -> None:
+def prove_slot(
+    session: Session,
+    slot: int,
+    seconds: float = PROVE_SECONDS,
+    *,
+    cancel: threading.Event | None = None,
+) -> None:
     """Check the game never writes the 16 slot bytes: they are zero, a write
     watchpoint on the first 8 sees nothing for ``seconds``, and all 16 are still zero
     after (one hardware watchpoint is used, so the counter half is checked by value).
-    Raises FindFailed."""
+    Raises FindFailed, or ScanCancelled when ``cancel`` ends the watch (a short watch
+    proves nothing)."""
     game = session.require_game()
     client = session.require_client()
     if client.read(game.pid, slot, cv.SLOT_SIZE) != bytes(cv.SLOT_SIZE):
         raise FindFailed("The spare memory Cheat Maker wanted to use isn't free.")
-    hits = client.watch(game.pid, slot, 8, "write", seconds)
+    hits = client.watch(game.pid, slot, 8, "write", seconds, until=_until_cancelled(cancel))
+    if cancel is not None and cancel.is_set():
+        raise ScanCancelled("checking the spare memory was cancelled")
     still_zero = client.read(game.pid, slot, cv.SLOT_SIZE) == bytes(cv.SLOT_SIZE)
     log.info(
         "action=slot_prove slot=%#x seconds=%.0f writes=%d zero=%s",

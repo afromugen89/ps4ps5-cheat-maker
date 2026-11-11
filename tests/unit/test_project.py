@@ -149,3 +149,110 @@ def test_set_aside_keeps_every_unreadable_file(tmp_path):  # BUG-06
         path.write_text(f"v{n}")
         assert pj.set_aside(path).name == want and not path.exists()
     assert (tmp_path / "g.cmproj.bak").read_text() == "v1"
+
+
+# -- format 3: combined cheats (spec-restart-combined AC-5) ----------------------------
+def _combined() -> pj.ProjectCheat:
+    return pj.ProjectCheat(
+        "Health",
+        action="freeze",
+        parts=[
+            pj.ProjectPart("health", "player", "Health", 999.0),
+            pj.ProjectPart("fraction", "player", "Fraction", 1.0),
+            pj.ProjectPart(
+                "god flag",
+                kind="module_value",
+                offset=0x1A2B0,
+                on=b"\x01",
+                off=b"\x00",
+                vtype=ValueType.INT8,
+            ),
+        ],
+    )
+
+
+def test_format_3_combined_cheat_round_trips(tmp_path):  # AC-5
+    p = pj.load(GOLDEN)
+    p.cheats.append(_combined())
+    path = tmp_path / "x.cmproj"
+    pj.save(path, p)
+    doc = json.loads(path.read_text())
+    assert doc["format_version"] == 3
+    entry = doc["cheats"][1]
+    assert entry == {
+        "name": "Health",
+        "action": "freeze",
+        "parts": [
+            {"name": "health", "object": "player", "field": "Health", "value": 999.0},
+            {"name": "fraction", "object": "player", "field": "Fraction", "value": 1.0},
+            {
+                "name": "god flag",
+                "kind": "module_value",
+                "module": "eboot.bin",
+                "section": 0,
+                "offset": "0x1a2b0",
+                "on": "01",
+                "off": "00",
+                "type": "int8",
+            },
+        ],
+    }
+    assert doc["cheats"][0] == {  # a single cheat is saved exactly as before
+        "name": "Infinite health",
+        "object": "player",
+        "field": "Health",
+        "action": "freeze",
+        "value": 999,
+    }
+    back = pj.load(path)
+    assert back == p
+    assert back.cheats[1].anchors == [("player", "Health"), ("player", "Fraction")]
+    assert back.cheats[0].anchors == [("player", "Health")]
+    assert back.cheats[1].parts[2].vtype is ValueType.INT8 and not back.cheats[1].parts[2].learned
+
+
+@pytest.mark.parametrize("old", [1, 2])
+def test_format_1_and_2_load_the_same_and_save_as_3(tmp_path, old):  # AC-5
+    doc = json.loads(GOLDEN.read_text())
+    doc["format_version"] = old
+    path = tmp_path / "old.cmproj"
+    path.write_text(json.dumps(doc))
+    p = pj.load(path)
+    assert p.cheats == [pj.ProjectCheat("Infinite health", "player", "Health", "freeze", 999)]
+    if old == 2:
+        assert p == pj.load(GOLDEN), "every object and cheat as before"
+    pj.save(path, p)
+    assert json.loads(path.read_text())["format_version"] == 3
+
+
+def test_format_4_is_from_a_newer_app(tmp_path):  # AC-5: an older app's rule, one step up
+    doc = json.loads(GOLDEN.read_text())
+    doc["format_version"] = pj.FORMAT_VERSION + 1
+    path = tmp_path / "new.cmproj"
+    path.write_text(json.dumps(doc))
+    with pytest.raises(ProjectFileError, match="newer Cheat Maker"):
+        pj.load(path)
+
+
+@pytest.mark.parametrize(
+    "part",
+    [
+        {"name": "x", "kind": "session_address", "offset": "0x10", "on": "01", "off": "00"},
+        {"name": "x", "kind": "code_patch", "offset": "0x10", "on": "0102", "off": "00"},
+        {"name": "x", "kind": "code_patch", "offset": "0x10", "on": "", "off": ""},
+        {"name": "x", "kind": "code_patch", "offset": "0x10", "on": "zz", "off": "00"},
+        {"name": "x", "object": "player", "field": "Health", "value": "full"},
+        {"name": "x", "object": "player", "value": 1},
+    ],
+)
+def test_bad_parts_are_a_project_error(tmp_path, part):
+    doc = json.loads(GOLDEN.read_text())
+    doc["cheats"].append({"name": "Health", "action": "freeze", "parts": [part]})
+    bad = tmp_path / "bad.cmproj"
+    bad.write_text(json.dumps(doc))
+    with pytest.raises(ProjectFileError):
+        pj.load(bad)
+    doc["cheats"][-1]["parts"] = []
+    bad.write_text(json.dumps(doc))
+    with pytest.raises(ProjectFileError, match="no parts"):
+        pj.load(bad)
