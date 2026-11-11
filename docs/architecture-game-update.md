@@ -235,8 +235,8 @@ Rules:
     `carry_cheat`. Last job: `learn_note_signatures(new, plan.image)` +
     `save_signatures(new path)`, then `finder.save()`.
   - `open_advanced()`: pick a version from `list_sources` (QInputDialog.getItem); if the new
-    notes hold objects, run with `for_merge`. Button "Advanced: Bring notes from an older
-    version..." next to `skip_hook` in CheatsView, visible with Advanced details.
+    notes hold objects, run with `for_merge`. Button "Advanced: Bring notes from another
+    version..." (it lists newer versions too) next to `skip_hook` in CheatsView, visible with Advanced details.
 - `NoteFingerprints(QObject)(ctl, finder)` on `finder.notes_changed`: only when notes are
   for the running version, connected, not `finder.running`/`carrying`, `ctl.code_reading`
   False, and this (title, version) not read yet this run. Reads only if something needs

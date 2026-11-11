@@ -423,3 +423,34 @@ Small changes against the design, each keeping the spec's behaviour:
   and versions (so a typo never touches real notes), uses the versions as recorded for
   the file names, and moves its copies aside as `.carried` instead of deleting them. A
   second dry run is refused until `--undo`.
+
+## Bring notes over: QA fixes (2026-11-11)
+
+From qa/reports/2026-11-11-game-update.md (BUG-01 to BUG-09); each strict xfail in
+tests/qa/test_game_update_qa.py was removed as its bug was fixed.
+- **BUG-01**: `version_key` uses `isdecimal()`; "1.0²" compares "²" as text.
+- **BUG-02**: Bring them over takes the one code read (`ctl.code_reading`) for prepare's
+  read and cancels `NoteFingerprints`; it gives the read back after prepare or on a
+  rollback. It (and Advanced) refuses while another read runs (review m6).
+- **BUG-03 / BUG-06**: `for_merge` maps a cheat on a value the new notes already hold to
+  that value. A value a failed bring-over left behind (`check` set, no anchors) is brought
+  again under its own id and replaces it (`adopt_carried` replaces by id); the player's
+  own values (no `check`) are never replaced, even with no anchors. `assemble(have=...)`
+  counts cheats on values already held as brought over.
+- **BUG-04**: `ObjectSpec.carried_from` (format 4, written only when set) is set by
+  `assemble`; the question names the object's own version, falling back to the notes'.
+  A combined cheat with values from two versions names both.
+- **BUG-05**: C21e's pass line now says no hook was put in at the slot-check step.
+- **BUG-07**: covered by the review nit fix (results matched by cheat, not name). TC-23
+  now clears `check` first, since a PC-off line waits for the Yes (review m9).
+- **BUG-08**: a field that would move below offset 0 stays where it was and the value
+  fails with "its numbers moved in a way that can't be followed" (no hook placed).
+- **BUG-09**: plan/collect, slot-check and install errors become short lower-case
+  reasons (`NO_ROOM`, `ROOM_USED`, `NOT_PUT_IN`); the app's own message goes to the log
+  (`action=carry_hook ... step=... error=...`).
+- Doc points: guide 6.6 points to section 5 for searching; a combined cheat's No names
+  its first brought-over value, not the cheat; the Advanced button says "another
+  version"; a cheat whose value came over with no way to be found says "Not brought
+  over: search for it" (`Cheat.carried == "lost"`), not "check it". The spec still says
+  "an older version..." for the button label.
+

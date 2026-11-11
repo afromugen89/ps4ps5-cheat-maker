@@ -552,21 +552,23 @@ for about 2 minutes."*
    change it in the game) and it will be found."* Its cheat came over: take a hit, then
    press **Find it again**.
 3. **Not now** hides the offer for this pair of versions. You can still use **Advanced:
-   Bring notes from an older version...** in My cheats (with *Advanced: show details* on);
-   it lets you pick the version, and into notes that already hold values it adds only
-   values and cheats with new names. Your old notes are only read, never changed.
+   Bring notes from another version...** in My cheats (with *Advanced: show details* on);
+   it lets you pick the version (older ones first, then newer ones). Into notes that
+   already hold values it adds only values and cheats with new names (a new cheat on a
+   value you already have uses yours). A value that didn't come over last time is brought
+   over again. Your old notes are only read, never changed.
 
 **Check it**: a brought-over cheat says **Found again each run (check it)** until you
 confirm it. The first time you tick it (each run, until you say Yes) the app asks: *"Is
 this your Health? It was brought over from version 03.000.005 and shows 300 right now.
 Take a hit and watch it change."* Press **Yes** only if it changes with yours; after
 that it asks only the usual question (6.3). **No** changes nothing: search for
-the value again (6.4). A combined cheat asks one question for the whole cheat. A combined
+the value again (section 5). A combined cheat asks one question for the whole cheat. A combined
 cheat with fixed changes to the game's code says **Brought over: test it** until you tick
 it once: test it in the game and untick it if it doesn't work.
 
-**A cheat that didn't come over** keeps its reason in the summary. Its value is still in
-your notes: the next time you connect, the app says it couldn't find it and fills in the
+**A cheat that didn't come over** keeps its reason in the summary and says **Not brought
+over: search for it** in My cheats. Its value is still in your notes: the next time you connect, the app says it couldn't find it and fills in the
 search, so search for it and press **Find it next time** again. A combined cheat that
 didn't come over stays in the old version's notes; make it again.
 
