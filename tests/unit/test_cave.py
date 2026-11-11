@@ -278,3 +278,37 @@ def test_collect_leaves_the_sampler_code_for_threads_still_inside():
     cv.collect_objects(s, WRITER, 0.25, sleep=lambda _t: None)
     assert fake.peek(PID, HOOK, 10) == VMOVSS, "unhooked"
     assert fake.peek(PID, cave, 4) != bytes(4), "cave code left in place"
+
+
+# -- Player only leaves the game's flags (spec-cheat-builder, flags bug 2) ---------------
+def _red_zone(g):
+    from tests import fakegame as fg
+
+    return g.fake.peek(fg.PID, fg.RSP - cv.RED_ZONE, cv.RED_ZONE)
+
+
+@pytest.mark.parametrize("new", [5, 0, -3], ids=["alive", "zero", "below"])
+def test_player_only_keeps_the_games_flags_and_registers(new):
+    """``sub [rax+2B0h],ecx ; jle dead``: the old cave left its own ``cmp`` flags (equal,
+    so jle "killed" the player whatever the damage). Now both paths leave exactly the
+    flags and registers the game's own instruction leaves."""
+    from tests import fakegame as fg
+
+    want = {}
+    for who in ("player", "enemy"):
+        g = fg.build()
+        obj = g.player if who == "player" else g.enemies[0]
+        cpu = g.hit(obj, new, "int32")
+        want[who] = (cpu.snapshot(), cpu.status(), _red_zone(g))
+
+    g = fg.build()
+    writer = Writer(fg.SUB_SITE, fg.SUB_W, "sub [rax+2B0h],ecx", 1)
+    field = cv.FieldGuess(8, 0x40048, (0x30010,))
+    cheat = cv.make_player_only_cheat(g.session, writer, field, struct.pack("<i", 100), "HP")
+    for loc in cheat.locations:
+        g.fake.write(fg.PID, fg.BASE + loc.offset, loc.on)
+    for who, obj in (("player", g.player), ("enemy", g.enemies[0])):
+        cpu = g.hit(obj, new, "int32")
+        assert (cpu.snapshot(), cpu.status(), _red_zone(g)) == want[who], who
+    assert g.value(g.player, "int32") == 100, "the player keeps the value"
+    assert g.value(g.enemies[0], "int32") == new, "enemies take the damage"

@@ -61,6 +61,9 @@ class FakeConsole:
         self.connected = True
         self._app_closed = False  # the app closed the link (it can open a new one)
         self.fail_writes = False
+        # Writes to code are acknowledged but change nothing (seen on some consoles;
+        # locker.patch_landed is there to notice).
+        self.drop_code_writes = False
         self.supports_unknown_scan = True
         # addr -> RIPs that "write" it while watched (set by tests / dumps)
         self.writers: dict[int, list[int]] = {}
@@ -198,7 +201,9 @@ class FakeConsole:
             raise WriteFailed("the console refused the write (fake)")
         with self._lock:
             try:
-                self.poke(pid, addr, data)
+                region, _off = self._locate(pid, addr, len(data))
+                if not (self.drop_code_writes and region.map.executable):
+                    self.poke(pid, addr, data)
             except ReadFailed as exc:
                 raise WriteFailed(str(exc)) from None
             self.writes.append((pid, addr, bytes(data)))
