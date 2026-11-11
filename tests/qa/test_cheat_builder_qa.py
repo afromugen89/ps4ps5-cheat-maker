@@ -403,10 +403,6 @@ def test_bug06_close_while_finalizing():
         assert g.fake.peek(fg.PID, fg.BASE + loc.offset, len(loc.on)) == loc.on, loc
 
 
-@pytest.mark.xfail(
-    reason="BUG-07: Only me's Collect hook isn't taken out by close()/Disconnect",
-    strict=True,
-)
 def test_bug07_disconnect_during_collect_leaves_the_sampler_hook():
     g, clock, bl = setup(only_me=True)
     bl.watch()

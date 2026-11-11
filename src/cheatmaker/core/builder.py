@@ -445,6 +445,7 @@ class _Installed:
     slot: int | None = None
     total: int = 0  # how many fixes this build tries, for the hint
     put_back: Rollback | None = None  # how its put back went, for the other thread
+    method: str = ""  # the crash note's method when not the candidate's ("collect")
 
 
 class Builder:
@@ -609,13 +610,16 @@ class Builder:
     def collect(self, cancel: threading.Event | None = None) -> str | None:
         """Hook the busiest writer for 20 s and work out how to tell the player's object
         from the others. Returns a hint to collect again, or None when done."""
+        cancel = self._start_step(cancel)
+        if self.not_restored:
+            raise BuildFailed(RESTART)
         hookable = [e.writer for e in self.eligible if Method.HOOK in e.methods]
         if not hookable:
             raise BuildFailed(NOTHING_WORKED)
         writer = hookable[0]
         target = cv.writer_target(writer)
         player = self.address - target.disp
-        objs = cv.collect_objects(self.session, writer, COLLECT_S, cancel, self.sleep)
+        objs = self._collect_objects(writer, target, cancel)
         others = [o for o in objs if o != player]
         if not others:
             self.collect_tries += 1
@@ -645,6 +649,52 @@ class Builder:
             len(self.others),
         )
         return None
+
+    def _collect_objects(
+        self, writer: Writer, target: cv.Target, cancel: threading.Event
+    ) -> list[int]:
+        """The sampler hook (cave.sampler_code) for COLLECT_S, put in and taken out as
+        a test fix is: noted, under the write lock, and put back by close()."""
+        game = self._game()
+        client = self._client()
+        read = lambda a, k: client.read(game.pid, a, k)  # noqa: E731
+        span = cv.hook_span(read, writer.address)
+        orig = b"".join(read(i.ip, i.len) for i in span)
+        room = cv.find_cave(
+            self.session, cv.CAVE_ROOM, skip=cv.BUILD_CAVE_SKIP, extra_reserved=self.extra_reserved
+        )
+        table = cv.find_table(self.session)
+        code = cv.sampler_code(span, target, table, room)
+        inst = _Installed(
+            Candidate((Part(writer, Method.HOOK),)),
+            0,
+            sites=[(writer.address, orig, cv.jmp_patch(writer.address, room, len(orig)))],
+            rooms=[(room, cv.CAVE_ROOM), (table, cv.TABLE_SIZE)],
+            routines=[(room, code)],
+            method="collect",
+        )
+        failed = self._install(inst, cancel)
+        if failed is not None:
+            if failed.rollback is Rollback.NOT_RESTORED:
+                raise BuildFailed(RESTART)
+            if failed.result is TryResult.CANCELLED:
+                raise ScanCancelled("collecting cancelled")
+            raise BuildFailed(CANT_TELL_APART)
+        try:
+            waited = 0.0
+            while waited < COLLECT_S:
+                if cancel.is_set() or self._taken_back(inst) is not None:
+                    raise ScanCancelled("collecting cancelled")
+                self.sleep(POLL_S)
+                waited += POLL_S
+            raw = read(table, cv.TABLE_SIZE)  # entries added after this are only lost
+        finally:
+            rb = self._end(inst, "collected")
+        if rb is Rollback.NOT_RESTORED:
+            raise BuildFailed(RESTART)
+        objs = sorted({v for (v,) in struct.iter_unpack("<Q", raw) if v})
+        log.info("action=player_only_collect objects=%d", len(objs))
+        return objs
 
     # -- B4/B5: one fix at a time -------------------------------------------------------
     def next_candidate(self) -> Candidate | None:
@@ -764,7 +814,7 @@ class Builder:
             version=game.version,
             pid=game.pid,
             site_off=inst.candidate.parts[0].writer.address - base,
-            method=_method_name(inst.candidate),
+            method=inst.method or _method_name(inst.candidate),
             n=inst.n,
             patches=tuple(notes.Patch(a - base, o.hex(), new.hex()) for a, o, new in inst.sites),
             rooms=tuple((a - base, size) for a, size in inst.rooms),

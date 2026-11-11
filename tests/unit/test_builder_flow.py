@@ -645,3 +645,37 @@ def test_put_back_on_this_thread_while_installing_is_redone(monkeypatch):
     out = bl.try_candidate(bl.next_candidate())
     assert out.result is TR.CANCELLED and out.rollback is b.Rollback.RESTORED
     assert module(g) == before
+
+
+def test_collect_hook_is_noted_and_close_on_another_thread_takes_it_out():
+    g, clock, bl = setup(only_me=True)
+    bl.watch()
+    before = module(g)
+    seen, go = threading.Event(), threading.Event()
+
+    def collecting():
+        note = notes.current_note()
+        assert note is not None and note.method == "collect" and note.site_off == 0x100
+        seen.set()
+        go.wait(5)
+
+    clock.events.extend([None, collecting])
+    worker, wout = _in_thread(bl.collect)
+    assert seen.wait(5)
+    closer, cout = _in_thread(bl.close)
+    closer.join(0.2)  # close puts back at once: the hook isn't a run of writes
+    go.set()
+    closer.join(5)
+    worker.join(5)
+    assert cout["value"] is b.Rollback.RESTORED
+    assert isinstance(wout.get("error"), ScanCancelled), wout
+    assert module(g) == before and notes.current_note() is None
+
+
+def test_collect_puts_the_sampler_back_when_done():
+    g, clock, bl = setup(only_me=True)
+    bl.watch()
+    before = module(g)
+    clock.events.extend(_fight(g, 3))
+    assert bl.collect() is None
+    assert module(g) == before and notes.current_note() is None
