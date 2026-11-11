@@ -166,7 +166,10 @@ P, F, NH, ASK = b.Outcome.PASS, b.Outcome.FAIL, b.Outcome.NO_HIT, b.Outcome.NEED
         (INT32, [S(100), S(99, 1)], F),  # whole numbers: exact
         (FLOAT, [S(100.0), S(99.995, 1)], P),  # decimals: within 0.01
         (FLOAT, [S(100.0), S(99.9, 1)], F),
-        (FLOAT, [S(100.0), S(float("nan"), 1)], P),
+        (FLOAT, [S(100.0), S(float("nan"), 1)], F),  # a NaN let through isn't held
+        (FLOAT, [S(100.0), S(float("-inf"), 1)], F),
+        (FLOAT, [S(100.0), S(float("inf"), 1)], P),
+        (FLOAT, [S(float("nan")), S(100.0, 1)], P),  # nothing to compare with
         (INT32, [S(100), S(100)], NH),  # no tick: you didn't get hit
         (INT32, [], NH),
     ],

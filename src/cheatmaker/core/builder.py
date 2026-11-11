@@ -325,7 +325,11 @@ def _effect_broken(d: TestData) -> str | None:
     vt = d.vtype
     if d.effect is Effect.NEVER_DOWN:
         tol = FLOAT_HOLD_TOL if vt.is_float else 0
-        if any(s.value < d.start - tol for s in d.samples if _finite(s.value)):
+        if _is_nan(d.start):
+            return None  # nothing to compare with
+        if any(_is_nan(s.value) for s in d.samples):  # the routine lets a NaN through
+            return "the value stopped being a number"
+        if any(s.value < d.start - tol for s in d.samples):  # -inf included
             return "the value still went down"
         return None
     if d.effect is Effect.ALWAYS_FULL:
@@ -371,8 +375,8 @@ def _half_ok(vt: ValueType, prev, cur, game_new) -> bool:
     return cur == prev - (game_drop + 1) // 2
 
 
-def _finite(v) -> bool:
-    return not isinstance(v, float) or math.isfinite(v)
+def _is_nan(v) -> bool:
+    return isinstance(v, float) and math.isnan(v)
 
 
 # -- the console part -------------------------------------------------------------------

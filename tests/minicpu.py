@@ -9,6 +9,11 @@ It knows a closed set of instructions: what ``cave.py`` emits (``lea``, ``push``
 test by using an instruction the interpreter would get wrong. Flags follow the Intel
 manual for the six status flags (undefined ones are left at 0).
 
+Decimal maths runs in Python (doubles) and is rounded to float32 once at the end: for
+``addss``/``mulss`` of two float32 values that is the same result as the CPU's single
+rounding. MXCSR isn't modelled: round-to-nearest only, and no FTZ/DAZ (a game that
+sets them would see denormals flushed where minicpu keeps them).
+
 unicorn (tests/qa/test_capture_emulated.py) is the slower, optional cross-check.
 """
 
