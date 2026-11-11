@@ -336,6 +336,8 @@ class CheatsView(QWidget):
             self.cheats.remove(c)
             self.finder.forget(c)
         self.cheats.insert(at, combined)
+        if combined.found_again:  # nothing moves: it comes back as one row next run
+            self.finder.remember_combined(combined)
         if was_on:
             try:
                 self.ctl.live.turn_on(combined)

@@ -527,3 +527,167 @@ def test_late_no_after_the_question_answered_itself_keeps_the_cheat(win, console
     win.cheats.finder.ask_confirm = answer
     win.cheats.finder.check_pending()
     assert cheat.enabled and tracker.address == old and tracker.ignored == set()
+
+
+# -- combined cheats that survive restarts (spec-restart-combined) ----------------------
+COMBINED = "Infinite Health + fraction"
+
+
+def add_found_fraction(w, value: int = 77) -> Cheat:
+    """A second found-again value in the player object (whole-number health)."""
+    obj = w.ctl.project.objects[0]
+    obj.fields.append(pj.Field("fraction", fg.HP32, ValueType.INT32, (0, 10_000), 100))
+    w.cheats.finder.save()
+    raw = struct.pack("<i", value)
+    c = Cheat(
+        "fraction",
+        [Location(LocationKind.SESSION_ADDRESS, 0, raw, raw)],
+        freeze=True,
+        value_type=ValueType.INT32,
+        anchor=("obj1", "fraction"),
+    )
+    w.ctl.ensure_file().cheats.append(c)
+    w.ctl.cheats_changed.emit()
+    return c
+
+
+def combine_all(w) -> Cheat:
+    w.cheats.table.selectAll()
+    w.cheats.combine_btn.click()
+    [c] = w.ctl.cheat_file.cheats
+    return c
+
+
+def combined_found_again(win, console) -> Cheat:
+    connect(win)
+    learn(win, add_health_cheat(win, console.game))
+    add_found_fraction(win)
+    return combine_all(win)
+
+
+def test_combine_found_again_cheats_saves_one_entry(win, console):  # AC-1, AC-5
+    c = combined_found_again(win, console)
+    assert c.name == COMBINED and c.found_again
+    assert win.cheats.table.item(0, COL_KEEPS).text() == FOUND_AGAIN
+    saved = pj.load(pj.project_path(fg.TITLE, fg.VERSION))
+    [entry] = saved.cheats  # the parts' own entries are gone
+    assert entry.anchors == [("obj1", "Infinite Health"), ("obj1", "fraction")]
+    assert [p.value for p in entry.parts] == [999.0, 77] and entry.action == "freeze"
+    assert [o.id for o in saved.objects] == ["obj1"], "objects stay"
+
+
+def test_restart_brings_one_row_one_line_one_question(win, console):  # AC-3
+    combined_found_again(win, console)
+    win.ctl.shutdown()
+    run2 = console.restart(2)
+    connect(win)
+    [c] = win.ctl.cheat_file.cheats
+    assert c.name == COMBINED and [p.part for p in c.locations] == ["Infinite Health", "fraction"]
+    assert not c.enabled and c.freeze
+    status = win.status.text()
+    assert status.startswith(f"Ready: {COMBINED} found again (2 parts, ")
+    assert "Infinite Health found again by" not in status, "no line of its own"
+    asked = []
+    win.cheats.finder.ask_confirm = lambda text: asked.append(text) or True
+    tick(win)
+    assert asked == [
+        hints.CONFIRM_PARTS.format(
+            name=COMBINED, values="Infinite Health shows 100.00, fraction shows 100"
+        )
+    ]
+    assert run2.health() == 999.0 and run2.value(run2.player, "int32") == 77
+    run2.set_health(3.0)
+    run2.set_value(run2.player, 5, "int32")
+    win.ctl.freezer.tick()
+    assert run2.health() == 999.0 and run2.value(run2.player, "int32") == 77
+    win.cheats.table.item(0, COL_ON).setCheckState(Qt.CheckState.Unchecked)
+    tick(win)
+    assert len(asked) == 1, "asked once per run"
+
+
+def test_combined_confirm_no_writes_nothing(win, console):  # AC-3
+    combined_found_again(win, console)
+    win.ctl.shutdown()
+    run2 = console.restart(2)
+    connect(win)
+    win.cheats.finder.ask_confirm = lambda text: False
+    tick(win)
+    assert all(a not in (run2.health_addr, run2.player + fg.HP32) for _p, a, _d in run2.fake.writes)
+    assert not win.ctl.cheat_file.cheats[0].enabled
+    assert win.status.text() == hints.CONFIRM_NO.format(name=COMBINED)
+
+
+def test_combined_part_not_found_says_so_and_writes_nothing(win, console):  # AC-3
+    combined_found_again(win, console)
+    win.ctl.shutdown()
+    run2 = console.restart(2)
+    run2.fake.poke(fg.PID, run2.player, bytes(0x300))
+    connect(win)
+    assert win.status.text().startswith(
+        hints.COMBINED_NOT_FOUND.format(part="Infinite Health", name=COMBINED)
+    )
+    assert win.tabs.currentWidget() is win.find
+    assert win.find.vtype.currentData() is ValueType.FLOAT and win.find.number.text() == "100"
+    tick(win)
+    assert win.status.text() == (
+        f"{COMBINED}: Infinite Health isn't found right now, so nothing was changed. "
+        "Press Find it again."
+    )
+    assert run2.fake.writes == [] or all(
+        a >= fg.BASE and a < fg.HEAP for _p, a, _d in run2.fake.writes
+    )
+    assert not win.ctl.cheat_file.cheats[0].enabled
+
+
+def test_combined_follows_a_move_and_hook_rules(win, console):  # AC-4
+    combined_found_again(win, console)
+    win.ctl.shutdown()
+    run2 = console.restart(2)
+    connect(win)
+    tick(win)
+    fake = run2.fake
+    assert fake.peek(fg.PID, fg.READER, 1) == b"\xe9", "hook in while it is on"
+    run2.move_player(fg.HEAP + 0x6000)
+    tracker = win.ctl.live.trackers["obj1"]
+    for _ in range(3):
+        fake.read(fg.PID, fg.BASE, 1)  # a frame runs: the hook sees the new object
+        tracker._last_try = -10.0
+        win.ctl.freezer.tick()
+    assert tracker.address == run2.player
+    assert run2.health() == 999.0 and run2.value(run2.player, "int32") == 77
+    win.cheats.table.item(0, COL_ON).setCheckState(Qt.CheckState.Unchecked)
+    assert fake.peek(fg.PID, fg.READER, 10) == fg.VMOVSS_R, "last cheat off: hook out"
+    assert run2.health() == 999.0, "learned parts are left as they are"
+
+
+def test_combined_moved_question_names_the_part(win, console):  # AC-4
+    c = combined_found_again(win, console)
+    tick(win)
+    tracker = win.ctl.live.trackers["obj1"]
+    asked = []
+    win.cheats.finder.ask_confirm = lambda text: asked.append(text) or False
+    tracker.pending = console.game.player
+    win.cheats.finder.check_pending()
+    assert asked[0].startswith(f"Infinite Health (part of {COMBINED}) moved")
+    assert not c.enabled, "No turns the whole cheat off"
+
+
+def test_delete_combined_keeps_the_objects(win, console):  # AC-5
+    combined_found_again(win, console)
+    win.cheats.table.selectRow(0)
+    win.cheats.delete_btn.click()
+    saved = pj.load(pj.project_path(fg.TITLE, fg.VERSION))
+    assert saved.cheats == [] and [o.id for o in saved.objects] == ["obj1"]
+
+
+def test_notes_with_a_missing_part_leave_the_combined_cheat_out(win, console):
+    combined_found_again(win, console)
+    win.ctl.shutdown()
+    path = pj.project_path(fg.TITLE, fg.VERSION)
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    doc["objects"][0]["fields"] = doc["objects"][0]["fields"][:1]  # fraction is gone
+    path.write_text(json.dumps(doc), encoding="utf-8")
+    win.ctl.cheat_file.cheats.clear()  # a fresh app
+    console.restart(2)
+    connect(win)
+    assert win.ctl.cheat_file.cheats == []
