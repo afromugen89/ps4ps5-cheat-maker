@@ -241,3 +241,26 @@ def _display_copies(members: list[Member], tol: float, far: int) -> bool:
         return False
     addrs = sorted(m.address for m in members)
     return all(b - a > far for a, b in itertools.pairwise(addrs))
+
+
+def promote(group: Group, k: int) -> Group:
+    """The same group with member ``k`` as its head (e.g. the one Check which is real
+    found), factors re-based on it. The label stays."""
+    if k == 0:
+        return group
+    order = [k, *(i for i in range(len(group.members)) if i != k)]
+    base = group.factors[k] if k < len(group.factors) else math.nan
+    factors = [
+        1.0
+        if i == k
+        else (group.factors[i] / base if base else math.nan)
+        if i < len(group.factors)
+        else math.nan
+        for i in order
+    ]
+    return Group(
+        [group.members[i] for i in order],
+        {order.index(i) for i in group.likely},
+        factors,
+        group.label,
+    )

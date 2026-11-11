@@ -281,3 +281,29 @@ def test_of_full_never_keeps_a_subnormal_decimal():
     full = pf.Full(_as_float(250))
     assert not pf.matches_way(_as_float(100), OF_FULL, full, target, F)
     assert pf.matches_way(100.0, OF_FULL, pf.Full(250.0), target, F)
+
+
+def test_promote_makes_a_member_the_head():
+    from cheatmaker.core.grouping import Group, Member, promote
+    from cheatmaker.core.values import ValueType
+
+    ms = [Member(a, ValueType.FLOAT, None, (1.0, 0.5, 0.25)) for a in (0x10, 0x20, 0x30)]
+    g = Group(ms, {0, 2}, [1.0, 100.0, 0.5], "likely real")
+    p = promote(g, 1)
+    assert [m.address for m in p.members] == [0x20, 0x10, 0x30]
+    assert p.factors == [1.0, 0.01, 0.005]
+    assert p.likely == {1, 2} and p.label == "likely real"
+    assert promote(g, 0) is g
+
+
+def test_promote_with_unknown_factors():
+    import math
+
+    from cheatmaker.core.grouping import Group, Member, promote
+    from cheatmaker.core.values import ValueType
+
+    ms = [Member(a, ValueType.FLOAT, None, (1.0, 0.5, 0.25)) for a in (0x10, 0x20)]
+    p = promote(Group(ms, set(), [1.0, math.nan]), 1)
+    assert math.isnan(p.factors[1]) and p.factors[0] == 1.0
+    p = promote(Group(ms, set(), [1.0, 0.0]), 1)
+    assert math.isnan(p.factors[1])

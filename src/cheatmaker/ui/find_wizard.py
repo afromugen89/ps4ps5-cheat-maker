@@ -29,10 +29,17 @@ from PySide6.QtWidgets import (
 )
 
 from cheatmaker.core import pointers as ptr
-from cheatmaker.core.grouping import Group
+from cheatmaker.core.grouping import Group, promote
 from cheatmaker.core.guide import Action, Guide, Scan, Shows, Suggestion
 from cheatmaker.core.hit_tester import TEST_LIMIT
 from cheatmaker.core.pointers import Chain
+from cheatmaker.core.real_check import (
+    RealChecker,
+    Result,
+    Verdict,
+    targets_from_groups,
+    targets_from_list,
+)
 from cheatmaker.core.scan_log import way_label
 from cheatmaker.core.scanner import ABOUT, FEW_MATCHES, MAX_SHOW, NOTED, TOO_MANY, Match
 from cheatmaker.core.templates import TEMPLATES, make_cheat
@@ -97,6 +104,10 @@ class FindWizard(QWidget):
         # (address, is an expanded member) selected before the tree was built again
         self._tree_pick: tuple[int, ValueType, bool] | None = None
         self.manual: dict[int, ValueType] = {}  # addresses the player typed in
+        # Check which is real: what each checked match did with its test value
+        self.verdicts: dict[tuple[int, ValueType], Result] = {}
+        self._search_gen = 0  # bumped when the search ends: a running check's results drop
+        self._checking = False
         self.pointers: dict[Chain, ValueType] = {}  # chains followed on every refresh
         self.row_chains: list[Chain | None] = []
         self._cancel: threading.Event | None = None
@@ -122,6 +133,8 @@ class FindWizard(QWidget):
             f"With 2 to {TEST_LIMIT} matches: write a test value to half of them and say "
             "whether the game showed it, until one is left"
         )
+        self.check_btn = QPushButton("Check which is real")
+        self.check_btn.setToolTip(hints.CHECK_REAL_TIP)
         self.number = QLineEdit()
         self.number.setPlaceholderText("The number you see, e.g. 2450 or 40%")
         self.number.setToolTip(
@@ -275,6 +288,7 @@ class FindWizard(QWidget):
         for w in (self.add_type, self.add_btn, self.remove_btn, self.pointer_btn):
             add_row.addWidget(w)
         act = QHBoxLayout()
+        act.addWidget(self.check_btn)
         act.addWidget(self.test_btn)
         for w in (self.set_value, self.set_btn, self.freeze_btn, self.template, self.make_btn):
             act.addWidget(w)
@@ -318,6 +332,7 @@ class FindWizard(QWidget):
         self.still_btn.clicked.connect(self.do_stand_still)
         self.try_btn.clicked.connect(self.do_try_next)
         self.test_btn.clicked.connect(self.do_test_hits)
+        self.check_btn.clicked.connect(self.do_check_real)
         self.cancel_btn.clicked.connect(self.do_cancel)
         self.set_btn.clicked.connect(self.do_set)
         self.freeze_btn.clicked.connect(self.do_freeze)
@@ -371,6 +386,7 @@ class FindWizard(QWidget):
         self.cancel_btn.setEnabled(busy)
         count = self.ctl.scanner.count or 0
         self.test_btn.setEnabled(ready and active and 2 <= count <= TEST_LIMIT)
+        self.check_btn.setEnabled(ready and active and self._n_matches > 0)
         self.try_btn.setEnabled(ready)
         for b in self.shows_btns.values():
             b.setEnabled(ready)
@@ -668,6 +684,16 @@ class FindWizard(QWidget):
     def do_cancel(self) -> None:
         if self._cancel is not None:
             self._cancel.set()
+            if self._checking:
+                self.hint.setText(hints.CHECK_REAL_STOPPING)
+
+    def _end_search(self) -> None:
+        """The matches are gone: a running check stops after its round (with the values
+        put back) and its results are thrown away."""
+        self._search_gen += 1
+        if self._checking and self._cancel is not None:
+            self._cancel.set()
+        self.verdicts.clear()
 
     def do_reset(self) -> None:
         try:
@@ -682,6 +708,8 @@ class FindWizard(QWidget):
             self.advanced.setChecked(False)
             self._guide_set_advanced = False
         self.rows = []
+        self._n_matches = 0
+        self._end_search()
         self._show_groups([])
         self.count.setText("")
         self.number.clear()
@@ -699,6 +727,7 @@ class FindWizard(QWidget):
         if not (show_matches or ((self.manual or self.pointers) and self._ready())):
             self.timer.stop()
             self.rows, self.row_types, self.row_chains = [], [], []
+            self._n_matches = 0
             self._show_groups([])
             self._fill_table()
             return
@@ -751,7 +780,25 @@ class FindWizard(QWidget):
         groups = sc.groups()
         if len(groups) > sc.show_limit or all(len(g.members) == 1 for g in groups):
             return []
-        return groups
+        return self._checked_first(groups) if self.verdicts else groups
+
+    def _checked_first(self, groups: list[Group]) -> list[Group]:
+        """A member Check which is real found becomes its group's head, so the group
+        row, Make a cheat and Freeze act on it; those groups go first."""
+        out = []
+        for g in groups:
+            real = [
+                (r.followers, -k)  # most followers; the first on a tie
+                for k, m in enumerate(g.members)
+                if (r := self.verdicts.get((m.address, m.vtype))) is not None
+                and r.verdict is Verdict.REAL
+            ]
+            out.append(promote(g, -max(real)[1]) if real else g)
+        return sorted(out, key=lambda g: not self._found_real(g.head.address, g.head.vtype))
+
+    def _found_real(self, addr: int, vt: ValueType) -> bool:
+        r = self.verdicts.get((addr, vt))
+        return r is not None and r.verdict is Verdict.REAL
 
     def _show_groups(self, groups: list[Group]) -> None:
         if [g.members for g in groups] != [g.members for g in self.groups]:
@@ -771,6 +818,9 @@ class FindWizard(QWidget):
             frozen += f" (pointer {chain.label()})"
             if m.address == 0:
                 frozen = f" (pointer {chain.label()} leads nowhere right now)"
+        r = self.verdicts.get((m.address, self.row_types[i])) if i < self._n_matches else None
+        if r is not None and not self.grouped:  # the tree says it in Notes
+            frozen += f" ({r.verdict.short})"
         return fmt_value(m.value) + frozen
 
     def _fill_table(self) -> None:
@@ -839,13 +889,18 @@ class FindWizard(QWidget):
         item.setText(0, self._row_text(i))
         item.setText(1, way_label(m.way) if self.ctl.scanner.has_ways else "")
         item.setText(3, f"{m.address:#x}")
+        checked = self.verdicts.get((m.address, self.row_types[i]))
         if g is None:
             item.setText(2, "")
         elif member is None:  # the group's row
             notes = [g.label] if g.label else []
+            if checked is not None and (checked.verdict is Verdict.REAL or not g.copies):
+                notes = [checked.verdict.short]
             if g.copies:
                 notes.append(f"+{g.copies} {'copy' if g.copies == 1 else 'copies'}")
             item.setText(2, ", ".join(notes))
+        elif checked is not None:
+            item.setText(2, checked.verdict.short)
         else:
             item.setText(2, "likely real" if member in g.likely else "")
 
@@ -942,6 +997,8 @@ class FindWizard(QWidget):
         player typed stays, so Search starts again in one click)."""
         self.unknown_mode = False
         self.rows = []
+        self._n_matches = 0
+        self._end_search()
         self._show_groups([])
         self.tree.clear()
         self.count.setText("")
@@ -1017,6 +1074,96 @@ class FindWizard(QWidget):
             return
         self.hit_dialog = dlg
         dlg.exec()
+
+    def do_check_real(self) -> None:
+        """spec-real-check: write a test value to each listed match, see which ones the
+        game puts back (copies) and which one the others follow (real)."""
+        if not self.ctl.scanner.active or self._n_matches == 0:
+            return
+        frozen = set(self.ctl.frozen_addresses)
+        if self.grouped:
+            targets = targets_from_groups(self.groups, frozen)
+        else:
+            rows = [(self.rows[i].address, self.row_types[i]) for i in range(self._n_matches)]
+            targets = targets_from_list(rows, frozen)
+        try:
+            g = self.ctl.session.require_game()
+            checker = RealChecker(self.ctl.session.require_client(), g.pid, targets)
+        except Exception as exc:
+            self.ctl.fail(exc, "check")
+            return
+        log.info(
+            "action=check_real_start groups=%d addresses=%d",
+            len(checker.groups),
+            sum(len(t) for t in checker.groups),
+        )
+        self.timer.stop()  # the list would show the test values for a moment
+        self.hint.setText(hints.CHECK_REAL_RUNNING)
+        self._cancel = threading.Event()
+        cancel = self._cancel
+        gen = self._search_gen
+        self._checking = True
+        self.progress.setValue(0)
+        self.progress.setFormat("%p%")
+        self._started = time.monotonic()
+        self._update_buttons()
+        self.ctl.tasks.run(
+            lambda: checker.run(self._progress.done.emit, cancel),
+            lambda _r: self._after_check(checker, cancel.is_set(), gen),
+            lambda exc: self._check_failed(exc, checker, gen),
+        )
+
+    def _after_check(self, checker: RealChecker, stopped: bool, gen: int) -> None:
+        self._cancel = None
+        self._checking = False
+        self.progress.setValue(100)
+        if gen != self._search_gen:  # the search ended while it ran: these are stale
+            self._update_buttons()
+            return
+        self.verdicts.update(checker.results)
+        found = [b for grp in checker.groups if (b := checker.best(grp)) is not None]
+        verdicts = [r.verdict for r in checker.results.values()]
+        if found:
+            best = max(found, key=lambda t: checker.results[(t.address, t.vtype)].followers)
+            n = checker.results[(best.address, best.vtype)].followers
+            text = hints.CHECK_REAL_FOUND.format(
+                addr=f"{best.address:#x}", n=n, copies="copy" if n == 1 else "copies"
+            )
+        elif Verdict.KEPT in verdicts:
+            text = hints.CHECK_REAL_KEPT
+        elif Verdict.COPY in verdicts and all(
+            v in (Verdict.COPY, Verdict.FAILED) for v in verdicts
+        ):
+            text = hints.CHECK_REAL_NONE
+        else:
+            text = hints.CHECK_REAL_STOPPED if stopped else hints.CHECK_REAL_FAILED
+        if stopped:
+            text = f"{hints.CHECK_REAL_STOPPED} {text}" if found else hints.CHECK_REAL_STOPPED
+        self.hint.setText(text)
+        self.refresh_live()
+        if found:
+            rows = [
+                i
+                for i in range(self._n_matches)
+                if (self.rows[i].address, self.row_types[i]) == (best.address, best.vtype)
+            ]
+            if rows:
+                self._select_row(rows[0])
+        self._update_buttons()
+
+    def _check_failed(self, exc: BaseException, checker: RealChecker, gen: int) -> None:
+        self._cancel = None
+        self._checking = False
+        self.progress.setValue(0)
+        if checker.not_restored:
+            addrs = ", ".join(f"{a:#x}" for a in checker.not_restored)
+            self.hint.setText(hints.CHECK_REAL_NOT_RESTORED.format(addrs=addrs))
+        elif gen == self._search_gen:
+            self.hint.setText(hints.FIND_FEW)
+        self._update_buttons()
+        self.ctl.fail(exc, "check")
+        if self.ctl.session.connected and gen == self._search_gen:
+            self.refresh_live()
 
     def _test_candidates(self) -> tuple[list[int], Scale]:
         """Test the hits candidates and the units to ask in. Grouped list: one per
