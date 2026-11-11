@@ -19,9 +19,11 @@ import struct
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
+from typing import Literal
 
 import iced_x86 as ix
 
+from cheatmaker.console.client import WatchHit
 from cheatmaker.core.locker import instruction_before
 from cheatmaker.core.trace_way import Kind, Step, Way
 from cheatmaker.core.values import ValueType
@@ -29,6 +31,7 @@ from cheatmaker.core.values import ValueType
 log = logging.getLogger(__name__)
 
 WINDOW = 256  # bytes decoded before the writer (AC-T3)
+REPLAY_DEPTH = 3  # pointers read back from memory to work out one address (AC-T4 rule 2)
 MAX_INSN = 15
 
 Read = Callable[[int, int], bytes]
@@ -227,6 +230,15 @@ class Path:
     reg: str | None = None  # BLOCK_START: the register the value arrives in
     followed: tuple[str, ...] = ()  # instruction texts, writer first (Advanced)
     reason: str = ""  # e.g. "add eax,ecx at 0x40123a"
+
+
+@dataclass(frozen=True)
+class Candidate:
+    address: int
+    method: Literal["regs", "replay", "block", "caller", "exec"]
+    expr: str  # the address: "rbx+10h", "[[rbx+30h]+8h]+10h", "watched+(rsi-rdi)"
+    max_address: int | None = None
+    writer: int = 0
 
 
 # -- the window ----------------------------------------------------------------------------
@@ -673,3 +685,151 @@ def _reads_back_same(walk: _Walk, i: int) -> bool:
             return ref.same_place(writer_mem) and not (set(ref.regs) & changed)
         return False
     return False
+
+
+# -- working out addresses (AC-T4) -------------------------------------------------------
+_MASK64 = (1 << 64) - 1
+
+
+def _clobbered(insns: tuple[ix.Instruction, ...] | list[ix.Instruction]) -> set[str]:
+    """Registers written by ``insns``; a call counts as writing every register it
+    doesn't keep."""
+    out: set[str] = set()
+    for insn in insns:
+        out |= written_registers(insn)
+        if insn.flow_control in (ix.FlowControl.CALL, ix.FlowControl.INDIRECT_CALL):
+            out |= {"rax", "rcx", "rdx", "rsi", "rdi", "r8", "r9", "r10", "r11"}
+    return out
+
+
+def _hex(n: int) -> str:
+    return f"{n:X}h" if n >= 0 else f"-{-n:X}h"
+
+
+@dataclass
+class _Resolver:
+    """Works out register values at a point in the window: from the trap registers
+    when nothing overwrote them since (rule 1), else by replaying the loads that set
+    them, reading the pointers from the game now (rule 2)."""
+
+    insns: tuple[ix.Instruction, ...]
+    regs: dict[str, int]
+    read: Read
+    allowed: frozenset[str] | None = None  # trap registers that may be used (caller rule)
+    reads: int = 0  # pointers read from memory (more than 0: "replay")
+
+    def reg(self, name: str, at: int, depth: int = 0) -> tuple[int, str] | None:
+        """``name``'s value just before ``insns[at]`` and how it was found."""
+        if name not in _clobbered(self.insns[at:]):
+            if self.allowed is not None and name not in self.allowed:
+                return None
+            value = self.regs.get(name)
+            return None if value is None else (value, name)
+        for j in range(at - 1, -1, -1):
+            insn = self.insns[j]
+            if name not in _clobbered([insn]):
+                continue
+            return self._defined_by(insn, j, depth)
+        return None
+
+    def _defined_by(self, insn: ix.Instruction, j: int, depth: int) -> tuple[int, str] | None:
+        m = insn.mnemonic
+        if insn.op_count != 2 or insn.op_kind(0) != ix.OpKind.REGISTER:
+            return None
+        if ix.RegisterExt.size(insn.op0_register) != 8:
+            return None  # only whole 64-bit pointers are replayed
+        if m == M.MOV and insn.op_kind(1) == ix.OpKind.REGISTER:
+            return self.reg(full_name(insn.op1_register), j, depth)
+        if m == M.LEA:
+            return self.address(MemRef.of(insn), j, depth)
+        if m == M.MOV and insn.op_kind(1) == ix.OpKind.MEMORY and depth < REPLAY_DEPTH:
+            where = self.address(MemRef.of(insn), j, depth + 1)
+            if where is None:
+                return None
+            try:
+                raw = self.read(where[0], 8)
+            except Exception as exc:  # a pointer that can't be read: no candidate
+                log.debug("action=trace_replay unreadable=%#x error=%s", where[0], exc)
+                return None
+            self.reads += 1
+            return int.from_bytes(raw, "little"), f"[{where[1]}]"
+        return None
+
+    def address(self, ref: MemRef, at: int, depth: int = 0) -> tuple[int, str] | None:
+        """The address ``ref`` names when ``insns[at]`` runs, and its expression
+        (``rbx+10h``, ``[rbx+30h]+8h``; brackets are added by the caller)."""
+        if ref.rip_target is not None:
+            return ref.rip_target, _hex(ref.rip_target)
+        total, parts = ref.disp, []
+        for name, scale in ((ref.base, 1), (ref.index, ref.scale)):
+            if name is None:
+                continue
+            got = self.reg(name, at, depth)
+            if got is None:
+                return None
+            total += got[0] * scale
+            parts.append(got[1] if scale == 1 else f"{got[1]}*{scale}")
+        expr = "+".join(parts)
+        if ref.disp or not expr:
+            expr += ("+" if expr and ref.disp >= 0 else "") + _hex(ref.disp)
+        return total & _MASK64, expr
+
+
+def store_address(insn: ix.Instruction, hit: WatchHit) -> int | None:
+    """Where the writer stored, from the trap registers (a store doesn't change its own
+    base or index). None when a register is missing."""
+    if insn.op_count == 0 or insn.op0_kind != ix.OpKind.MEMORY:
+        return None
+    got = _Resolver((insn,), hit.regs, lambda a, n: b"").address(MemRef.of(insn), 1)
+    return None if got is None else got[0]
+
+
+def _expr(got: tuple[int, str], lane: int) -> str:
+    """The address as an expression: ``rbx+10h``, ``[[rbx+30h]+8h]+10h`` (a pointer read
+    from memory in brackets), plus the lane."""
+    return f"{got[1]}+{lane:X}h" if lane else got[1]
+
+
+def candidates(
+    win: Window,
+    path: Path,
+    hit: WatchHit,
+    watched: int,
+    read: Read,
+    *,
+    allowed: frozenset[str] | None = None,
+    method: Literal["regs", "caller"] = "regs",
+) -> list[Candidate]:
+    """Source addresses for ``path`` from one trap (AC-T4 rules 1-3).
+
+    1. regs: the load's registers weren't written between it and the writer:
+       base + index x scale + disp (+ the lane). RIP-relative: the fixed address.
+    2. replay: a register was overwritten by an earlier ``mov r,[m2]``: m2 is worked
+       out the same way (up to REPLAY_DEPTH reads) and the pointer read from memory now.
+    3. block: ``rep movs``: watched + (rsi - rdi).
+    ``allowed`` limits rule 1 to some trap registers (``method="caller"``)."""
+    writer = win.writer.ip
+    if path.end is End.BLOCK_COPY:
+        rsi, rdi = hit.regs.get("rsi"), hit.regs.get("rdi")
+        if rsi is None or rdi is None:
+            return []
+        return [
+            Candidate((watched + rsi - rdi) & _MASK64, "block", "watched+(rsi-rdi)", None, writer)
+        ]
+    if path.end is not End.SOURCE or path.load is None:
+        return []
+    res = _Resolver(win.insns, hit.regs, read, allowed)
+    got = res.address(path.load.mem, path.load.at)
+    if got is None:
+        return []
+    max_address = None
+    if path.max_load is not None:
+        mres = _Resolver(win.insns, hit.regs, read, allowed)
+        mgot = mres.address(path.max_load.mem, path.max_load.at)
+        if mgot is None:
+            return []  # the max is part of the way: without it the way can't be checked
+        max_address = mgot[0]
+    kind: Literal["regs", "replay", "block", "caller", "exec"]
+    kind = method if method == "caller" else ("replay" if res.reads else "regs")
+    address = (got[0] + path.load.lane) & _MASK64
+    return [Candidate(address, kind, _expr(got, path.load.lane), max_address, writer)]
