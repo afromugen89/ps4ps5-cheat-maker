@@ -186,14 +186,15 @@ class CarryBar(QWidget):
         self.show_mode("hidden")
 
     def show_mode(self, mode: str, text: str = "") -> None:
-        """``offer``, ``running``, ``done`` (just the text) or ``hidden``."""
+        """``offer``, ``running``, ``learning`` (the run is over, its fingerprints are
+        being learned: no Cancel), ``done`` (just the text) or ``hidden``."""
         if mode == "running" and self.mode != "running":
             self.progress.setValue(0)
         self.mode = mode
         self.label.setText(text)
         self.bring_btn.setVisible(mode == "offer")
         self.not_now_btn.setVisible(mode == "offer")
-        self.progress.setVisible(mode == "running")
+        self.progress.setVisible(mode in ("running", "learning"))
         self.cancel_btn.setVisible(mode == "running")
         self.setVisible(mode != "hidden")
 
@@ -369,6 +370,9 @@ class CarryOver(QObject):
     def start(self, source: pj.Project, merge: bool = False) -> None:
         if self.run is not None or self.finder.carrying:
             return
+        if self.finder.running or self.ctl.code_reading:  # one job on the game's code at a time
+            self.ctl.message.emit(hints.CARRY_WAIT)
+            return
         game = self._game_in_front()
         if game is None:
             self.ctl.message.emit(hints.CARRY_NEEDS_GAME)
@@ -377,10 +381,12 @@ class CarryOver(QObject):
         if p is not None and (p.objects or p.cheats):
             merge = True  # notes that hold values are never overwritten (AC-U7)
         into = p if merge else None
-        project = cr.for_merge(source, into) if into is not None else source
+        # object ids the notes or a hook still in the game use stay theirs
+        empty = pj.Project(source.title_id, source.version, source.process)
+        project = cr.for_merge(source, into or empty, avoid=self.finder.installed_ids())
         run = self.run = _Run(source, project, into, game.pid)
         hooked = sum(1 for o in project.objects if o.hook is not None)
-        parts = any(not pt.learned for pc in project.cheats for pt in pc.parts)
+        parts = cr.has_code_parts(project)
         run.total = (
             (W_READ if hooked or parts else 0)
             + hooked * (W_COLLECT + W_PROVE + W_LOCATE)
@@ -484,35 +490,41 @@ class CarryOver(QObject):
     def _read_progress(self, frac: float) -> None:
         self.bar.progress.setValue(self._percent(W_READ * frac))
 
-    def _note_install(self, obj: pj.ObjectSpec, state: str) -> None:
-        """From the worker, the moment a hook went in (so Cancel can take it out)."""
-        run = self.run
-        if run is None:
-            return
+    def _note_install(self, run: _Run, obj: pj.ObjectSpec, state: str) -> None:
+        """From the worker, the moment a hook went in (so Cancel can take it out). Run
+        rolled back meanwhile: it is recorded, then taken out at once."""
         self.finder.note_install(obj, state, run.pid)
-        if self.finder.is_ours(obj.id, run.pid):
+        if not self.finder.is_ours(obj.id, run.pid):
+            return
+        if self.run is run:
             run.installed.append(obj)
+        else:
+            self.finder.take_out(obj)
 
     # -- steps -------------------------------------------------------------------------------
     def _prepared(self, plan: cr.Plan) -> None:
         run = self.run
-        assert run is not None
+        if run is None:
+            return
         run.plan = plan
         if plan.image is not None:
             self._advance(W_READ)
         self._next_item()
 
-    def _item(self) -> cr.Item:
-        assert self.run is not None and self.run.plan is not None
-        return self.run.plan.items[self.run.index]
+    def _item(self) -> cr.Item | None:
+        run = self.run
+        if run is None or run.plan is None or run.index >= len(run.plan.items):
+            return None
+        return run.plan.items[run.index]
 
     def _next_item(self) -> None:
         run = self.run
-        assert run is not None and run.plan is not None
-        if run.index >= len(run.plan.items):
-            self._finish()
+        if run is None or run.plan is None:
             return
         it = self._item()
+        if it is None:
+            self._finish()
+            return
         if it.site is not None:
             self._collect(it)
         else:
@@ -522,7 +534,8 @@ class CarryOver(QObject):
 
     def _collect(self, it: cr.Item) -> None:
         run = self.run
-        assert run is not None and run.plan is not None
+        if run is None or run.plan is None:
+            return
         self._say("collect", name=it.obj.label)
         session, plan, cancel, sleep = self.ctl.session, run.plan, run.cancel, self.sleep
 
@@ -538,21 +551,27 @@ class CarryOver(QObject):
         self._job(work, lambda r: self._collected(it, *r))
 
     def _collected(self, it: cr.Item, classes: cr.Classes | None, choice) -> None:
+        run = self.run
+        if run is None:
+            return
         self._advance(W_COLLECT)
         if isinstance(choice, cr.CarryFailed):
             cr.drop_hook(it, choice.reason)
             self._advance(W_PROVE)
             self._locate(it)
             return
-        assert classes is not None
+        assert classes is not None  # the worker returns both, or nothing and the failure
         picked: int | None = None
         if isinstance(choice, cr.NeedPick):
             picked = self.finder.ask_pick(it.obj, choice.options)
+            if self.run is not run:  # rolled back while the player picked
+                return
         self._place(it, classes, choice, picked)
 
     def _place(self, it: cr.Item, classes: cr.Classes, choice, picked: int | None) -> None:
         run = self.run
-        assert run is not None and run.plan is not None
+        if run is None or run.plan is None:
+            return
         self._say("prove")
         session, plan, cancel = self.ctl.session, run.plan, run.cancel
 
@@ -569,7 +588,7 @@ class CarryOver(QObject):
                     final,
                     reserved=plan.reserved,
                     cancel=cancel,
-                    on_install=self._note_install,
+                    on_install=lambda o, state: self._note_install(run, o, state),
                 )
             except cr.CarryFailed as exc:
                 return exc.reason
@@ -585,7 +604,8 @@ class CarryOver(QObject):
 
     def _locate(self, it: cr.Item) -> None:
         run = self.run
-        assert run is not None
+        if run is None:
+            return
         self._say("locate", name=it.obj.label)
         session, cancel, sleep, clock = self.ctl.session, run.cancel, self.sleep, self.clock
 
@@ -594,33 +614,28 @@ class CarryOver(QObject):
             if out.status == "disagree":
                 return out
             addr = out.address if out.found else None
-            self._settle_now(it, addr)
+            cr.settle(session, it.obj, addr, placed=it.placed)
             return addr
 
         self._job(work, lambda r: self._located(it, r))
 
-    def _settle_now(self, it: cr.Item, addr: int | None) -> None:
-        """(worker) Not found: the hook put in for it comes out first, then its ways are
-        dropped (settle would forget where the hook is)."""
-        run = self.run
-        mine = run is not None and any(o is it.obj for o in run.installed)
-        if addr is None and mine and run is not None and self.finder.take_out(it.obj):
-            run.installed = [o for o in run.installed if o is not it.obj]
-        cr.settle(self.ctl.session, it.obj, addr)
-
     def _located(self, it: cr.Item, result: int | rf.Outcome | None) -> None:
+        run = self.run
+        if run is None:
+            return
         if isinstance(result, rf.Outcome):  # two ways found different places: the player picks
             picked = self.finder.ask_pick(it.obj, result.options)
+            if self.run is not run:  # rolled back while the player picked
+                return
             addr = rf.confirm_pick(it.obj, picked).address if picked is not None else None
+            session = self.ctl.session
 
             def settle() -> int | None:
-                self._settle_now(it, addr)
+                cr.settle(session, it.obj, addr, placed=it.placed)
                 return addr
 
             self._job(settle, lambda r: self._located(it, r))
             return
-        run = self.run
-        assert run is not None
         run.found[it.obj.id] = result
         self._advance(W_LOCATE if it.kind == "hook" else W_OTHER)
         run.index += 1
@@ -628,9 +643,13 @@ class CarryOver(QObject):
 
     def _finish(self) -> None:
         run = self.run
-        assert run is not None and run.plan is not None
+        if run is None or run.plan is None:
+            return
         plan = run.plan
         new, report = cr.assemble(plan, run.found, run.reasons)
+        learning = plan.image is not None
+        if learning:  # before the notes are saved: no second read of the game's code
+            self.ctl.code_reading = True
         self.finder.adopt_carried(new, run.found, merge_into=run.merge_into)
         version = new.version
         for name in report.carried:
@@ -638,29 +657,37 @@ class CarryOver(QObject):
         for name, why in report.failed.items():
             log.info("action=carry_cheat name=%s result=failed reason=%s", name, why)
         log.info(
-            "action=carry_done from=%s to=%s objects=%d found=%d cheats=%d carried=%d "
-            "failed=%d seconds=%.1f",
+            "action=carry_done from=%s to=%s objects=%d found=%d waiting=%d cheats=%d "
+            "carried=%d failed=%d seconds=%.1f",
             run.source.version,
             version,
             report.objects,
             report.found,
+            len(report.waiting),
             len(report.carried) + len(report.failed),
             len(report.carried),
             len(report.failed),
             time.monotonic() - run.started,
         )
+        # The bring-over is over (its hooks are the notes' now): nothing can roll it
+        # back, and the rest of the app works again while the fingerprints are learned.
+        self.run = None
+        self.offer = None
+        self.finder.carrying = False
         summary = report.summary(version)
         self.ctl.message.emit(summary)
         self.ctl.cheats_changed.emit()
         target = self.ctl.project
-        if plan.image is None or target is None:
-            self._done(summary)
+        if not learning or target is None:
+            self.ctl.code_reading = False
+            self.bar.show_mode("done", summary)
             return
         # The new version's fingerprints from the code already read (AC-U7, AC-U2).
-        self.bar.show_mode("running", hints.CARRY_STEPS["learn"])
+        self.bar.show_mode("learning", hints.CARRY_STEPS["learn"])
         self.bar.progress.setValue(100)
         copy = pj.Project.from_json(target.to_json())
         image, extra = plan.image, open_code_lines(self.ctl)
+        game = self.ctl.session.game
 
         def work():
             have = up.load_signatures(up.signatures_path(copy.title_id, copy.version))
@@ -677,18 +704,17 @@ class CarryOver(QObject):
                         parts,
                     )
                 if self.fingerprints is not None:
-                    self.fingerprints.mark_learned(self.ctl.session.game, target.version)
-            self._done(summary)
+                    self.fingerprints.mark_learned(game, target.version)
+                self.finder.save()
+            self._learned(summary)
 
         def failed(exc: BaseException) -> None:
             log.warning("action=learn_signatures source=carry reason=%s", exc)
-            self._done(summary)
+            self._learned(summary)
 
         self.ctl.tasks.run(work, learned, failed)
 
-    def _done(self, summary: str) -> None:
-        self.run = None
-        self.offer = None
-        self.finder.carrying = False
-        self.finder.save()
-        self.bar.show_mode("done", summary)
+    def _learned(self, summary: str) -> None:
+        self.ctl.code_reading = False
+        if self.run is None and self.bar.mode == "learning":
+            self.bar.show_mode("done", summary)

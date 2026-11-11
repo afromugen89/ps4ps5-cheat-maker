@@ -215,6 +215,10 @@ CARRY_NEEDS_GAME = "Connect, start the game and keep it on screen, then press Br
 CARRY_NO_SOURCES = "There are no notes for {title} from another version."
 CARRY_PICK_VERSION = "Bring the notes from version:"
 ADVANCED_BRING = "Advanced: Bring notes from an older version..."
+CARRY_WAIT = (
+    "Cheat Maker is still busy with the game (finding values or reading its code). Wait "
+    "until it's done, then press Bring them over."
+)
 CARRY_BUSY = (
     "Cheat Maker is bringing your notes to this game version. Wait until it's done, or "
     "press Cancel."

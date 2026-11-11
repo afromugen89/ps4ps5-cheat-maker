@@ -197,6 +197,11 @@ class FindAgain(QObject):
             self.installed.pop(obj_id, None)
             self._ours.pop(obj_id, None)
 
+    def installed_ids(self) -> set[str]:
+        """Ids of the objects whose hook we put in (still in the game)."""
+        with self._lock:
+            return set(self.installed)
+
     def is_ours(self, obj_id: str, pid: int) -> bool:
         with self._lock:
             return self._ours.get(obj_id) == pid
@@ -423,6 +428,8 @@ class FindAgain(QObject):
     def start(self, use_hook: bool = True) -> None:
         p = self.ctl.project
         if p is None or not p.objects or self.running or not self.ctl.session.connected:
+            return
+        if self.carrying:  # the bring-over owns the hooks until it is done (AC-U3)
             return
         session = self.ctl.session
         objects = list(p.objects)

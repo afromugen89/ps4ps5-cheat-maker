@@ -257,13 +257,17 @@ def test_buttons_wait_while_bringing_over(make, monkeypatch):
                 cv.again_btn.isEnabled(),
                 cv.learn_btn.isEnabled(),
                 cv.bring_btn.isEnabled(),
+                cv.update_btn.isEnabled(),
             )
         )
+        cv.finder.start()  # Find it again (e.g. from a reconnect) waits too
+        assert not cv.finder.running
         real(s)
 
     app.w.carry.sleep = sleep
     app.bring()
-    assert states and all(s == (True, False, False, False) for s in states)
+    assert states and all(s == (True, False, False, False, False) for s in states)
+    assert app.w.cheats.update_btn.isEnabled()
     opened = []
     monkeypatch.setattr(mw, "LockWizard", lambda *a: opened.append(a) or _NoDialog())
     app.w.open_lock(Cheat("x", [Location(LocationKind.SESSION_ADDRESS, 1, b"\0", b"\0")]))
@@ -427,6 +431,126 @@ def test_another_game_process_cancels_the_run(make):
     app.bring()
     assert app.w.carry.run is None and not new_path().exists()
     assert not app.w.cheats.finder.carrying
+
+
+@pytest.mark.parametrize("at", [0, 1], ids=["class pick", "locate pick"])
+def test_a_rollback_while_the_player_picks_ends_the_run_quietly(make, monkeypatch, at):
+    tc.learned_v1(1)  # player and enemies: the player picks the class first
+    app = make(Console())
+    app.connect()
+    other = GameInfo(99, fg.TITLE, "Returnal", NEW, "eboot.bin", fg.BASE, fg.BASE + 0x6000)
+    two = [rf.Found("hook_slot", app.console.game.player), rf.Found("static", fg.DATA)]
+    monkeypatch.setattr(cr, "locate", lambda *_a, **_k: rf.Outcome("disagree", options=two))
+    picks = []
+
+    def pick(obj, options):
+        picks.append(obj.label)
+        if len(picks) - 1 == at:
+            app.ctl.game_changed.emit(other)  # the game restarted while the dialog was open
+        return app.console.game.player
+
+    app.w.cheats.finder.ask_pick = pick
+    app.bring()
+    assert len(picks) == at + 1, "nothing goes on after the rollback"
+    assert app.w.carry.run is None and not app.w.cheats.finder.carrying
+    assert not new_path().exists() and app.w.cheats.finder.installed == {}
+    game = app.console.game
+    assert game.fake.peek(fg.PID, fg.V2.reader, 10) == fg.V2.vmovss_r, "no jump left"
+
+
+def test_a_hook_that_goes_in_after_a_rollback_comes_out_at_once(make, monkeypatch):
+    tc.learned_v1(3)
+    app = make(Console(run=3))
+    app.connect()
+    other = GameInfo(99, fg.TITLE, "Returnal", NEW, "eboot.bin", fg.BASE, fg.BASE + 0x6000)
+    real = cr.ah.install
+
+    def install(session, obj):
+        app.ctl.game_changed.emit(other)  # rolled back while the install was on its way
+        return real(session, obj)
+
+    monkeypatch.setattr(cr.ah, "install", install)
+    app.bring()
+    assert app.w.carry.run is None and not new_path().exists()
+    assert app.w.cheats.finder.installed == {}
+    assert app.console.game.fake.peek(fg.PID, fg.V2.reader, 10) == fg.V2.vmovss_r
+
+
+def test_a_hook_not_seen_yet_stays_in_and_find_again_finds_it_later(make, caplog):
+    tc.learned_v1(3)
+    caplog.set_level("INFO")
+    app = make(Console(run=3, capture_ticks=False))  # the game doesn't run that code yet
+    app.connect()
+    app.bring()
+    text = app.w.status.text()
+    assert text.startswith("Brought over 1 of 1 cheats for version 03.001.000.")
+    assert text.endswith(
+        "Health: brought over, not seen yet; take a hit (or change it in the game) and it "
+        "will be found."
+    )
+    assert app.bar.mode == "done" and "waiting=1" in caplog.text
+    finder = app.w.cheats.finder
+    game = app.console.game
+    saved = pj.load(new_path()).objects[0]
+    assert saved.hook is not None and saved.check and "obj1" in finder.installed
+    assert game.fake.peek(fg.PID, fg.V2.reader, 1) == b"\xe9", "the hook stays in"
+    assert "obj1" not in app.ctl.live.trackers
+    game.capture_ticks = True  # the game runs that code now
+    app.w.cheats.again_btn.click()
+    tracker = app.ctl.live.trackers["obj1"]
+    assert tracker.address == game.player and not tracker.confirmed
+
+
+def test_fingerprints_are_learned_after_the_run_is_over(make, monkeypatch):
+    tc.learned_v1(3)
+    app = make(Console(run=3))
+    app.connect()
+    carry, seen = app.w.carry, []
+    real = cr.learn_note_signatures
+
+    def learn(*a, **kw):
+        seen.append(
+            (
+                carry.run,
+                app.w.cheats.finder.carrying,
+                app.bar.mode,
+                app.bar.cancel_btn.isHidden(),
+                app.ctl.code_reading,
+            )
+        )
+        return real(*a, **kw)
+
+    monkeypatch.setattr(cr, "learn_note_signatures", learn)
+    app.bring()
+    assert seen == [(None, False, "learning", True, True)]
+    assert app.bar.mode == "done" and not app.ctl.code_reading
+
+
+@pytest.mark.parametrize("busy", ["finding", "reading"])
+def test_bring_waits_for_another_job_on_the_game(make, busy):
+    tc.learned_v1(3)
+    app = make(Console(run=3))
+    app.connect()
+    if busy == "finding":
+        app.w.cheats.finder.running = True
+    else:
+        app.ctl.code_reading = True
+    app.bring()
+    assert app.w.status.text() == hints.CARRY_WAIT and app.w.carry.run is None
+    assert not app.w.cheats.finder.carrying and not new_path().exists()
+
+
+def test_carried_ids_stay_clear_of_hooks_still_in_the_game(make):
+    tc.learned_v1(3)
+    app = make(Console(run=3))
+    app.connect()
+    finder = app.w.cheats.finder
+    finder.installed["obj1"] = tc.obolites()  # a hook of ours from notes no longer open
+    app.bring()
+    saved = pj.load(new_path())
+    assert [o.id for o in saved.objects] == ["obj2"]
+    assert saved.cheats[0].object == "obj2" and finder.installed["obj2"].label == "Health"
+    finder.installed.pop("obj1")
 
 
 def test_needs_the_game_in_front(make):
