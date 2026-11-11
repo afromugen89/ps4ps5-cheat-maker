@@ -200,6 +200,28 @@ def test_cancel_stops_between_rounds(game):
     assert get(game, HUD) == 300.0
 
 
+def test_rounds_1_writes_only_the_first_member_and_the_rest_follow(game):
+    """The tracer's use: [source, the copies it was found behind], one round."""
+    chk = RealChecker(game, PID, [[Target(REAL, F), Target(HUD, F), Target(FRAC, F)]])
+    chk.wait = lambda _s: game.read(PID, HEAP_BASE, 4)
+    seen = []
+    chk.run(seen.append, rounds=1)
+    assert set(chk.results) == {(REAL, F)}
+    assert chk.results[(REAL, F)].verdict is Verdict.REAL
+    assert chk.results[(REAL, F)].followers == 2
+    assert [a for _p, a, _d in game.writes] == [REAL, REAL], "test value, then put back"
+    assert seen == [1.0]
+    assert get(game, REAL) == 3.0
+
+
+def test_rounds_never_goes_past_the_group_and_must_be_positive(game):
+    chk = RealChecker(game, PID, [[Target(HUD, F)]], wait=lambda _s: None)
+    chk.run(rounds=5)
+    assert set(chk.results) == {(HUD, F)}
+    with pytest.raises(ValueError):
+        chk.run(rounds=0)
+
+
 def test_nothing_to_check():
     with pytest.raises(ValueError):
         RealChecker(FakeConsole(), PID, [[]])

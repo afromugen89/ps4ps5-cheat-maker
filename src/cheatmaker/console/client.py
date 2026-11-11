@@ -73,9 +73,11 @@ class ScanHit:
     """How the match keeps the number (percent, fraction, x10, of full), when known."""
 
 
-WatchKind = Literal["write", "access"]
+WatchKind = Literal["write", "access", "execute"]
 """``write``: trap on writes only. ``access``: trap on reads and writes (x86 DR7 has no
-read-only data watchpoint, so a reader is found with ``access``)."""
+read-only data watchpoint, so a reader is found with ``access``). ``execute``: ``addr``
+is an instruction and ``size`` must be 1; the trap comes *before* the instruction runs,
+so ``rip`` is the instruction itself and ``regs`` are the values it is about to use."""
 
 
 @dataclass(frozen=True)
@@ -89,6 +91,9 @@ class WatchHit:
 
     rip: int
     regs: dict[str, int] = field(default_factory=dict, hash=False)
+    raw: bytes = field(default=b"", compare=False, repr=False)
+    """The console's whole trap packet (0x4A0 bytes on NG), kept for the debug log;
+    empty when the client has none (FakeConsole)."""
 
     def reg(self, name: str) -> int | None:
         return self.regs.get(name.lower())

@@ -23,6 +23,7 @@ from cheatmaker.ui.controller import Controller
 from cheatmaker.ui.find_wizard import FindWizard
 from cheatmaker.ui.lock_wizard import LockWizard
 from cheatmaker.ui.save_dialog import SaveDialog
+from cheatmaker.ui.trace_dialog import TraceDialog
 
 FIRST_RUN_WARNING = (
     "Before you start:\n\n"
@@ -61,6 +62,7 @@ class MainWindow(QMainWindow):
         self.cheats.open_lock = self.open_lock
         self.cheats.open_build = self.open_build
         self.find.open_build = self.open_build
+        self.find.open_trace = self.open_trace
         self.cheats.open_save = self.open_save
         self.cheats.finder.open_search = self.open_search
         ctl.cheats_changed.connect(self._cheat_added)
@@ -90,6 +92,13 @@ class MainWindow(QMainWindow):
 
     def make_build_dialog(self, **kw) -> MakeItWorkDialog:
         return MakeItWorkDialog(self.ctl, parent=self, **kw)
+
+    def open_trace(self, **kw) -> None:
+        """Find the real one behind it (spec-trace) from Find."""
+        self.make_trace_dialog(**kw).exec()
+
+    def make_trace_dialog(self, **kw) -> TraceDialog:
+        return TraceDialog(self.ctl, parent=self, **kw)
 
     def open_save(self) -> None:
         SaveDialog(self.ctl, self).exec()

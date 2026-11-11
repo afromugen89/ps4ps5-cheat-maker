@@ -175,7 +175,8 @@ _DR7_LEN = {1: 0, 2: 1, 4: 3, 8: 2}
 _DR7_WRITE = 1
 _DR7_RDWR = 3
 """PROTOCOL.md §7.3 breaktype: 0 exec, 1 write only, 3 read-write."""
-_DR7_KIND = {"write": _DR7_WRITE, "access": _DR7_RDWR}
+_DR7_EXEC = 0
+_DR7_KIND = {"write": _DR7_WRITE, "access": _DR7_RDWR, "execute": _DR7_EXEC}
 MAX_WATCH_HITS = 16
 
 
@@ -194,7 +195,7 @@ def parse_struct_reg(blob: bytes) -> dict[str, int]:
 
 def parse_interrupt(packet: bytes) -> WatchHit:
     regs = parse_struct_reg(packet[REG64_OFFSET : REG64_OFFSET + REG64_SIZE])
-    return WatchHit(regs["rip"], regs)
+    return WatchHit(regs["rip"], regs, raw=bytes(packet))
 
 
 def merge_ranges(regions: list[MemMap]) -> list[tuple[int, int]]:
@@ -1433,11 +1434,16 @@ class Ps5DebugNgClient:
         """Hardware watchpoint (DR0). The PS5 dials back to us on port 755 with one
         0x4A0-byte packet per trap. ``access`` (breaktype 3, read-write) is from
         PROTOCOL.md §7.3 and is UNVERIFIED on the console until test C10a.
+        ``execute`` (breaktype 0, length 1 byte) traps before the instruction; whether
+        NG sets RF on continue (or the same breakpoint fires again at once) is
+        UNVERIFIED until test C20d.
         ``until`` is asked after each hit and each idle half second."""
         if size not in _DR7_LEN:
             raise ValueError(f"can't watch {size} bytes")
         if kind not in _DR7_KIND:
             raise ValueError(f"unknown watch kind {kind!r}")
+        if kind == "execute" and size != 1:
+            raise ValueError("an execute breakpoint covers 1 byte")
         hits: queue.Queue[WatchHit] = queue.Queue()
         listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)

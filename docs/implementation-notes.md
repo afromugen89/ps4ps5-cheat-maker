@@ -210,3 +210,96 @@ results carry their `vtype`. The Scanner's `vtype` is None while more than one t
 left (`Scanner.mixed`); scan files then add a Type column. If no second connection can
 be opened, the search runs on the first type only. FakeConsole uses `MultiScan`.
 Console test C14.
+
+## Find the real one behind it (2026-11-11)
+
+Spec: docs/spec-trace.md, design: docs/architecture-trace.md (steps 1-13, one commit
+each). New core modules `trace_way` (how a real value becomes the shown one, float32
+faithful, with an inverse that nudges up to 8 ULP), `trace_flow` (decode a window around
+the writer, follow the stored register back, work out source addresses, one caller up)
+and `tracer` (the hop driver). UI: `ui/trace_dialog.py`, traced rows in the Find tab,
+guide `Action.TRACE`. Test tooling: `tests/asm.py`, `tests/tracegame.py`, minicpu
+extended (checked against unicorn by `tests/qa/test_minicpu_vs_unicorn.py`).
+
+Choices inside the design, and where it differs from the sketch:
+
+- `trace_flow.follow` takes the shown type (`shown`) so a step's `to` type is known
+  without a second pass; `follow_reg`, `store_address`, `caller_window` and `Path.lane`
+  are extra helpers. `follow_into_caller` takes the return address, register, lane and
+  the hit instead of a prepared caller window. `Candidate.expr` is always an address
+  expression without outer brackets (`rbx+10h`, `[[rbx+30h]+8h]+10h`, `watched+(rsi-rdi)`).
+- `Tracer` takes `settle_s` (for tests); `TraceResult` carries no message text, only the
+  outcome plus `value`, `max_now` and `reason`; progress reports a `Stage`, and every word
+  lives in `ui/hints.py`. The "change it once more" wording (`TRACE_CHANGE`) is ours.
+- A load-then-store of the same address (read-modify-write) is detected from the
+  instructions, not from addresses. The circle check (a source we watched already) runs
+  before the write test; a read-modify-write found at hop 2 or later ends FOUND with no
+  verdict (shown as "not sure").
+- `TraceDialog` takes `frozen={addr: size}` from the Find tab, because the Freezer's
+  entries are private. Overlapping freezes and enabled cheats are released during the
+  trace (cheats off with `restore=False`) and put back afterwards.
+- When Check which is real marks every row a copy, the guide's TRACE hint replaces
+  `CHECK_REAL_NONE` (AC-T1). Spotting a Set/Freeze put back by the game is best effort: one
+  look 2 s later (`PUT_BACK_S`).
+- Step 10 briefly mapped `Action.TRACE` to the Check button until step 11 added
+  `trace_btn`.
+- Known limitation: a `movzx` of an unsigned 1- or 2-byte number is treated as the signed
+  `ValueType` of that size, so values above 127 / 32767 would read wrong.
+
+Unverified console facts, each logged where it is used rather than assumed silently:
+registers in a trap (`action=trace_*` with the raw packet, C10a/C20a); `rep movs` reports
+its own RIP mid-copy (`rep_at_rip=True (UNVERIFIED ...)`); whether NG sets RF when it
+continues after an execute breakpoint (a repeating hit is logged as "the breakpoint
+repeats" and ends the fallback; `trace_exec_breakpoint` stays off until C20d). The button
+stays under Advanced "(being tested)" until C20a passes (`hints.TRACE_TESTED`).
+Console tests C20a-i.
+
+Review follow-ups (2026-11-11):
+
+- A wider whole-number load (`mov rax,[m] ; mov [d],eax`, or `movzx` wider than the
+  copy) makes the source the loaded size, with `Kind.TRUNCATE` (wraps forward, kept as
+  is going back). `cvt(t)ss2si` into a 1- or 2-byte copy works in a 4-byte register and
+  keeps the low bits; an 8-byte whole number to float32 rounds once.
+- `writer_at` prefers a `rep movs` at RIP only when the instruction ending at RIP
+  doesn't store over the watched address by the trap's registers. `xorps`/`xorpd`
+  with a sign mask is a negation: not followed (not "scrambled").
+- `Tracer.run` turns any `CheatMakerError` into an outcome: a copy freed mid-check is
+  NOT_FOLLOWED, anything else the new FAILED; `trace_result`/`trace_restore` are logged
+  on every path, `not_restored` is always attached and shown for every outcome.
+- Running out of TOTAL_S in the memory check ends TOO_FAR with the last tested source
+  "not sure"; watches are capped at the time left.
+- A read-modify-write writer decides "already real" only with strictly the most
+  hits, or when no other writer's source passes the check (a tie goes to the check).
+- "Search for it that way" isn't offered when the way is the copy's own search (same
+  type, factor 1, no share of a max): NOT_FOLLOWED.
+- Traced rows are listed by (address, type) next to a search match at the same
+  address, and screen units convert only on a row of the traced type. When no real
+  value shows the typed number exactly, the nearest is written and the player told.
+- The button needs Advanced on while it sits there; suggesting it turns Advanced on.
+- `release` resumes what it paused if pausing fails half way, and resumes each item
+  on its own; only freezing cheats are paused (a one-shot cheat isn't written again);
+  anchored cheats are matched by their tracker's address. A cancelled or closed
+  dialog still reports `not_restored` on the status line; a disconnect waits up to
+  3 s (`STOP_WAIT_S`) for the trace to put its test values back.
+
+QA and re-review round (2026-11-11, qa/reports/2026-11-11-trace-shown-number.md):
+
+- The walk keeps the narrowest width the value passes through (the writer's store,
+  narrower register moves and extends; carried into a caller as `Path.width`). Only a
+  load wider than that gets TRUNCATE, so `mov rax,[m] ; mov [d],rax` watched at its low
+  4 bytes is a 4-byte source (a Set no longer writes over the field next to it).
+- `mov [m],ah` is byte 1 of rax; a move from a high-byte register on the path isn't
+  followed. `xchg [m],reg` is a store, not read-modify-write. `movss x,[K] ; mulss x,[m]`
+  (and VEX) is followed as `[m]` x K.
+- Inverse: an 8-byte decimal narrowed to 4 bytes on the way is nudged in float32 steps;
+  a decimal screen value equals the typed one to its digits (relative 1e-6), not by bytes.
+- A self-copy writer follows the read-modify-write rule (most hits, or no other source
+  passes). The exec fallback carries the source load's registers forward to the max load.
+  The guide suggests the trace when every checked row is a copy, ignoring failed rows.
+- Find's rows are told apart by (address, type) for "added", "frozen", Freeze and Remove;
+  the type each Find freeze was made as is kept in `FindWizard._frozen_type`.
+- `TraceDialog.release` pauses Find's freezes from the Freezer's own entries and resumes
+  them with the same bytes, read through the Freezer's public `fixed_writes(prefix)`
+  (added once the restarts branch landed on main).
+- A share of a max of 0 shows "(screen: ?)". TOO_FAR says "1 step", and "ran out of time"
+  when TOTAL_S ended it.

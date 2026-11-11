@@ -28,6 +28,8 @@ class Settings:
     fast_scan: bool = True  # ask PS5Debug-NG to read game memory in place (faster)
     percent_pc_limit: int = 20_000  # a Full search checks % on the PC from this many down
     build_notice_hidden: bool = False  # Make it work's "Save your game first" notice
+    trace_exec_breakpoint: bool = False  # Find the real one: execute breakpoint fallback (C20d)
+    trace_notice_hidden: bool = False  # Find the real one's "Save your game first" notice
 
     @classmethod
     def path(cls) -> Path:
@@ -65,6 +67,10 @@ class Settings:
         s.percent_pc_limit = max(1_000, min(100_000, s.percent_pc_limit))
         if not isinstance(s.build_notice_hidden, bool):
             s.build_notice_hidden = False
+        if not isinstance(s.trace_exec_breakpoint, bool):
+            s.trace_exec_breakpoint = False
+        if not isinstance(s.trace_notice_hidden, bool):
+            s.trace_notice_hidden = False
         return s
 
     def save(self) -> None:

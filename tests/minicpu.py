@@ -5,14 +5,20 @@ It knows a closed set of instructions: what ``cave.py`` emits (``lea``, ``push``
 ``pop``, ``pushfq``, ``popfq``, ``mov``, ``cmp``, ``sub``, ``add``, ``inc``, ``neg``,
 ``shr``, ``and``, jumps, ``movss``, ``movups``, ``movd``, ``ucomiss``, ``addss``,
 ``mulss``) plus the game writer forms the fakes use (``vmovss``, ``sub [mem],reg``,
-``mov [mem],reg``). Anything else raises ``Unsupported``, so a routine can't pass a
+``mov [mem],reg``) and the game code the trace fixtures run (``movzx``, ``movsx``,
+``movsxd``, ``imul r,r/m,imm``, the ``cvt*`` conversions between whole numbers,
+float and double, ``divss``, ``mulsd``, ``divsd``, SSE ``movsd``, ``movq``,
+``movaps``, ``movdqu``/``vmovups`` (128-bit), ``unpcklps``, direct ``call``, ``ret``).
+Anything else raises ``Unsupported`` (``rep movs`` too), so a routine can't pass a
 test by using an instruction the interpreter would get wrong. Flags follow the Intel
 manual for the six status flags (undefined ones are left at 0).
 
 Decimal maths runs in Python (doubles) and is rounded to float32 once at the end: for
-``addss``/``mulss`` of two float32 values that is the same result as the CPU's single
-rounding. MXCSR isn't modelled: round-to-nearest only, and no FTZ/DAZ (a game that
-sets them would see denormals flushed where minicpu keeps them).
+``addss``/``mulss``/``divss`` of two float32 values that is the same result as the
+CPU's single rounding (a double holds more than twice float32's precision). MXCSR
+isn't modelled: round-to-nearest only, and no FTZ/DAZ (a game that sets them would
+see denormals flushed where minicpu keeps them). ``cvtsi2ss`` of a 64-bit whole number
+above 2**53 rounds twice (through a double) and can be one float32 step off.
 
 unicorn (tests/qa/test_capture_emulated.py) is the slower, optional cross-check.
 """
@@ -20,6 +26,7 @@ unicorn (tests/qa/test_capture_emulated.py) is the slower, optional cross-check.
 from __future__ import annotations
 
 import ctypes
+import math
 import struct
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -97,6 +104,14 @@ def _parity(value: int) -> bool:
 
 def bits_f32(bits: int) -> float:
     return struct.unpack("<f", struct.pack("<I", bits & 0xFFFFFFFF))[0]
+
+
+def bits_f64(bits: int) -> float:
+    return struct.unpack("<d", struct.pack("<Q", bits & _mask(8)))[0]
+
+
+def f64_bits(value: float) -> int:
+    return struct.unpack("<Q", struct.pack("<d", value))[0]
 
 
 def f32_bits(value: float) -> int:
@@ -461,6 +476,168 @@ def _scalar(op: Callable[[float, float], float]) -> Callable[[Cpu, ix.Instructio
     return run
 
 
+def _double(op: Callable[[float, float], float]) -> Callable[[Cpu, ix.Instruction], None]:
+    def run(cpu: Cpu, insn: ix.Instruction) -> None:
+        if insn.op_count != 2:
+            raise Unsupported(_FMT.format(insn))
+        old = cpu.get(insn, 0, 16)
+        r = f64_bits(op(bits_f64(old), bits_f64(cpu.get(insn, 1, 8))))
+        cpu.put(insn, 0, (old & ~_mask(8)) | r, 16)
+
+    return run
+
+
+def _divide(a: float, b: float) -> float:
+    """IEEE division (Python raises on x/0). 0/0 gives x86's default NaN (sign set)."""
+    if b == 0:
+        if a != a:
+            return a
+        if a == 0:
+            return -math.nan
+        return math.copysign(math.inf, a) * math.copysign(1.0, b)
+    return a / b
+
+
+def _extend(signed: bool) -> Callable[[Cpu, ix.Instruction], None]:
+    """movzx / movsx / movsxd."""
+
+    def run(cpu: Cpu, insn: ix.Instruction) -> None:
+        dst, src = cpu._size(insn, 0), cpu._size(insn, 1)
+        v = cpu.get(insn, 1, src)
+        if signed and _sign(v, src):
+            v -= 1 << (8 * src)
+        cpu.put(insn, 0, v & _mask(dst), dst)
+
+    return run
+
+
+def _imul3(cpu: Cpu, insn: ix.Instruction) -> None:
+    """imul r, r/m, imm: signed, truncated; CF = OF = the result didn't fit."""
+    if insn.op_count != 3:
+        raise Unsupported(_FMT.format(insn))
+    size = cpu._size(insn, 0)
+    a, b = cpu.get(insn, 1, size), insn.immediate(2) & _mask(size)
+    sa = a - (1 << (8 * size)) if _sign(a, size) else a
+    sb = b - (1 << (8 * size)) if _sign(b, size) else b
+    full = sa * sb
+    r = full & _mask(size)
+    sr = r - (1 << (8 * size)) if _sign(r, size) else r
+    cpu._set_flags(CF | OF if sr != full else 0)
+    cpu.put(insn, 0, r, size)
+
+
+def _float_in(cpu: Cpu, insn: ix.Instruction, double: bool) -> float:
+    return bits_f64(cpu.get(insn, 1, 8)) if double else bits_f32(cpu.get(insn, 1, 4))
+
+
+def _to_whole(double: bool, cut: bool) -> Callable[[Cpu, ix.Instruction], None]:
+    """cvt(t)ss2si / cvt(t)sd2si: out of range or NaN gives the "indefinite" value."""
+
+    def run(cpu: Cpu, insn: ix.Instruction) -> None:
+        size = cpu._size(insn, 0)
+        x = _float_in(cpu, insn, double)
+        indefinite = 1 << (8 * size - 1)
+        if not math.isfinite(x):
+            cpu.put(insn, 0, indefinite, size)
+            return
+        n = math.trunc(x) if cut else round(x)  # round(): nearest, halves to even
+        lo, hi = -(1 << (8 * size - 1)), (1 << (8 * size - 1)) - 1
+        cpu.put(insn, 0, n & _mask(size) if lo <= n <= hi else indefinite, size)
+
+    return run
+
+
+def _from_whole(double: bool) -> Callable[[Cpu, ix.Instruction], None]:
+    """cvtsi2ss / cvtsi2sd: the rest of the xmm register stays."""
+
+    def run(cpu: Cpu, insn: ix.Instruction) -> None:
+        if insn.op_count != 2:
+            raise Unsupported(_FMT.format(insn))
+        src = cpu._size(insn, 1)
+        v = cpu.get(insn, 1, src)
+        if _sign(v, src):
+            v -= 1 << (8 * src)
+        old = cpu.get(insn, 0, 16)
+        if double:
+            cpu.put(insn, 0, (old & ~_mask(8)) | f64_bits(float(v)), 16)
+        else:
+            cpu.put(insn, 0, (old & ~_mask(4)) | f32_bits(float(v)), 16)
+
+    return run
+
+
+def _cvtss2sd(cpu: Cpu, insn: ix.Instruction) -> None:
+    old = cpu.get(insn, 0, 16)
+    cpu.put(insn, 0, (old & ~_mask(8)) | f64_bits(bits_f32(cpu.get(insn, 1, 4))), 16)
+
+
+def _cvtsd2ss(cpu: Cpu, insn: ix.Instruction) -> None:
+    old = cpu.get(insn, 0, 16)
+    cpu.put(insn, 0, (old & ~_mask(4)) | f32_bits(bits_f64(cpu.get(insn, 1, 8))), 16)
+
+
+def _movsd(cpu: Cpu, insn: ix.Instruction) -> None:
+    """SSE movsd (the string ``movsd`` has memory-only operands and is refused)."""
+    if insn.op_count != 2 or (
+        insn.op_kind(0) != ix.OpKind.REGISTER and insn.op_kind(1) != ix.OpKind.REGISTER
+    ):
+        raise Unsupported(_FMT.format(insn))
+    low = cpu.get(insn, 1, 8)
+    if insn.op_kind(0) == ix.OpKind.MEMORY:
+        cpu.put(insn, 0, low, 8)
+    elif insn.op_kind(1) == ix.OpKind.MEMORY:
+        cpu.put(insn, 0, low, 16)
+    else:
+        old = cpu.get(insn, 0, 16)
+        cpu.put(insn, 0, (old & ~_mask(8)) | low, 16)
+
+
+def _movq(cpu: Cpu, insn: ix.Instruction) -> None:
+    """movq: into an xmm register the rest is cleared; to r64 or memory, 8 bytes."""
+    if insn.op_kind(0) == ix.OpKind.REGISTER and ix.RegisterExt.is_xmm(insn.op0_register):
+        cpu.put(insn, 0, cpu.get(insn, 1, 8), 16)
+    else:
+        cpu.put(insn, 0, cpu.get(insn, 1, 8), 8)
+
+
+def _move128(aligned: bool) -> Callable[[Cpu, ix.Instruction], None]:
+    """movaps (memory must be 16-aligned), movdqu, vmovups xmm (128-bit only)."""
+
+    def run(cpu: Cpu, insn: ix.Instruction) -> None:
+        if insn.op_count != 2 or any(
+            insn.op_kind(i) == ix.OpKind.REGISTER and ix.RegisterExt.is_ymm(insn.op_register(i))
+            for i in range(2)
+        ):
+            raise Unsupported(_FMT.format(insn))
+        touches = any(insn.op_kind(i) == ix.OpKind.MEMORY for i in range(2))
+        if aligned and touches and cpu.address(insn) % 16:
+            raise CpuFault(f"misaligned {_FMT.format(insn)}")
+        cpu.put(insn, 0, cpu.get(insn, 1, 16), 16)
+
+    return run
+
+
+def _unpcklps(cpu: Cpu, insn: ix.Instruction) -> None:
+    """dst = [dst0, src0, dst1, src1] (32-bit lanes)."""
+    d, s = cpu.get(insn, 0, 16), cpu.get(insn, 1, 16)
+    lane = lambda v, i: (v >> (32 * i)) & 0xFFFFFFFF  # noqa: E731
+    out = lane(d, 0) | lane(s, 0) << 32 | lane(d, 1) << 64 | lane(s, 1) << 96
+    cpu.put(insn, 0, out, 16)
+
+
+def _call(cpu: Cpu, insn: ix.Instruction) -> None:
+    if insn.op_kind(0) not in (ix.OpKind.NEAR_BRANCH64, ix.OpKind.NEAR_BRANCH32):
+        raise Unsupported(f"indirect {_FMT.format(insn)}")
+    cpu.push(insn.next_ip)
+    cpu.rip = insn.near_branch_target
+
+
+def _ret(cpu: Cpu, insn: ix.Instruction) -> None:
+    if insn.op_count:
+        raise Unsupported(_FMT.format(insn))  # ret imm16
+    cpu.rip = cpu.pop()
+
+
 _HANDLERS: dict[int, Callable[[Cpu, ix.Instruction], None]] = {
     M.MOV: _mov,
     M.LEA: _lea,
@@ -490,6 +667,29 @@ _HANDLERS: dict[int, Callable[[Cpu, ix.Instruction], None]] = {
     M.UCOMISS: _ucomiss,
     M.ADDSS: _scalar(lambda a, b: a + b),
     M.MULSS: _scalar(lambda a, b: a * b),
+    M.DIVSS: _scalar(_divide),
+    M.MULSD: _double(lambda a, b: a * b),
+    M.DIVSD: _double(_divide),
+    M.MOVZX: _extend(False),
+    M.MOVSX: _extend(True),
+    M.MOVSXD: _extend(True),
+    M.IMUL: _imul3,
+    M.CVTTSS2SI: _to_whole(False, True),
+    M.CVTSS2SI: _to_whole(False, False),
+    M.CVTTSD2SI: _to_whole(True, True),
+    M.CVTSD2SI: _to_whole(True, False),
+    M.CVTSI2SS: _from_whole(False),
+    M.CVTSI2SD: _from_whole(True),
+    M.CVTSS2SD: _cvtss2sd,
+    M.CVTSD2SS: _cvtsd2ss,
+    M.MOVSD: _movsd,
+    M.MOVQ: _movq,
+    M.MOVAPS: _move128(True),
+    M.MOVDQU: _move128(False),
+    M.VMOVUPS: _move128(False),
+    M.UNPCKLPS: _unpcklps,
+    M.CALL: _call,
+    M.RET: _ret,
 }
 for _m in (
     M.JO,

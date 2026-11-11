@@ -52,6 +52,7 @@ class Controller(QObject):
         self.frozen_addresses: set[int] = set()
         self.hit_test_warned = False  # AC-H6 warning is shown once per run
         self.build_notice_shown = False  # Make it work's "Save your game first", once per run
+        self.trace_notice_shown = False  # Find the real one's "Save your game first", once
         self.project: Project | None = None  # v3 "find it again" notes for this game
         self.before_disconnect: list[Callable[[], None]] = []  # e.g. take hooks out
         self._lost.connect(self.handle_lost)

@@ -195,13 +195,20 @@ class RealChecker:
         self,
         progress: Callable[[float], None] | None = None,
         cancel: threading.Event | None = None,
+        rounds: int | None = None,
     ) -> dict[Key, Result]:
-        for r in range(self.rounds):
+        """``rounds``: stop after that many rounds (None = every member). With 1, only
+        each group's first member is written and the rest are its followers (the
+        tracer checks one source against the copies it was found behind)."""
+        if rounds is not None and rounds < 1:
+            raise ValueError("rounds must be at least 1")
+        total = self.rounds if rounds is None else min(rounds, self.rounds)
+        for r in range(total):
             if cancel is not None and cancel.is_set():
                 break
             self._round(r)
             if progress is not None:
-                progress((r + 1) / self.rounds)
+                progress((r + 1) / total)
         log.info(
             "action=real_check groups=%d checked=%d real=%d copies=%d",
             len(self.groups),

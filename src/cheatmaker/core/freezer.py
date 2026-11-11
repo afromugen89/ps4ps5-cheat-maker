@@ -49,6 +49,16 @@ class Freezer:
         with self._lock:
             return set(self._entries)
 
+    def fixed_writes(self, prefix: str = "") -> dict[str, list[tuple[int, int, bytes]]]:
+        """A copy of the fixed-write entries (not tracked ones) whose key starts with
+        ``prefix``: key -> [(address, size, bytes)]."""
+        with self._lock:
+            return {
+                k: list(v)
+                for k, v in self._entries.items()
+                if k.startswith(prefix) and not callable(v)
+            }
+
     def freeze(self, key: str, writes: list[tuple[int, int, bytes]]) -> None:
         """``writes`` = [(pid, address, bytes)], all written each tick."""
         for _pid, addr, data in writes:
