@@ -162,6 +162,28 @@ def test_int64_to_float_rounds_once():
     assert w.to_screen(51) == 51.0
 
 
+def test_nudge_after_narrowing_steps_in_float32():
+    """QA BUG-04: 2.37 as a double shows 236 through cvtsd2ss, x100, cut; the nudge
+    has to step float32 values (2.3700001...) to reach 237."""
+    w = Way(
+        D,
+        I32,
+        (
+            Step(Kind.NARROW, F),
+            Step(Kind.MUL, F, const=100.0),
+            Step(Kind.TO_WHOLE, I32, rounding="cut"),
+        ),
+    )
+    real, exact = w.real_for(237)
+    assert exact and w.to_screen(real) == 237 and real != 2.37
+
+
+def test_a_decimal_screen_value_is_exact_to_its_digits():
+    """QA BUG-05: 127.0000076 on a decimal screen is 127."""
+    w = Way(F, F, (Step(Kind.MUL, F, const=1000.0),))
+    assert w.real_for(127.0)[1]
+
+
 def test_then_composes_hops():
     inner = Way(F, F, (Step(Kind.MUL, F, const=100.0),))  # real -> widget (x100, float)
     outer = Way(F, I32, (Step(Kind.TO_WHOLE, I32, rounding="cut"),))  # widget -> HUD

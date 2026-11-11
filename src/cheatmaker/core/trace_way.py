@@ -21,6 +21,8 @@ from cheatmaker.core.values import Scale, ValueType
 NUDGE_STEPS = 8
 """How many float32 / whole steps ``to_real`` tries either side of the first guess."""
 DECIMAL_TOL = 0.01  # AC-T5: decimals match within 1% (or one unit, the larger)
+SHOWN_REL_TOL = 1e-6  # a decimal screen value equals the typed one to its digits
+SHOWN_ABS_TOL = 1e-9
 
 Rounding = Literal["cut", "round"]
 MaxNow = float | int | Mapping[int, float | int] | None
@@ -225,10 +227,24 @@ class Way:
         return _fit(_div(float(x), self._max(s, max_now)), s.to)  # SHARE
 
     def _same_shown(self, a: float | int, b: float | int) -> bool:
+        """Does the screen show ``a`` as the typed ``b``? A whole number exactly; a
+        decimal to its digits (127.0000076 shows as 127), not by its bytes."""
+        if self.shown.is_float:
+            a, b = float(a), float(b)
+            if not (math.isfinite(a) and math.isfinite(b)):
+                return a == b
+            return math.isclose(a, b, rel_tol=SHOWN_REL_TOL, abs_tol=SHOWN_ABS_TOL)
         try:
             return self.shown.encode(a) == self.shown.encode(b)
         except (ValueError, OverflowError):
             return False
+
+    def _nudge_type(self) -> ValueType:
+        """The type to step the real value in: an 8-byte decimal narrowed to a 4-byte
+        one on the way (cvtsd2ss) only shows a difference a float32 step apart."""
+        if self.real is ValueType.DOUBLE and any(s.to is ValueType.FLOAT for s in self.steps):
+            return ValueType.FLOAT
+        return self.real
 
     def to_real(self, screen: float | int, max_now: MaxNow = None) -> float | int:
         """The real value to write so the game shows ``screen``: the inverse of the
@@ -244,8 +260,9 @@ class Way:
         if f == 0 or not math.isfinite(f):
             raise ValueError("this way can't be turned back into the real value")
         guess = float(screen) / f
+        step_in = self._nudge_type()
         if self.real.is_float:
-            x0: float | int = _fit(guess, self.real)
+            x0: float | int = _fit(guess, step_in)
         else:
             lo, hi = self.real.int_range()
             x0 = max(lo, min(hi, round(guess))) if math.isfinite(guess) else 0
@@ -253,7 +270,7 @@ class Way:
             return x0, True
         up = down = x0
         for _ in range(NUDGE_STEPS):
-            up, down = _next(up, self.real, True), _next(down, self.real, False)
+            up, down = _next(up, step_in, True), _next(down, step_in, False)
             for x in (up, down):
                 if self._fits(x) and self._same_shown(self.to_screen(x, max_now), screen):
                     return x, True

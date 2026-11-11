@@ -615,10 +615,6 @@ def test_tc09_typed_screen_numbers_round_trip(name):
         assert way.matches(real, screen)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG-04: a double narrowed to float (cvtsd2ss) then x100 can't be Set exactly",
-)
 def test_tc09b_double_narrowed_to_float_round_trips():
     way = Way(
         D,
@@ -661,10 +657,6 @@ def test_tc09d_negative_values_cut_toward_zero():
     assert not way.matches(F.decode(F.encode(-0.879)), -88)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG-05: a decimal screen copy says 'can't show exactly' for plain numbers",
-)
 def test_tc09e_decimal_screen_value_is_settable_without_a_nearest_notice():
     way = Way(F, F, (Step(Kind.MUL, F, const=1000.0),))
     _real, exact = way.real_for(127.0)
@@ -672,7 +664,6 @@ def test_tc09e_decimal_screen_value_is_settable_without_a_nearest_notice():
 
 
 # -- TC-10 log lines and hop messages (AC-T8, AC-T11) --
-@pytest.mark.xfail(strict=True, reason="BUG-06: 'Followed it 1 steps' when time runs out at hop 1")
 def test_tc10_too_far_text_after_one_hop_is_grammatical():
     from cheatmaker.ui.trace_dialog import result_text
 

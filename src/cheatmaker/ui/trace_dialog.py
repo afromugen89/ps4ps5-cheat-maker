@@ -73,7 +73,11 @@ def _outcome_text(r: tr.TraceResult) -> str:
             shown = "another way"
         return hints.TRACE_SEARCH_WAY.format(type=r.way.real.label.lower(), shown=shown)
     if r.outcome is Out.TOO_FAR:
-        text = hints.TRACE_TOO_FAR.format(n=len(r.hops))
+        if r.reason == tr.TOO_LONG:
+            text = hints.TRACE_TOO_LONG
+        else:
+            n = len(r.hops)
+            text = hints.TRACE_TOO_FAR.format(n=n, steps="step" if n == 1 else "steps")
         return f"{text} {hints.TRACE_NOT_SURE}" if r.address is not None else text
     return {
         Out.ALREADY_REAL: hints.TRACE_ALREADY_REAL,

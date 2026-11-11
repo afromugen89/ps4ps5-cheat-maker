@@ -261,6 +261,11 @@ R = tr.TraceResult
         ),
         (R(tr.Outcome.TOO_FAR, 1), "Followed it 0 steps without reaching the real value."),
         (
+            R(tr.Outcome.TOO_FAR, 1, hops=(tr.Hop(1, None),), reason="goes round in a circle"),
+            "Followed it 1 step without reaching the real value.",
+        ),
+        (R(tr.Outcome.TOO_FAR, 1, reason=tr.TOO_LONG), hints.TRACE_TOO_LONG),
+        (
             R(tr.Outcome.TOO_FAR, 1, address=5),
             "Followed it 0 steps without reaching the real value. " + hints.TRACE_NOT_SURE,
         ),
@@ -608,3 +613,27 @@ def test_disconnect_waits_for_the_trace_to_put_things_back(win, game, monkeypatc
     d._job_done.clear()
     d._stop_for_disconnect()
     assert "action=trace_stop_wait timed_out=True" in caplog.text
+
+
+def test_share_of_max_with_a_max_of_0_shows_a_question_mark(win, game):
+    """QA O-4: not the CPU's -2147483648."""
+    f = win.find
+    maxat = game.g.alloc(0x10)
+    game.g.set(maxat, F, 0.0)
+    way = Way(
+        F,
+        I32,
+        (
+            Step(Kind.SHARE, F, max_at=maxat),
+            Step(Kind.MUL, F, const=100.0),
+            Step(Kind.TO_WHOLE, I32, rounding="cut"),
+        ),
+    )
+    real = game.obj + 0x10
+    f.use_traced(R(tr.Outcome.FOUND, 1, real, F, way, Verdict.REAL, value=0.87))
+    i = next(i for i, m in enumerate(f.rows) if m.address == real)
+    assert "(screen: ?)" in f._row_text(i)
+    game.g.set(maxat, F, 1.0)
+    f.refresh_live()
+    i = next(i for i, m in enumerate(f.rows) if m.address == real)
+    assert "(screen: 87)" in f._row_text(i)

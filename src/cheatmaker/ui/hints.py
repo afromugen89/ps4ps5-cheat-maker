@@ -288,7 +288,8 @@ TRACE_NOT_FOLLOWED = (
     "Try Check which is real or I don't know the number."
 )
 TRACE_SCRAMBLED = "The game scrambles this value, which isn't supported yet."
-TRACE_TOO_FAR = "Followed it {n} steps without reaching the real value."
+TRACE_TOO_FAR = "Followed it {n} {steps} without reaching the real value."
+TRACE_TOO_LONG = "It ran out of time before reaching the real value."
 TRACE_NOT_SURE = "The last place it checked is added to the list, marked not sure."
 TRACE_UNCONFIRMED = "Change the number in the game so the app can check."
 TRACE_CANCELLED = "Stopped. Nothing was left changed."

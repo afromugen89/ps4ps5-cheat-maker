@@ -906,10 +906,14 @@ class FindWizard(QWidget):
         t = self._traced_for(addr, vt)
         if t is None or (isinstance(value, float) and not math.isfinite(value)):
             return fmt_value(value)
+        max_now = self._trace_max.get(addr)
         try:
-            screen = t.way.to_screen(value, self._trace_max.get(addr))
+            factor = t.way.factor(max_now)
+            screen = t.way.to_screen(value, max_now)
         except (ValueError, OverflowError):
             return fmt_value(value)
+        if factor == 0 or not math.isfinite(factor):  # a max of 0: nothing sensible shows
+            return f"{fmt_value(value)} (screen: ?)"
         return f"{fmt_value(value)} (screen: {fmt_value(screen)})"
 
     def _read_trace_maxes(self) -> None:
