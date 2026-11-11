@@ -540,6 +540,7 @@ class Tracer:
                 path.way.real,
                 win,
                 hop.watched.address,
+                path.width,
             )
             log.info(
                 "action=trace_path caller=%#x end=%s followed=%r reason=%r",

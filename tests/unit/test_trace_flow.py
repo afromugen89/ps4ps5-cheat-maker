@@ -271,6 +271,35 @@ def test_wider_whole_number_load_is_the_source_and_the_copy_its_low_bytes():
     assert p.way.real is I64 and len(p.way.steps) == 1
 
 
+def test_an_8_byte_copy_of_two_fields_keeps_the_watched_field_its_own_size():
+    """``mov rax,[m] ; mov [d],rax`` copies all 8 bytes: the low 4 watched are just the
+    low 4 of the source (hp next to maxhp), not an 8-byte number."""
+    p = trace(
+        ins("MOV_R64_RM64", "rax", mem("rbx", 0x10)),
+        ins("MOV_RM64_R64", mem("rdi"), "rax"),
+        shown=I32,
+    )
+    assert p.end is End.SOURCE and p.way.real is I32 and p.way.steps == ()
+    p = trace(  # a narrower register move on the way: the copy got 4 bytes
+        ins("MOV_R64_RM64", "rax", mem("rbx", 0x10)),
+        ins("MOV_R32_RM32", "ecx", "eax"),
+        ins("MOV_RM64_R64", mem("rdi"), "rcx"),
+        shown=I32,
+    )
+    assert p.way.real is I64 and [s.kind for s in p.way.steps] == [Kind.TRUNCATE]
+    p = trace(  # movzx from 2 bytes into a 4-byte store, the low byte watched
+        ins("MOVZX_R32_RM16", "eax", mem("rbx")), ins("MOV_RM32_R32", mem("rdi"), "eax"), shown=I8
+    )
+    assert p.way.real is I8 and p.way.steps == ()
+
+
+def test_store_of_a_high_byte_register_is_byte_1():
+    p = trace(
+        ins("MOV_R32_RM32", "eax", mem("rbx", 0x10)), ins("MOV_RM8_R8", mem("rdi"), "ah"), shown=I8
+    )
+    assert p.end is End.SOURCE and p.load.lane == 1 and p.way.real is I8
+
+
 def test_conversion_that_doesnt_fit_the_copy_type():
     p = trace(
         ins("CVTTSS2SI_R32_XMMM32", "eax", "xmm0"),

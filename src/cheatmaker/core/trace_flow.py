@@ -123,6 +123,9 @@ def full_name(reg: int) -> str:
     return reg_name(ix.RegisterExt.full_register(reg))
 
 
+_HIGH_BYTES = frozenset({ix.Register.AH, ix.Register.BH, ix.Register.CH, ix.Register.DH})
+
+
 def _reg_size(reg: int) -> int:
     return 16 if ix.RegisterExt.is_vector_register(reg) else ix.RegisterExt.size(reg)
 
@@ -233,6 +236,7 @@ class Path:
     followed: tuple[str, ...] = ()  # instruction texts, writer first (Advanced)
     reason: str = ""  # e.g. "add eax,ecx at 0x40123a"
     lane: int = 0  # BLOCK_START: the byte of ``reg`` the value is in
+    width: int = 16  # BLOCK_START: the low bytes of ``reg`` the value was carried in
 
 
 @dataclass(frozen=True)
@@ -367,6 +371,10 @@ class _Walk:
     steps: list[Step]
     followed: list[str]
     max_load: Load | None = None
+    width: int = 16
+    """The narrowest the value passed through (bytes from the register's start): the
+    writer's store, narrower register moves and extends. Only a load wider than this
+    holds more than the copy got (TRUNCATE)."""
 
     def way(self) -> Way:
         return Way(self.cur, self.shown, tuple(reversed(self.steps)))
@@ -375,6 +383,7 @@ class _Walk:
         way = None
         if end in (End.SOURCE, End.BLOCK_COPY, End.BLOCK_START):
             way = self.way()
+        kw.setdefault("width", self.width)
         return Path(end, way, max_load=self.max_load, followed=tuple(self.followed), **kw)
 
 
@@ -416,15 +425,26 @@ def follow(win: Window, lane: int, read: Read, is_const: IsConst, shown: ValueTy
         return Path(
             End.NOT_FOLLOWED, None, followed=(first,), reason=f"the copy isn't all in {_where(w)}"
         )
-    return follow_reg(win, full_name(src), lane, read, is_const, shown)
+    high = 1 if src in _HIGH_BYTES else 0  # mov [m],ah stores byte 1 of rax
+    return follow_reg(
+        win, full_name(src), lane + high, read, is_const, shown, width=store_size + high
+    )
 
 
 def follow_reg(
-    win: Window, reg: str, lane: int, read: Read, is_const: IsConst, shown: ValueType
+    win: Window,
+    reg: str,
+    lane: int,
+    read: Read,
+    is_const: IsConst,
+    shown: ValueType,
+    *,
+    width: int = 16,
 ) -> Path:
     """Like ``follow``, but the value is in ``reg`` (byte ``lane``) when the window's
-    last instruction runs (a call that passes it as an argument)."""
-    walk = _Walk(win, read, is_const, shown, reg, lane, shown, [], [text(win.writer)])
+    last instruction runs (a call that passes it as an argument). ``width``: the low
+    bytes of ``reg`` that carry it on (the writer's store size)."""
+    walk = _Walk(win, read, is_const, shown, reg, lane, shown, [], [text(win.writer)], width=width)
     try:
         return _walk_back(walk, len(win.insns) - 2)
     except _Stop as stop:
@@ -593,6 +613,8 @@ def _move(
             return None  # movss x,x keeps the rest of the register
         return _from(walk, insn, i, srci, width)
     # mov r, r/m
+    if not src_mem and insn.op_register(srci) in _HIGH_BYTES:
+        raise _Stop(End.NOT_FOLLOWED, f"a high byte register in {_where(insn)}")
     size = (
         ix.MemorySizeInfo(insn.memory_size).size if src_mem else _reg_size(insn.op_register(srci))
     )
@@ -600,17 +622,24 @@ def _move(
         if not walk.cur.is_float and walk.lane == 0 and size == 4 and walk.cur.size == 8:
             walk.steps.append(Step(Kind.EXTEND, walk.cur, signed=False))  # mov r32 zero-extends
             walk.cur = ValueType.INT32
+            walk.width = min(walk.width, size)
             return _from(walk, insn, i, srci, size)
         raise _Stop(End.NOT_FOLLOWED, f"the value isn't all in {_where(insn)}")
     if src_mem:
         _truncate(walk, size)
+    else:
+        walk.width = min(walk.width, size)
     return _from(walk, insn, i, srci, size)
 
 
 def _truncate(walk: _Walk, size: int) -> None:
-    """A whole number loaded wider than the copy keeps (``mov rax,[m] ; mov [d],eax``):
-    the source is the whole wide number, and the copy holds its low bytes."""
-    if walk.cur.is_float or walk.lane or size <= walk.cur.size or size not in _INT_TYPES:
+    """A whole number loaded wider than the value ever was on its way to the copy
+    (``mov rax,[m] ; mov [d],eax``): the source is the whole wide number, and the copy
+    holds its low bytes. ``mov rax,[m] ; mov [d],rax`` copies all 8 bytes, so the
+    watched part is just the same part of the source (no TRUNCATE)."""
+    if walk.cur.is_float or walk.lane or size <= walk.width or size not in _INT_TYPES:
+        return
+    if size <= walk.cur.size:
         return
     walk.steps.append(Step(Kind.TRUNCATE, walk.cur))
     walk.cur = _int_type(size)
@@ -624,11 +653,14 @@ def _extend(walk: _Walk, insn: ix.Instruction, i: int, signed: bool, srci: int) 
     size = (
         ix.MemorySizeInfo(insn.memory_size).size if src_mem else _reg_size(insn.op_register(srci))
     )
+    if not src_mem and insn.op_register(srci) in _HIGH_BYTES:
+        raise _Stop(End.NOT_FOLLOWED, f"a high byte register in {_where(insn)}")
     if size < walk.cur.size:
         walk.steps.append(Step(Kind.EXTEND, walk.cur, signed=signed))
         walk.cur = _int_type(size)
     elif src_mem:
         _truncate(walk, size)  # movzx eax,word [m] ; mov [d],al
+    walk.width = min(walk.width, size)
     return _from(walk, insn, i, srci, size)
 
 
@@ -952,6 +984,7 @@ def follow_into_caller(
     shown: ValueType,
     callee: Window,
     watched: int,
+    width: int = 16,
 ) -> tuple[Path, list[Candidate]]:
     """The value arrived in argument register ``reg`` at the start of the callee
     (``callee``): follow it back in the caller from the call that returns to ``ret``,
@@ -961,7 +994,7 @@ def follow_into_caller(
     win = caller_window(read, ret)
     if win is None:
         return Path(End.NOT_FOLLOWED, None, reason=f"no call before {ret:#x}"), []
-    path = follow_reg(win, reg, lane, read, is_const, shown)
+    path = follow_reg(win, reg, lane, read, is_const, shown, width=width)
     written = set().union(*(written_registers(i) for i in callee.insns))
     allowed = frozenset(CALLEE_SAVED - written)
     cands = candidates(win, path, hit, watched, read, allowed=allowed, method="caller")

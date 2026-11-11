@@ -388,7 +388,6 @@ def test_tc07b_constant_first_multiply_is_followed(vex):
     assert p.load.mem.text() == "[rbx+10h]" and p.way.factor() == 100
 
 
-@pytest.mark.xfail(strict=True, reason="BUG-03: a store of ah is read as the low byte")
 def test_tc07c_store_of_ah_is_byte_1_of_the_register():
     p = flow(
         ins("MOV_R32_RM32", "eax", mem("rbx", 0x10)),

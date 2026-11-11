@@ -154,6 +154,24 @@ def test_copy_of_the_low_half_of_an_8_byte_count():
     no_test_value_left(g, (obj + 8, I64, 40), (hud, I32, 40))
 
 
+def test_an_8_byte_copy_of_hp_and_maxhp_finds_hp_alone():
+    """``mov rax,[rcx+8] ; mov [rdx],rax``: the watched low 4 bytes are hp; a Set on the
+    found row must not touch maxhp next to it."""
+    g = TraceGame()
+    obj, hud = g.alloc(0x40), g.alloc(0x40)
+    g.set(obj + 8, I32, 51)
+    g.set(obj + 12, I32, 120)  # maxhp
+    g.routine(
+        ins("MOV_R64_RM64", "rax", mem("rcx", 8)),
+        ins("MOV_RM64_R64", mem("rdx"), "rax"),
+        regs={"rcx": obj, "rdx": hud},
+    )
+    r, _t, _c = run(g, hud, I32, Player(setter(g, obj + 8, I32, 40)))
+    assert r.outcome is Outcome.FOUND, r.reason
+    assert r.address == obj + 8 and r.vtype is I32 and r.way.steps == ()
+    assert g.get(obj + 12, I32) == 120, "maxhp untouched by the write test"
+
+
 def test_cut_conversion():
     g = TraceGame()
     obj, hud = g.alloc(0x40), g.alloc(0x40)
