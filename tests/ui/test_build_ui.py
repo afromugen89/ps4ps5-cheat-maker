@@ -446,3 +446,28 @@ def test_full_field_shows_what_start_read(win, game, h, clock):
     h.setup = pick
     win.cheats.build_btn.click()
     assert h.last.full.text() == "123.5"
+
+
+def test_cancel_while_the_fix_is_kept_still_lists_it(win, game, h, clock, monkeypatch):
+    """Cancel lands after finalize's writes: the fix is in the game, so it is listed and
+    on (it can be switched off there), never dropped with "unchanged"."""
+    from cheatmaker.core import builder as bd
+
+    source = health_cheat(game)
+    add_and_select(win, source)
+    h.hide_notice = True
+    clock.events.extend([lambda: game.hit(game.player, 40.0)])
+    real_keep = bd.Builder._keep
+
+    def keep_then_cancel(self, inst):
+        out = real_keep(self, inst)
+        h.last.reject()
+        return out
+
+    monkeypatch.setattr(bd.Builder, "_keep", keep_then_cancel)
+    win.cheats.build_btn.click()
+    d = h.last
+    made = d.result_cheat
+    assert made is not None and made.enabled and made in win.ctl.cheat_file.cheats
+    assert source not in win.ctl.cheat_file.cheats
+    assert d.hint.text() != hints.BUILD_CANCELLED

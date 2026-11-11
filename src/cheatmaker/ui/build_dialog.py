@@ -286,7 +286,11 @@ class MakeItWorkDialog(QDialog):
 
         def ok(value) -> None:
             self._step_running = False
-            if self._rejected:
+            if self._rejected and isinstance(value, bd.BuildResult):
+                # Kept before Cancel landed: the fix is in the game and marked on, so
+                # it must be listed (it can be switched off there), never dropped.
+                done(value)
+            elif self._rejected:
                 self._closed_meanwhile()
             else:
                 done(value)
