@@ -261,10 +261,22 @@ class Game:
         if self.script:
             self.hit(*self.script.popleft())
 
+    def show(self, obj: int) -> Cpu:
+        """The HUD reads ``obj``'s health with the game's reader, starting at its own
+        code (so through a hook there)."""
+        lay = self.layout
+        cpu = Cpu(_GameMemory(self.fake))
+        for name, v in GAME_REGS.items():
+            cpu[name] = v
+        cpu["rsp"] = RSP
+        cpu["r14" if lay.changed else "r12"] = obj
+        return cpu.run(lay.reader, lay.reader + len(lay.vmovss_r))
+
     def fight(self, rounds: int = 1) -> Callable[[float], None]:
         """A ``sleep`` for ``cv.collect_objects``: each of the first ``rounds`` calls
-        hits the player and every enemy once through the game's writer (so through a
-        hook there), each losing 1 health; later calls do nothing."""
+        hits the player and every enemy once through the game's writer, each losing 1
+        health, and the HUD shows each through the reader (so through a hook at either);
+        later calls do nothing."""
         left = [rounds]
 
         def sleep(_seconds: float) -> None:
@@ -273,6 +285,7 @@ class Game:
             left[0] -= 1
             for obj in (self.player, *self.enemies):
                 self.hit(obj, float(self.value(obj)) - 1.0)
+                self.show(obj)
 
         return sleep
 

@@ -25,21 +25,28 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass, field
+import struct
+import threading
+import time
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass, field, replace
 from typing import Literal
 
 import iced_x86 as ix
 
+from cheatmaker.console.client import ProgressFn
 from cheatmaker.core import anchor_hook as ah
 from cheatmaker.core import cave as cv
+from cheatmaker.core import pointers as ptr
 from cheatmaker.core import project as pj
 from cheatmaker.core import refind as rf
 from cheatmaker.core import updater as up
 from cheatmaker.core.cheats import Cheat, CheatFile, Location, LocationKind
-from cheatmaker.core.locker import MAX_INSN, insn_text, writes_memory
+from cheatmaker.core.locker import MAX_INSN, Writer, insn_text, writes_memory
 from cheatmaker.core.project import (
     ChainAnchor,
     HookAnchor,
+    HookFilter,
     ObjectSpec,
     Project,
     ProjectCheat,
@@ -47,7 +54,8 @@ from cheatmaker.core.project import (
     StaticAnchor,
     VtableAnchor,
 )
-from cheatmaker.errors import FindFailed, ProjectFileError
+from cheatmaker.core.session import Session
+from cheatmaker.errors import FindFailed, LockFailed, ProjectFileError, ReadFailed
 
 log = logging.getLogger(__name__)
 
@@ -59,6 +67,7 @@ DATA_VALUE = "it changes a value in the game's data, which moves with an update"
 OTHER_MODULE = "it changes another part of the game"
 PART_FAILED = "part {part} couldn't be found ({why}); make it again"
 NO_OBJECT = "its value isn't in the notes any more"
+NOT_PICKED = "none of the places was picked"
 
 HookHow = Literal["exact", "loose", "original"]
 
@@ -461,6 +470,402 @@ def for_merge(source: Project, into: Project) -> Project:
     )
 
 
+# -- live steps (new version running) -----------------------------------------------------
+def drop_hook(item: Item, reason: str) -> None:
+    """The hook can't come over: the object keeps its other ways (if any), without a
+    class until the first Yes."""
+    item.reason = reason
+    item.obj.anchors = [a for a in item.obj.anchors if not isinstance(a, HookAnchor)]
+    reset_class(item.obj)
+    log.info("action=carry_hook object=%s result=failed reason=%s", item.obj.id, reason)
+
+
+def prepare(
+    session: Session,
+    old: Project,
+    *,
+    reserved: Iterable[tuple[int, int]] = (),
+    progress: ProgressFn | None = None,
+    cancel: threading.Event | None = None,
+) -> Plan:
+    """Everything that needs no writing: the new copies of the objects, each hook's
+    new place, and the fixed code parts moved. Reads the game's code only when there
+    are hooks or code parts. ``reserved``: rooms kept by others right now (the
+    session's and the open cheats' code lines). Raises ScanCancelled."""
+    game = session.require_game()
+    items = [Item(carried_object(o), o, item_kind(o)) for o in order_items(old.objects)]
+    plan = Plan(
+        old,
+        Project(old.title_id, game.version, old.process),
+        None,
+        items,
+        reserved=[*reserved, *ah.reserved_rooms(old.objects), *part_rooms(old)],
+    )
+    has_parts = any(not p.learned for pc in old.cheats for p in pc.parts)
+    if any(it.kind == "hook" for it in items) or has_parts:
+        plan.image = up.read_code_image(session, progress, cancel)
+    for it in items:
+        hook = it.old.hook
+        if hook is None:
+            reset_class(it.obj)  # its class moved with the update: learned at the first Yes
+            continue
+        assert plan.image is not None
+        try:
+            it.site = find_hook_site(hook, plan.image)
+        except CarryFailed as exc:
+            drop_hook(it, exc.reason)
+            continue
+        shift_fields(it.obj, it.shift)
+    if has_parts:
+        assert plan.image is not None
+        _carry_parts(plan, plan.image)
+    return plan
+
+
+def _part_log(name: str, part: ProjectPart, new: int | None, result: str) -> None:
+    log.info(
+        "action=carry_part cheat=%s part=%s kind=%s old=%#x new=%s result=%s",
+        name,
+        part.name,
+        part.kind,
+        part.offset,
+        "-" if new is None else f"{new:#x}",
+        result,
+    )
+
+
+def _carry_parts(plan: Plan, image: up.CodeImage) -> None:
+    """Move the combined cheats' fixed code parts with the v2 rules (AC-U6). A fixed
+    value in the game's data, or a part in another module, fails its cheat."""
+    old = plan.old
+    fixed: dict[int, list[ProjectPart]] = {}
+    tmp: list[Cheat] = []
+    for i, pc in enumerate(old.cheats):
+        parts = [p for p in pc.parts if not p.learned]
+        if not parts:
+            continue
+        bad = next((p for p in parts if p.kind != "code_patch" or p.module != old.process), None)
+        if bad is not None:
+            plan.parts[i] = DATA_VALUE if bad.kind == "module_value" else OTHER_MODULE
+            _part_log(pc.name, bad, None, "failed reason=" + plan.parts[i])
+            continue
+        fixed[i] = parts
+        tmp.append(
+            Cheat(str(i), [Location(LocationKind.CODE_PATCH, p.offset, p.on, p.off) for p in parts])
+        )
+    if not tmp:
+        return
+    sigs = up.load_signatures(up.signatures_path(old.title_id, old.version))  # read only
+    cf = CheatFile("", old.title_id, old.version, tmp, old.process)
+    moved, report = up.update_file(
+        cf, sigs, image, plan.new.version, reserved=plan.reserved, cave_skip=cv.BUILD_CAVE_SKIP
+    )
+    caves: list[tuple[int, int]] = []
+    for c in moved.cheats:
+        i = int(c.name)
+        name = old.cheats[i].name
+        new_parts = []
+        for p, loc in zip(fixed[i], c.locations, strict=True):
+            new_parts.append(replace(p, offset=loc.offset, on=loc.on, off=loc.off))
+            _part_log(name, p, loc.offset, "moved")
+            if up.is_cave(loc):
+                caves.append((loc.offset, loc.offset + len(loc.on)))
+        plan.parts[i] = new_parts
+        if c.name in report.guessed:
+            plan.guessed_parts.add(i)
+    for tmp_name, why in report.failed.items():
+        i = int(tmp_name)
+        at = report.failed_at.get(tmp_name)
+        part = next((p for p in fixed[i] if p.offset == at), fixed[i][0])
+        plan.parts[i] = PART_FAILED.format(part=part.name, why=why)
+        _part_log(old.cheats[i].name, part, None, "failed reason=" + why)
+    if caves:  # the new cave block: no hook room or slot goes there
+        plan.reserved.append((min(a for a, _ in caves), max(b for _, b in caves)))
+
+
+@dataclass
+class Classes:
+    """The objects the hooked instruction touched while we watched (AC-U4).
+    ``by_vtable``: plausible objects by class (module offset; None: no class asked);
+    ``skipped``: the old hook kept every object, so nothing was collected."""
+
+    by_vtable: dict[int | None, list[int]] = field(default_factory=dict)
+    plausible: list[int] = field(default_factory=list)
+    objects: list[int] = field(default_factory=list)
+    skipped: bool = False
+
+
+@dataclass(frozen=True)
+class Choice:
+    """How the new hook tells the object apart: its class, or a Player-only field."""
+
+    vtable: int | None
+    filter: HookFilter
+    player: int | None = None
+
+
+@dataclass
+class NeedPick:
+    """The player has to pick (UI thread: ``finder.ask_pick``), then ``answer``.
+    ``kind``: "class" (one option per class) or "player" (objects the old Player-only
+    guess matches)."""
+
+    options: list[rf.Found]
+    kind: Literal["class", "player"]
+
+
+def _probe(item: Item) -> ObjectSpec:
+    """The new copy without its class: fields at their new offsets."""
+    probe = ObjectSpec.from_json(item.obj.to_json())
+    probe.vtable = None
+    return probe
+
+
+def collect_classes(
+    session: Session,
+    item: Item,
+    *,
+    seconds: float = rf.COLLECT_SECONDS,
+    cancel: threading.Event | None = None,
+    sleep: Callable[[float], None] = time.sleep,
+    reserved: Iterable[tuple[int, int]] | None = None,
+) -> Classes:
+    """Collect what the new hook site touches for ``seconds`` (the Player-only
+    collect) and keep objects in writable memory whose fields look right; with a
+    class before, only those starting with a pointer into the module, grouped by it.
+    Raises CarryFailed, ScanCancelled."""
+    hook, site = item.old.hook, item.site
+    if hook is None or site is None:
+        raise CarryFailed(item.reason or NOT_FOUND)
+    if hook.filter.kind == "none":
+        return Classes(skipped=True)
+    if reserved is not None:
+        session.reserved_rooms = list(reserved)
+    game = session.require_game()
+    writer = Writer(game.module_base + site.offset, site.code, site.text, 0)
+    try:
+        objs = cv.collect_objects(session, writer, seconds, cancel, sleep=sleep)
+    except LockFailed as exc:
+        raise CarryFailed(str(exc)) from exc
+    maps = rf.MapIndex(session.require_client().maps(game.pid))
+    probe = _probe(item)
+    had_class = item.old.vtable is not None
+    out = Classes(objects=objs)
+    for o in objs:
+        if rf.verify(session, probe, o, maps) is not None:
+            continue
+        vt = ah.object_vtable(session, o) if had_class else None
+        if had_class and vt is None:
+            continue
+        out.plausible.append(o)
+        out.by_vtable.setdefault(vt, []).append(o)
+    log.info(
+        "action=carry_collect object=%s objects=%d plausible=%d classes=%d",
+        item.obj.id,
+        len(objs),
+        len(out.plausible),
+        len(out.by_vtable),
+    )
+    return out
+
+
+def _dword(session: Session, addr: int) -> int | None:
+    game = session.require_game()
+    try:
+        return struct.unpack("<I", session.require_client().read(game.pid, addr, 4))[0]
+    except ReadFailed:
+        return None
+
+
+def _field_choice(session: Session, player: int, objects: list[int]) -> Choice:
+    """The Player-only guess made again from the objects seen (as Find it next time)."""
+    if not [o for o in objects if o != player]:
+        return Choice(None, HookFilter("none"), player)
+    try:
+        guesses = cv.compare_objects(session, player, objects)
+    except LockFailed:
+        guesses = []
+    if not guesses:
+        return Choice(None, HookFilter("none"), player)
+    g = guesses[0]
+    return Choice(None, HookFilter("field", g.offset, g.player_value), player)
+
+
+def choose(session: Session, classes: Classes, item: Item) -> Choice | NeedPick:
+    """The new class (or Player-only guess) from what was collected. Raises
+    CarryFailed when nothing fits (spec AC-U4)."""
+    hook = item.old.hook
+    assert hook is not None
+    if classes.skipped:
+        return Choice(None, HookFilter("none"))
+    nothing = CarryFailed(NOTHING_TOUCHED.format(label="it"))
+    if hook.filter.kind != "field":
+        groups = {vt: objs for vt, objs in classes.by_vtable.items() if vt is not None}
+        if item.old.vtable in groups:  # the class didn't move (a dry run, a small patch)
+            return Choice(item.old.vtable, HookFilter("vtable"))
+        if len(groups) == 1:
+            return Choice(next(iter(groups)), HookFilter("vtable"))
+        if groups:
+            return NeedPick([rf.Found("hook_slot", objs[0]) for objs in groups.values()], "class")
+        raise nothing
+    f = hook.filter
+    players: list[int] = []
+    for off in dict.fromkeys((f.off, f.off + item.shift)):  # as is, then shifted
+        players = [o for o in classes.plausible if _dword(session, o + off) == f.value]
+        if players:
+            break
+    if len(players) == 1:
+        return _field_choice(session, players[0], classes.objects)
+    if players:
+        return NeedPick([rf.Found("hook_slot", o) for o in players], "player")
+    raise nothing
+
+
+def answer(session: Session, classes: Classes, need: NeedPick, address: int | None) -> Choice:
+    """The player's pick for ``need`` (None: none of them). Raises CarryFailed."""
+    if address is None:
+        raise CarryFailed(NOT_PICKED)
+    if need.kind == "player":
+        return _field_choice(session, address, classes.objects)
+    for vt, objs in classes.by_vtable.items():
+        if address in objs and vt is not None:
+            return Choice(vt, HookFilter("vtable"))
+    raise CarryFailed(NOT_PICKED)
+
+
+def place_hook(
+    session: Session,
+    item: Item,
+    choice: Choice,
+    *,
+    reserved: list[tuple[int, int]],
+    prove_seconds: float = ah.PROVE_SECONDS,
+    cancel: threading.Event | None = None,
+    on_install: Callable[[ObjectSpec, str], None] | None = None,
+) -> None:
+    """A new capture room and slot (never in ``reserved``, which gets the new rooms),
+    the slot checked for ``prove_seconds``, then the hook put in (``on_install`` hears
+    of it right away, so a later error or Cancel takes it out). The first write of a
+    bring-over. Raises CarryFailed, ScanCancelled."""
+    old, site, obj = item.old.hook, item.site, item.obj
+    if old is None or site is None:
+        raise CarryFailed(item.reason or NOT_FOUND)
+    game = session.require_game()
+    session.reserved_rooms = list(reserved)
+    cand = ah.HookCandidate(
+        game.module_base + site.offset, site.code, site.text, 0, old.role, old.reg, site.disp, True
+    )
+    try:
+        anchor = ah.plan_hook(session, cand, choice.vtable, choice.filter)
+        ah.prove_slot(session, game.module_base + anchor.slot, prove_seconds, cancel=cancel)
+    except (LockFailed, FindFailed) as exc:
+        raise CarryFailed(str(exc)) from exc
+    obj.vtable = choice.vtable
+    others = [a for a in obj.anchors if not isinstance(a, HookAnchor | VtableAnchor)]
+    obj.anchors = [anchor, *others]
+    if choice.vtable is not None:
+        obj.anchors.append(VtableAnchor())
+        obj.relearn_class = False
+    else:
+        reset_class(obj)
+    reserved.extend(ah.reserved_rooms([obj]))
+    session.reserved_rooms = list(reserved)
+    try:
+        state = ah.install(session, obj)
+    except FindFailed as exc:
+        raise CarryFailed(str(exc)) from exc
+    if on_install is not None:
+        on_install(obj, state)
+    log.info(
+        "action=carry_hook object=%s old=%#x new=%#x how=%s field_shift=%s cave=%#x slot=%#x "
+        "class=%s",
+        obj.id,
+        old.hook,
+        anchor.hook,
+        site.how,
+        f"{item.shift:#x}" if item.shift >= 0 else f"-{-item.shift:#x}",
+        anchor.cave,
+        anchor.slot,
+        "-" if choice.vtable is None else f"{choice.vtable:#x}",
+    )
+
+
+def locate(
+    session: Session,
+    obj: ObjectSpec,
+    *,
+    cancel: threading.Event | None = None,
+    sleep: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
+) -> rf.Outcome:
+    """Find the object with its new ways (no memory search, chains not counted yet).
+    ``disagree`` goes to the player (``ask_pick``, then ``rf.confirm_pick``)."""
+    return rf.find_again(
+        session,
+        obj,
+        use_scan=False,
+        learn_chains=False,
+        cancel=cancel,
+        sleep=sleep,
+        clock=clock,
+    )
+
+
+def _anchor_log(obj: ObjectSpec, kind: str, kept: bool, reason: str = "") -> None:
+    log.info(
+        "action=carry_anchor object=%s kind=%s result=%s%s",
+        obj.id,
+        kind,
+        "kept" if kept else "dropped",
+        f" reason={reason}" if reason else "",
+    )
+
+
+def settle(session: Session, obj: ObjectSpec, address: int | None) -> None:
+    """Keep only the ways that lead to ``address`` (AC-U5): a static place that is it,
+    memory paths that end there (counted as new), the hook just placed. No address:
+    every way is dropped (saved with no way to be found, AC-U7). Take a hook placed
+    in this run out *before* dropping it, or nothing knows where it is."""
+    if address is None:
+        for a in obj.anchors:
+            if isinstance(a, StaticAnchor | ChainAnchor):
+                _anchor_log(obj, a.kind, False, "not found")
+        obj.anchors = []
+        reset_class(obj)
+        return
+    game = session.require_game()
+    client = session.require_client()
+    read_u64 = ptr.u64_reader(lambda a, n: client.read(game.pid, a, n))
+    keep: list[pj.Anchor] = []
+    for a in obj.anchors:
+        if isinstance(a, StaticAnchor):
+            ok = game.module_base + a.off == address
+            _anchor_log(obj, "static", ok, "" if ok else "another place")
+        elif isinstance(a, ChainAnchor):
+            ok = _chain_object(obj, a, game.module_base, read_u64) == address
+            if ok:
+                a.runs_seen = 1
+            _anchor_log(obj, "chain", ok, "" if ok else "leads elsewhere")
+        elif isinstance(a, VtableAnchor):
+            ok = obj.vtable is not None
+        else:
+            ok = True
+        if ok:
+            keep.append(a)
+    obj.anchors = keep
+    if obj.hook is None and obj.vtable is not None:
+        reset_class(obj)
+
+
+def _chain_object(obj: ObjectSpec, a: ChainAnchor, base: int, read_u64) -> int | None:
+    try:
+        f = obj.field(a.field)
+    except KeyError:
+        return None
+    end = ptr.Chain(a.base, a.offsets).resolve(base, read_u64)
+    return None if end is None else end - f.off
+
+
 # -- fingerprints for the notes (AC-U2) -------------------------------------------------
 def _code_parts(project: Project) -> list[ProjectPart]:
     return [
@@ -574,22 +979,33 @@ __all__ = [
     "PART_FAILED",
     "CarryFailed",
     "CarryReport",
+    "Choice",
+    "Classes",
     "HookSite",
     "Item",
+    "NeedPick",
     "Plan",
     "Source",
+    "answer",
     "assemble",
     "carried_object",
+    "choose",
+    "collect_classes",
+    "drop_hook",
     "find_hook_site",
     "find_source",
     "for_merge",
     "hooks_to_learn",
     "learn_note_signatures",
     "list_sources",
+    "locate",
     "order_items",
     "part_rooms",
     "parts_to_learn",
+    "place_hook",
+    "prepare",
     "reset_class",
+    "settle",
     "shift_fields",
     "usable_version",
     "version_key",

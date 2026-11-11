@@ -110,3 +110,10 @@ def test_fight_drives_the_real_collect_on_v2():
     assert g.player in objs and len(objs) == 2 and set(objs) <= {g.player, *g.enemies}
     assert g.health() == 99.0
     assert g.fake.peek(fg.PID, g.layout.writer, 10) == g.layout.vmovss_w, "unhooked after"
+
+
+def test_fight_also_reads_through_the_reader():
+    g = fg.build(3, layout=fg.V2)
+    writer = Writer(g.layout.reader, g.layout.vmovss_r, "vmovss xmm0,[r12+2B4h]", 1)
+    objs = cv.collect_objects(g.session, writer, 0.5, sleep=g.fight(2))
+    assert objs == [g.player] and g.health() == 98.0, "two rounds"

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import struct
 
 import pytest
 
@@ -403,3 +404,390 @@ def test_project_file_untouched_by_reading_sources():
     cr.list_sources(fg.TITLE, "03.001.000")
     assert path.read_bytes() == before
     assert json.loads(before)["version"] == fg.VERSION
+
+
+# == live steps on the fake game, V1 notes -> V2 running (AC-U3..U7, AC-U11) ==============
+class Clock:
+    def __init__(self) -> None:
+        self.t = 0.0
+
+    def __call__(self) -> float:
+        return self.t
+
+    def sleep(self, s: float) -> None:
+        self.t += s
+
+
+def learned_v1(run: int = 1, filt: str = "vtable") -> pj.Project:
+    """Real old notes: Find it next time on V1, then fingerprints learned (AC-U2)."""
+    from cheatmaker.core import refind as rf
+
+    g = fg.build(run)
+    obj = rf.learn(
+        g.session,
+        g.health_addr,
+        ValueType.FLOAT,
+        "Health",
+        "obj1",
+        watch_seconds=1,
+        prove_seconds=1,
+    ).obj
+    obj.fields.append(pj.Field("Health 32", fg.HP32, ValueType.INT32, (0, 2**31 - 1), 100))
+    if filt == "field":  # a Player-only guess, no class
+        obj.vtable = None
+        obj.anchors = [a for a in obj.anchors if not isinstance(a, pj.VtableAnchor)]
+        obj.hook.filter = pj.HookFilter("field", 8, 0x40048)
+    p = notes(objects=[obj])
+    p.cheats = p.cheats[:1]
+    cr.learn_note_signatures(p, up.read_code_image(g.session), have={})
+    assert obj.hook.sig_unique
+    save(p)
+    return p
+
+
+def run_carry(old, game, *, pick=None, reserved=(), rounds=3, cancel=None):
+    """The steps the UI driver runs, in order (pick: what the player picks)."""
+    s = game.session
+    plan = cr.prepare(s, old, reserved=reserved)
+    found: dict[str, int | None] = {}
+    installed: list[pj.ObjectSpec] = []
+    for it in plan.items:
+        if it.site is not None:
+            try:
+                classes = cr.collect_classes(
+                    s, it, seconds=1, sleep=game.fight(rounds), reserved=plan.reserved
+                )
+                choice = cr.choose(s, classes, it)
+                if isinstance(choice, cr.NeedPick):
+                    choice = cr.answer(s, classes, choice, pick(choice) if pick else None)
+                cr.place_hook(
+                    s,
+                    it,
+                    choice,
+                    reserved=plan.reserved,
+                    prove_seconds=1,
+                    cancel=cancel,
+                    on_install=lambda o, _st: installed.append(o),
+                )
+            except cr.CarryFailed as exc:
+                cr.drop_hook(it, exc.reason)
+        c = Clock()
+        out = cr.locate(s, it.obj, sleep=c.sleep, clock=c)
+        addr = out.address if out.found else None
+        if addr is None and it.obj in installed:
+            ah.remove(s, it.obj, lambda _s: None)
+        cr.settle(s, it.obj, addr)
+        found[it.obj.id] = addr
+    new, report = cr.assemble(plan, found, {})
+    return plan, new, report, installed
+
+
+def test_v1_to_v2_one_class_is_taken_and_the_field_moves():
+    old = learned_v1(3)  # run 3: no enemies, one class
+    before = pj.project_path(fg.TITLE, fg.VERSION).read_bytes()
+    g = fg.build(3, layout=fg.V2)
+    plan, new, report, installed = run_carry(old, g)
+    [obj] = new.objects
+    assert obj.field("Health").off == 0x2B4 and obj.field("Health 32").off == fg.HP32 + 8
+    assert obj.vtable == fg.V2.player_vt - fg.BASE and obj.check and not obj.relearn_class
+    h = obj.hook
+    assert h.hook == fg.V2.reader - fg.BASE and h.disp == 0x2B4 and h.orig == fg.V2.vmovss_r
+    assert h.filter.kind == "vtable" and obj.anchors_of(pj.VtableAnchor)
+    assert installed == [obj] and g.fake.peek(fg.PID, fg.V2.reader, 1) == b"\xe9"
+    assert report.carried == ["Infinite health"] and not report.failed
+    assert new.carried_from == fg.VERSION and new.version == "03.001.000"
+    assert plan.items[0].site.how == "loose" and plan.items[0].shift == 8
+    assert pj.project_path(fg.TITLE, fg.VERSION).read_bytes() == before, "old notes unchanged"
+    assert old.objects[0].field("Health").off == fg.HP, "the old notes object is untouched"
+
+
+def test_two_classes_need_a_pick():
+    old = learned_v1(1)
+    g = fg.build(1, layout=fg.V2)
+    asked = []
+
+    def pick(need):
+        asked.append(need)
+        return g.player
+
+    _plan, new, report, _ = run_carry(old, g, pick=pick)
+    [need] = asked
+    assert need.kind == "class" and len(need.options) == 2
+    assert {o.address for o in need.options} >= {g.player}
+    assert new.objects[0].vtable == fg.V2.player_vt - fg.BASE
+    assert report.carried == ["Infinite health"]
+
+
+def test_no_pick_fails_the_hook_and_keeps_the_object():
+    old = learned_v1(1)
+    g = fg.build(1, layout=fg.V2)
+    _plan, new, report, installed = run_carry(old, g, pick=lambda _n: None)
+    assert installed == [] and g.fake.peek(fg.PID, fg.V2.reader, 10) == fg.V2.vmovss_r
+    [obj] = new.objects
+    assert obj.anchors == [] and obj.vtable is None and obj.relearn_class, "saved, no way"
+    assert report.failed == {"Infinite health": cr.NOT_PICKED}
+
+
+def test_the_old_class_is_taken_on_a_dry_run():
+    old = learned_v1(1)
+    dry = dataclasses.replace(fg.V1, version="03.000.004")
+    g = fg.build(1, layout=dry)
+    plan, new, report, _ = run_carry(old, g, pick=lambda _n: pytest.fail("no pick on a dry run"))
+    obj = new.objects[0]
+    assert plan.items[0].site.how == "exact" and plan.items[0].shift == 0
+    assert obj.vtable == fg.PLAYER_VT - fg.BASE and obj.field("Health").off == fg.HP
+    assert obj.hook.hook == old.objects[0].hook.hook
+    assert (obj.hook.cave, obj.hook.slot) != (old.objects[0].hook.cave, old.objects[0].hook.slot)
+    assert report.carried == ["Infinite health"]
+
+
+def test_nothing_touched_fails_plainly():
+    old = learned_v1(3)
+    g = fg.build(3, layout=fg.V2)
+    _plan, new, report, installed = run_carry(old, g, rounds=0)
+    assert installed == [] and report.failed == {
+        "Infinite health": "nothing in the game touched it while we watched"
+    }
+    assert new.objects[0].anchors == []
+    assert g.fake.peek(fg.PID, fg.V2.reader, 10) == fg.V2.vmovss_r, "collect unhooked"
+
+
+def test_player_only_guess_is_made_again():
+    old = learned_v1(1, filt="field")
+    g = fg.build(1, layout=fg.V2)
+    _plan, new, report, _ = run_carry(old, g, pick=lambda _n: pytest.fail("one player"))
+    h = new.objects[0].hook
+    assert h.filter.kind == "field" and new.objects[0].vtable is None
+    (mine,) = struct.unpack("<I", g.fake.peek(fg.PID, g.player + h.filter.off, 4))
+    assert mine == h.filter.value
+    for e in g.enemies:
+        (theirs,) = struct.unpack("<I", g.fake.peek(fg.PID, e + h.filter.off, 4))
+        assert theirs != h.filter.value
+    assert report.carried == ["Infinite health"]
+
+
+def test_player_only_guess_with_no_match_fails():
+    old = learned_v1(1, filt="field")
+    old.objects[0].hook.filter = pj.HookFilter("field", 8, 0x12345)
+    g = fg.build(1, layout=fg.V2)
+    _plan, _new, report, installed = run_carry(old, g)
+    assert installed == [] and "nothing in the game touched" in report.failed["Infinite health"]
+
+
+def test_slot_written_by_the_game_fails_the_proof_and_nothing_goes_in():
+    from cheatmaker.console.client import WatchHit
+
+    old = learned_v1(3)
+    g = fg.build(3, layout=fg.V2)
+    plan = cr.prepare(g.session, old)
+    it = plan.items[0]
+    classes = cr.collect_classes(g.session, it, seconds=1, sleep=g.fight(), reserved=plan.reserved)
+    choice = cr.choose(g.session, classes, it)
+    from cheatmaker.core import cave as cv
+
+    g.session.reserved_rooms = list(plan.reserved)
+    g.fake.write_hits[cv.find_slot(g.session)] = [WatchHit(fg.BASE + 0x500)]
+    with pytest.raises(cr.CarryFailed, match="uses the spare memory"):
+        cr.place_hook(g.session, it, choice, reserved=plan.reserved, prove_seconds=1)
+    assert g.fake.peek(fg.PID, fg.V2.reader, 10) == fg.V2.vmovss_r
+
+
+def test_cancel_in_collect_prove_and_locate_leaves_no_jump():
+    import threading
+
+    from cheatmaker.errors import ScanCancelled
+
+    old = learned_v1(3)
+    g = fg.build(3, layout=fg.V2)
+    plan = cr.prepare(g.session, old)
+    it = plan.items[0]
+    stop = threading.Event()
+    stop.set()
+    with pytest.raises(ScanCancelled):
+        cr.collect_classes(g.session, it, seconds=1, cancel=stop, sleep=g.fight())
+    assert g.fake.peek(fg.PID, fg.V2.reader, 10) == fg.V2.vmovss_r
+    classes = cr.collect_classes(g.session, it, seconds=1, sleep=g.fight(), reserved=plan.reserved)
+    choice = cr.choose(g.session, classes, it)
+    with pytest.raises(ScanCancelled):
+        cr.place_hook(g.session, it, choice, reserved=plan.reserved, prove_seconds=1, cancel=stop)
+    assert g.fake.peek(fg.PID, fg.V2.reader, 10) == fg.V2.vmovss_r, "not put in"
+    put = []
+    cr.place_hook(
+        g.session,
+        it,
+        choice,
+        reserved=plan.reserved,
+        prove_seconds=1,
+        on_install=lambda o, s: put.append(s),
+    )
+    assert put == ["installed"]
+    c = Clock()
+    g.capture_ticks = False  # the slot stays empty: locate waits until Cancel
+    out = cr.locate(g.session, it.obj, cancel=stop, sleep=c.sleep, clock=c)
+    assert not out.found and c.t < 1, "stopped at once"
+    ah.remove(g.session, it.obj, lambda _s: None)  # what the driver's rollback does
+    assert g.fake.peek(fg.PID, fg.V2.reader, 10) == fg.V2.vmovss_r
+
+
+def test_nothing_is_written_before_place_hook():
+    old = learned_v1(1)
+    old.cheats.append(
+        combined(pj.ProjectPart("nop", offset=fg.SUB_SITE - fg.BASE, on=b"\x90" * 6, off=fg.SUB_W))
+    )
+    g = fg.build(1, layout=fg.V2)
+    g.fake.writes.clear()
+    cr.prepare(g.session, old)
+    assert g.fake.writes == []
+
+
+# -- static values and memory paths (AC-U5) ------------------------------------------------
+def static_notes() -> pj.Project:
+    p = notes(objects=[obolites()])
+    p.cheats = p.cheats[1:]
+    return p
+
+
+def test_static_at_the_same_offset_is_kept_without_any_hook_or_code_read():
+    g = fg.build(layout=fg.V2, static=True)
+    g.fake.watched.clear()
+    plan, new, report, installed = run_carry(static_notes(), g)
+    assert plan.image is None, "no hooks, no code parts: the code isn't read"
+    assert installed == [] and g.fake.watched == [] and g.fake.writes == []
+    [obj] = new.objects
+    assert obj.anchors == [pj.StaticAnchor(fg.DATA + 0x40 - fg.BASE)] and obj.check
+    assert report.carried == ["Rich"]
+
+
+def test_static_that_moved_fails_and_is_saved_with_no_way():
+    moved = dataclasses.replace(fg.V2, static_off=fg.DATA + 0x60)
+    g = fg.build(layout=moved, static=True)
+    g.fake.poke(fg.PID, fg.DATA + 0x40, struct.pack("<i", -5))  # something else is there now
+    _plan, new, report, _ = run_carry(static_notes(), g)
+    assert new.objects[0].anchors == [] and report.failed == {"Rich": cr.NOT_FOUND}
+
+
+def chain_notes(extra=()) -> pj.Project:
+    chain = pj.ChainAnchor(fg.STATIC_PTR - fg.BASE, (0x10, fg.HP), "Health", runs_seen=3)
+    obj = health([chain, *extra], vtable=fg.PLAYER_VT - fg.BASE)
+    obj.fields = obj.fields[:1]
+    obj.anchors.append(pj.VtableAnchor())
+    return notes(objects=[obj])
+
+
+def test_chain_that_still_leads_there_is_kept_as_new():
+    dry = dataclasses.replace(fg.V1, version="03.000.006")
+    g = fg.build(layout=dry, chain=True)
+    p = chain_notes()
+    p.cheats = p.cheats[:1]
+    _plan, new, report, installed = run_carry(p, g)
+    [obj] = new.objects
+    [chain] = obj.anchors_of(pj.ChainAnchor)
+    assert chain.runs_seen == 1 and installed == []
+    assert obj.vtable is None and obj.relearn_class and not obj.anchors_of(pj.VtableAnchor)
+    assert obj.field("Health").range == (0, 10_000)
+    assert report.carried == ["Infinite health"]
+    assert p.objects[0].anchors_of(pj.ChainAnchor)[0].runs_seen == 3
+
+
+def test_chain_that_leads_nowhere_is_dropped():
+    moved = dataclasses.replace(fg.V2, chain_root=fg.DATA + 0x28)
+    g = fg.build(layout=moved, chain=True)
+    p = chain_notes()
+    p.cheats = p.cheats[:1]
+    _plan, new, report, _ = run_carry(p, g)
+    assert new.objects[0].anchors == [] and report.failed == {"Infinite health": cr.NOT_FOUND}
+
+
+def test_settle_keeps_only_ways_that_lead_to_the_address():
+    g = fg.build(chain=True)
+    good = pj.ChainAnchor(fg.STATIC_PTR - fg.BASE, (0x10, fg.HP), "Health", runs_seen=5)
+    bad = pj.ChainAnchor(fg.STATIC_PTR - fg.BASE, (0x18, fg.HP), "Health")
+    obj = health([pj.StaticAnchor(0x10), good, bad, pj.VtableAnchor()])
+    cr.settle(g.session, obj, g.player)
+    assert obj.anchors == [good] and good.runs_seen == 1
+    assert obj.vtable is None and obj.relearn_class, "no hook: its class is learned at the Yes"
+    hooked = health()
+    cr.settle(g.session, hooked, g.player)
+    assert hooked.anchors == health().anchors, "a placed hook and its class stay"
+    cr.settle(g.session, hooked, None)
+    assert hooked.anchors == [] and hooked.vtable is None
+
+
+# -- fixed code parts (AC-U6) and rooms ------------------------------------------------------
+CAVE_OFF = fg.CODE_SIZE - 0x900  # an old cave in the spare zeros
+
+
+def cave_cheat() -> pj.ProjectCheat:
+    """A combined cheat: a learned part, a jump over the game's sub and a cave."""
+    site = fg.SUB_SITE - fg.BASE
+    jmp = b"\xe9" + struct.pack("<i", CAVE_OFF - (site + 5)) + b"\x90"
+    back = b"\xe9" + struct.pack("<i", site + 6 - (CAVE_OFF + 6 + 5))
+    cave = fg.SUB_W + back
+    return pj.ProjectCheat(
+        "God",
+        parts=[
+            pj.ProjectPart("health", "obj1", "Health", 999.0),
+            pj.ProjectPart("jump", offset=site, on=jmp, off=fg.SUB_W),
+            pj.ProjectPart("cave", offset=CAVE_OFF, on=cave, off=bytes(len(cave))),
+        ],
+    )
+
+
+def parts_notes() -> pj.Project:
+    p = learned_v1(3)
+    p.cheats.append(cave_cheat())
+    g = fg.build(3)
+    _n, sigs = cr.learn_note_signatures(p, up.read_code_image(g.session), have={})
+    up.save_signatures(up.signatures_path(fg.TITLE, fg.VERSION), fg.TITLE, fg.VERSION, sigs)
+    save(p)
+    return p
+
+
+def _overlap(a: tuple[int, int], b: tuple[int, int]) -> bool:
+    return a[0] < b[1] and b[0] < a[1]
+
+
+def test_code_part_moved_by_its_fingerprint_with_rooms_kept_apart():
+    old = parts_notes()
+    sig_file = up.signatures_path(fg.TITLE, fg.VERSION)
+    sig_before = sig_file.read_bytes()
+    shifted = dataclasses.replace(fg.V2, field_shift=0)  # code moved, the sub didn't change
+    g = fg.build(3, layout=shifted)
+    open_line = (fg.CODE_SIZE - 0x1000, fg.CODE_SIZE - 0xE00)  # a cheat open in My cheats
+    _plan, new, report, _ = run_carry(old, g, reserved=[open_line])
+    god = new.cheats[1]
+    jump, cave = god.parts[1], god.parts[2]
+    assert god.test and report.carried == ["Infinite health", "God"] and not report.guessed
+    assert jump.offset == fg.SUB_SITE - fg.BASE + 0x80 and jump.off == fg.SUB_W
+    assert jump.offset + 5 + struct.unpack("<i", jump.on[1:5])[0] == cave.offset
+    assert cave.offset + 6 + 5 + struct.unpack("<i", cave.on[7:11])[0] == jump.offset + 6
+    part_room = (cave.offset, cave.offset + len(cave.on))
+    h = new.objects[0].hook
+    new_rooms = ah.reserved_rooms(new.objects)
+    old_rooms = [*ah.reserved_rooms(old.objects), (CAVE_OFF, CAVE_OFF + len(cave.on))]
+    for room in new_rooms:
+        assert not _overlap(room, part_room)
+        assert not _overlap(room, open_line)
+        assert not any(_overlap(room, o) for o in old_rooms), "never the old offsets"
+    assert not _overlap(part_room, open_line)
+    assert not any(_overlap(part_room, o) for o in old_rooms)
+    assert h.hook == shifted.reader - fg.BASE
+    assert sig_file.read_bytes() == sig_before, "the old fingerprints are only read"
+
+
+def test_code_part_fails_when_the_code_changed():
+    old = parts_notes()
+    g = fg.build(3, layout=fg.V2)  # the sub now reads +2B8h: its fingerprint doesn't match
+    _plan, new, report, _ = run_carry(old, g)
+    assert [c.name for c in new.cheats] == ["Infinite health"]
+    assert report.failed["God"].startswith("part jump couldn't be found (code at +")
+    assert report.carried == ["Infinite health"]
+
+
+def test_code_part_in_another_module_fails():
+    old = learned_v1(3)
+    pc = cave_cheat()
+    pc.parts[1].module = "libother.prx"
+    old.cheats.append(pc)
+    _plan, _new, report, _ = run_carry(old, fg.build(3, layout=fg.V2))
+    assert report.failed["God"] == cr.OTHER_MODULE
