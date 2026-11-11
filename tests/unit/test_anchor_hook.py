@@ -259,3 +259,22 @@ def test_keep_value_cheat_value_is_editable_and_survives_a_file():
     cave, jmp = loaded.locations
     assert cave.off == cave.on, "off leaves the edited routine in place"
     assert jmp.off == fg.VMOVSS_R, "off still puts the game's instruction back"
+
+
+def test_cancel_ends_the_watches():  # spec-restart-combined AC-2: Cancel stops quickly
+    import threading
+
+    from cheatmaker.errors import ScanCancelled
+
+    game = fg.build()
+    cancel = threading.Event()
+    assert ah.find_hooks(game.session, game.health_addr, 4, cancel=cancel)
+    assert game.fake.until_answers == [False], "asked: not cancelled, keeps watching"
+    cancel.set()
+    ah.find_hooks(game.session, game.health_addr, 4, cancel=cancel)
+    assert game.fake.until_answers[-1] is True, "the watch ends at once"
+    slot = cv.find_slot(game.session)
+    with pytest.raises(ScanCancelled):
+        ah.prove_slot(game.session, slot, seconds=1, cancel=cancel)
+    assert game.fake.until_answers[-1] is True
+    ah.prove_slot(game.session, slot, seconds=1, cancel=threading.Event())  # not pressed

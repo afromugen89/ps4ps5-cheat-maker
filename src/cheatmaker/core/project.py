@@ -19,6 +19,7 @@ All offsets marked "module" are from the module base, so they hold across restar
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import math
 from dataclasses import dataclass, field
@@ -32,7 +33,8 @@ FORMAT = "cheatmaker-project"
 # 2: a hook's routine has a spare room below it for the keep-value (PC-off) routine.
 # Hooks saved by format 1 don't, so they are dropped on load (found again by memory
 # search until the player presses Find it next time again).
-FORMAT_VERSION = 2
+# 3: a cheat may be combined: its "parts" are learned fields and fixed byte patches.
+FORMAT_VERSION = 3
 CLASS_FLOAT_LIMIT = 1e9  # top of a float's plausible range when the class is checked
 EXTENSION = ".cmproj"
 
@@ -295,15 +297,111 @@ class ObjectSpec:
         )
 
 
+PART_KINDS = ("code_patch", "module_value")  # the fixed parts a combined cheat saves
+
+
+def _bytes(v: object, what: str) -> bytes:
+    return bytes.fromhex(_str(v, what))
+
+
 @dataclass
-class ProjectCheat:
+class ProjectPart:
+    """One part of a combined cheat. Learned: found again each run by ``object`` and
+    ``field``, written with ``value``. Fixed: bytes in the game's module."""
+
     name: str
-    object: str
-    field: str
-    action: Literal["freeze", "set"]
-    value: float | int
+    object: str | None = None
+    field: str | None = None
+    value: float | int = 0
+    kind: str = "code_patch"
+    module: str = "eboot.bin"
+    section: int = 0
+    offset: int = 0
+    on: bytes = b""
+    off: bytes = b""
+    vtype: ValueType | None = None
+
+    @property
+    def learned(self) -> bool:
+        return self.object is not None
 
     def to_json(self) -> dict:
+        if self.learned:
+            return {
+                "name": self.name,
+                "object": self.object,
+                "field": self.field,
+                "value": self.value,
+            }
+        d: dict = {
+            "name": self.name,
+            "kind": self.kind,
+            "module": self.module,
+            "section": self.section,
+            "offset": _hex(self.offset),
+            "on": self.on.hex(),
+            "off": self.off.hex(),
+        }
+        if self.vtype is not None:
+            d["type"] = self.vtype.name.lower()
+        return d
+
+    @classmethod
+    def from_json(cls, d: dict) -> ProjectPart:
+        d = _dict(d, "a cheat part")
+        name = _str(d["name"], "a part name")
+        if "object" in d:
+            return cls(
+                name,
+                _str(d["object"], "a part's object"),
+                _str(d["field"], "a part's field"),
+                _number(d["value"], "a part value"),
+            )
+        kind = _str(d["kind"], "a part kind")
+        if kind not in PART_KINDS:
+            raise ValueError(f"unknown part kind {kind!r}")
+        on, off = _bytes(d["on"], "a part's bytes"), _bytes(d["off"], "a part's bytes")
+        if not on or len(on) != len(off):
+            raise ValueError("a part's on and off bytes must be the same length")
+        vt = d.get("type")
+        return cls(
+            name,
+            kind=kind,
+            module=_str(d.get("module", "eboot.bin"), "a part's module"),
+            section=int(d.get("section", 0)),
+            offset=_int(d["offset"]),
+            on=on,
+            off=off,
+            vtype=None if vt is None else ValueType[_str(vt, "a part type").upper()],
+        )
+
+
+@dataclass
+class ProjectCheat:
+    """A live cheat built on the notes: one field (``object``/``field``/``value``) or,
+    for a combined cheat, its ``parts`` in order."""
+
+    name: str
+    object: str = ""
+    field: str = ""
+    action: Literal["freeze", "set"] = "freeze"
+    value: float | int = 0
+    parts: list[ProjectPart] = dataclasses.field(default_factory=list)
+
+    @property
+    def anchors(self) -> list[tuple[str, str]]:
+        """Every (object id, field) this cheat is found again by."""
+        if not self.parts:
+            return [(self.object, self.field)]
+        return [(p.object, p.field) for p in self.parts if p.object is not None and p.field]
+
+    def to_json(self) -> dict:
+        if self.parts:
+            return {
+                "name": self.name,
+                "action": self.action,
+                "parts": [p.to_json() for p in self.parts],
+            }
         return {
             "name": self.name,
             "object": self.object,
@@ -317,8 +415,14 @@ class ProjectCheat:
         d = _dict(d, "a cheat")
         if d["action"] not in ("freeze", "set"):
             raise ValueError(f"unknown action {d['action']!r}")
+        name = _str(d["name"], "a cheat name")
+        if "parts" in d:
+            parts = [ProjectPart.from_json(p) for p in _list(d["parts"], "parts")]
+            if not parts:
+                raise ValueError("a combined cheat has no parts")
+            return cls(name, action=d["action"], parts=parts)
         return cls(
-            _str(d["name"], "a cheat name"),
+            name,
             _str(d["object"], "a cheat's object"),
             _str(d["field"], "a cheat's field"),
             d["action"],
@@ -476,6 +580,7 @@ __all__ = [
     "ObjectSpec",
     "Project",
     "ProjectCheat",
+    "ProjectPart",
     "StaticAnchor",
     "VtableAnchor",
     "load",

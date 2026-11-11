@@ -8,9 +8,11 @@ import struct
 import pytest
 from PySide6.QtCore import Qt
 
+from cheatmaker.console.client import WatchHit
+from cheatmaker.core import anchor_hook as ah
 from cheatmaker.core import project as pj
 from cheatmaker.core import refind as rf
-from cheatmaker.core.cheats import Cheat, Location, LocationKind
+from cheatmaker.core.cheats import Cheat, Location, LocationKind, combine
 from cheatmaker.core.values import ValueType
 from cheatmaker.settings import Settings
 from cheatmaker.ui import hints
@@ -527,3 +529,638 @@ def test_late_no_after_the_question_answered_itself_keeps_the_cheat(win, console
     win.cheats.finder.ask_confirm = answer
     win.cheats.finder.check_pending()
     assert cheat.enabled and tracker.address == old and tracker.ignored == set()
+
+
+# -- combined cheats that survive restarts (spec-restart-combined) ----------------------
+COMBINED = "Infinite Health + fraction"
+
+
+def add_found_fraction(w, value: int = 77) -> Cheat:
+    """A second found-again value in the player object (whole-number health)."""
+    obj = w.ctl.project.objects[0]
+    obj.fields.append(pj.Field("fraction", fg.HP32, ValueType.INT32, (0, 10_000), 100))
+    w.cheats.finder.save()
+    raw = struct.pack("<i", value)
+    c = Cheat(
+        "fraction",
+        [Location(LocationKind.SESSION_ADDRESS, 0, raw, raw)],
+        freeze=True,
+        value_type=ValueType.INT32,
+        anchor=("obj1", "fraction"),
+    )
+    w.ctl.ensure_file().cheats.append(c)
+    w.ctl.cheats_changed.emit()
+    return c
+
+
+def combine_all(w) -> Cheat:
+    w.cheats.table.selectAll()
+    w.cheats.combine_btn.click()
+    [c] = w.ctl.cheat_file.cheats
+    return c
+
+
+def combined_found_again(win, console) -> Cheat:
+    connect(win)
+    learn(win, add_health_cheat(win, console.game))
+    add_found_fraction(win)
+    return combine_all(win)
+
+
+def test_combine_found_again_cheats_saves_one_entry(win, console):  # AC-1, AC-5
+    c = combined_found_again(win, console)
+    assert c.name == COMBINED and c.found_again
+    assert win.cheats.table.item(0, COL_KEEPS).text() == FOUND_AGAIN
+    saved = pj.load(pj.project_path(fg.TITLE, fg.VERSION))
+    [entry] = saved.cheats  # the parts' own entries are gone
+    assert entry.anchors == [("obj1", "Infinite Health"), ("obj1", "fraction")]
+    assert [p.value for p in entry.parts] == [999.0, 77] and entry.action == "freeze"
+    assert [o.id for o in saved.objects] == ["obj1"], "objects stay"
+
+
+def test_restart_brings_one_row_one_line_one_question(win, console):  # AC-3
+    combined_found_again(win, console)
+    win.ctl.shutdown()
+    run2 = console.restart(2)
+    connect(win)
+    [c] = win.ctl.cheat_file.cheats
+    assert c.name == COMBINED and [p.part for p in c.locations] == ["Infinite Health", "fraction"]
+    assert not c.enabled and c.freeze
+    status = win.status.text()
+    assert status.startswith(f"Ready: {COMBINED} found again (2 parts, ")
+    assert "Infinite Health found again by" not in status, "no line of its own"
+    asked = []
+    win.cheats.finder.ask_confirm = lambda text: asked.append(text) or True
+    tick(win)
+    assert asked == [
+        hints.CONFIRM_PARTS.format(
+            name=COMBINED, values="Infinite Health shows 100.00, fraction shows 100"
+        )
+    ]
+    assert run2.health() == 999.0 and run2.value(run2.player, "int32") == 77
+    run2.set_health(3.0)
+    run2.set_value(run2.player, 5, "int32")
+    win.ctl.freezer.tick()
+    assert run2.health() == 999.0 and run2.value(run2.player, "int32") == 77
+    win.cheats.table.item(0, COL_ON).setCheckState(Qt.CheckState.Unchecked)
+    tick(win)
+    assert len(asked) == 1, "asked once per run"
+
+
+def test_combined_confirm_no_writes_nothing(win, console):  # AC-3
+    combined_found_again(win, console)
+    win.ctl.shutdown()
+    run2 = console.restart(2)
+    connect(win)
+    win.cheats.finder.ask_confirm = lambda text: False
+    tick(win)
+    assert all(a not in (run2.health_addr, run2.player + fg.HP32) for _p, a, _d in run2.fake.writes)
+    assert not win.ctl.cheat_file.cheats[0].enabled
+    assert win.status.text() == hints.CONFIRM_NO.format(name=COMBINED)
+
+
+def test_combined_part_not_found_says_so_and_writes_nothing(win, console):  # AC-3
+    combined_found_again(win, console)
+    win.ctl.shutdown()
+    run2 = console.restart(2)
+    run2.fake.poke(fg.PID, run2.player, bytes(0x300))
+    connect(win)
+    assert win.status.text().startswith(
+        hints.COMBINED_NOT_FOUND.format(part="Infinite Health", name=COMBINED)
+    )
+    assert win.tabs.currentWidget() is win.find
+    assert win.find.vtype.currentData() is ValueType.FLOAT and win.find.number.text() == "100"
+    tick(win)
+    assert win.status.text() == (
+        f"{COMBINED}: Infinite Health isn't found right now, so nothing was changed. "
+        "Press Find it again."
+    )
+    assert run2.fake.writes == [] or all(
+        a >= fg.BASE and a < fg.HEAP for _p, a, _d in run2.fake.writes
+    )
+    assert not win.ctl.cheat_file.cheats[0].enabled
+
+
+def test_combined_follows_a_move_and_hook_rules(win, console):  # AC-4
+    combined_found_again(win, console)
+    win.ctl.shutdown()
+    run2 = console.restart(2)
+    connect(win)
+    tick(win)
+    fake = run2.fake
+    assert fake.peek(fg.PID, fg.READER, 1) == b"\xe9", "hook in while it is on"
+    run2.move_player(fg.HEAP + 0x6000)
+    tracker = win.ctl.live.trackers["obj1"]
+    for _ in range(3):
+        fake.read(fg.PID, fg.BASE, 1)  # a frame runs: the hook sees the new object
+        tracker._last_try = -10.0
+        win.ctl.freezer.tick()
+    assert tracker.address == run2.player
+    assert run2.health() == 999.0 and run2.value(run2.player, "int32") == 77
+    win.cheats.table.item(0, COL_ON).setCheckState(Qt.CheckState.Unchecked)
+    assert fake.peek(fg.PID, fg.READER, 10) == fg.VMOVSS_R, "last cheat off: hook out"
+    assert run2.health() == 999.0, "learned parts are left as they are"
+
+
+def test_combined_moved_question_names_the_part(win, console):  # AC-4
+    c = combined_found_again(win, console)
+    tick(win)
+    tracker = win.ctl.live.trackers["obj1"]
+    asked = []
+    win.cheats.finder.ask_confirm = lambda text: asked.append(text) or False
+    tracker.pending = console.game.player
+    win.cheats.finder.check_pending()
+    assert asked[0].startswith(f"Infinite Health (part of {COMBINED}) moved")
+    assert not c.enabled, "No turns the whole cheat off"
+
+
+def test_delete_combined_keeps_the_objects(win, console):  # AC-5
+    combined_found_again(win, console)
+    win.cheats.table.selectRow(0)
+    win.cheats.delete_btn.click()
+    saved = pj.load(pj.project_path(fg.TITLE, fg.VERSION))
+    assert saved.cheats == [] and [o.id for o in saved.objects] == ["obj1"]
+
+
+def test_notes_with_a_missing_part_leave_the_combined_cheat_out(win, console):
+    combined_found_again(win, console)
+    win.ctl.shutdown()
+    path = pj.project_path(fg.TITLE, fg.VERSION)
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    doc["objects"][0]["fields"] = doc["objects"][0]["fields"][:1]  # fraction is gone
+    path.write_text(json.dumps(doc), encoding="utf-8")
+    win.ctl.cheat_file.cheats.clear()  # a fresh app
+    console.restart(2)
+    connect(win)
+    assert win.ctl.cheat_file.cheats == []
+
+
+# -- Find it next time on a combined cheat (AC-2) ----------------------------------------
+
+
+def session_part(w, name, addr, vt: ValueType, value) -> Cheat:
+    raw = vt.encode(value)
+    c = Cheat(
+        name,
+        [Location(LocationKind.SESSION_ADDRESS, addr, raw, raw)],
+        freeze=True,
+        value_type=vt,
+    )
+    w.ctl.ensure_file().cheats.append(c)
+    return c
+
+
+def fraction_in_player(game: fg.Game) -> int:
+    """The game's death check touches the whole-number health too: sub [rax+2B0h]."""
+    addr = game.player + fg.HP32
+    game.fake.write_hits[addr] = [WatchHit(fg.SUB_SITE + 6, {"rax": game.player})]
+    return addr
+
+
+def money_in_enemy(game: fg.Game) -> int:
+    """A value in another object (another class): mov [rbx+2B8h],rcx."""
+    e = game.enemies[0]
+    game.fake.write_hits[e + fg.HP64] = [WatchHit(fg.MOV64_SITE + 7, {"rbx": e})]
+    return e + fg.HP64
+
+
+def two_moving(w, game, second=fraction_in_player, vt=ValueType.INT32) -> Cheat:
+    a = session_part(w, "health", game.health_addr, ValueType.FLOAT, 999.0)
+    b = session_part(w, "fraction", second(game), vt, 77)
+    w.ctl.cheat_file.cheats[:] = [combine([a, b], name="Health")]
+    w.ctl.cheats_changed.emit()
+    w.cheats.table.selectRow(0)
+    return w.ctl.cheat_file.cheats[0]
+
+
+def test_one_start_learns_both_parts_in_one_object(win, console):  # AC-2
+    connect(win)
+    c = two_moving(win, console.game)
+    assert win.cheats.learn_btn.isEnabled()
+    dlg = LearnDialog(win.ctl, win.cheats.finder, c, win)
+    assert "about 70 s per part" in dlg.hint.text() and "health and fraction" in dlg.hint.text()
+    assert dlg.pc_off_btn.isHidden()
+    steps = []
+    dlg._step.done.connect(steps.append)
+    dlg.start_btn.click()
+    assert (1, "watch") in steps and (2, "watch") in steps
+    assert steps.index((1, "watch")) < steps.index((2, "watch")), "one after another"
+    assert dlg.hint.text().startswith(
+        "Ready: health will be found by the game's code; fraction will be found by the game's code."
+    )
+    assert dlg.pc_off_btn.isHidden() and dlg.progress.value() == 100
+    [obj] = win.ctl.project.objects  # same start and class: one object, two fields
+    assert [f.name for f in obj.fields] == ["health", "fraction"]
+    assert len(obj.anchors_of(pj.HookAnchor)) == 1
+    assert [loc.anchor for loc in c.locations] == [(obj.id, "health"), (obj.id, "fraction")]
+    assert all(loc.offset == 0 for loc in c.locations)
+    assert c.found_again and win.cheats.table.item(0, COL_KEEPS).text() == FOUND_AGAIN
+    saved = pj.load(pj.project_path(fg.TITLE, fg.VERSION))
+    [entry] = saved.cheats
+    assert entry.name == "Health" and [p.value for p in entry.parts] == [999.0, 77]
+    dlg._on_step((2, "watch"))
+    assert dlg.hint.text() == (
+        "Part 2 of 2: fraction. Watching which part of the game uses fraction... play "
+        "normally, take a hit."
+    )
+
+    win.ctl.shutdown()
+    run2 = console.restart(2)
+    connect(win)
+    assert win.status.text().startswith("Ready: Health found again (2 parts, ")
+    tick(win)
+    assert run2.health() == 999.0 and run2.value(run2.player, "int32") == 77
+
+
+def test_two_objects_get_different_rooms_and_hooks(win, console):  # AC-2
+    connect(win)
+    c = two_moving(win, console.game, money_in_enemy, ValueType.INT64)
+    learn(win, c)
+    a, b = win.ctl.project.objects
+    assert a.id != b.id and a.vtable != b.vtable
+    ha, hb = a.hook, b.hook
+    assert ha.slot != hb.slot
+    rooms_a = ah.reserved_rooms([a])
+    rooms_b = ah.reserved_rooms([b])
+    assert not any(x0 < y1 and y0 < x1 for x0, x1 in rooms_a for y0, y1 in rooms_b)
+    fake = console.game.fake
+    assert (
+        fake.peek(fg.PID, fg.READER, 1) == b"\xe9"
+        and fake.peek(fg.PID, fg.MOV64_SITE, 1) == b"\xe9"
+    )
+    win.ctl.shutdown()
+    assert fake.peek(fg.PID, fg.MOV64_SITE, 7) == fg.MOV64_W
+
+
+def test_part_that_cant_be_learned_changes_nothing(win, console):  # AC-2
+    connect(win)
+    game = console.game
+    nowhere = fg.HEAP + 0xE000  # nothing in the game touches it
+    game.fake.poke(fg.PID, nowhere, struct.pack("<i", 5))
+    c = two_moving(win, game, lambda g: nowhere)
+    rooms = list(win.ctl.session.reserved_rooms)
+    dlg = learn(win, c)
+    want = (
+        "Couldn't learn fraction (part 2 of 2): nothing in the game touched the value while "
+        "we watched. Nothing was changed."
+    )
+    assert dlg.hint.text() == want and win.status.text() == want
+    assert win.ctl.project is None or win.ctl.project.objects == []
+    assert win.ctl.session.reserved_rooms == rooms
+    assert [loc.anchor for loc in c.locations] == [None, None] and len(c.moving_parts) == 2
+    assert win.cheats.table.item(0, COL_KEEPS).text() == "This session only"
+    assert game.fake.peek(fg.PID, fg.READER, 10) == fg.VMOVSS_R
+    assert dlg.start_btn.isEnabled(), "can try again"
+
+
+def test_cancel_takes_out_every_hook_put_in(win, console, monkeypatch):  # AC-2
+    connect(win)
+    c = two_moving(win, console.game, money_in_enemy, ValueType.INT64)
+    dlg = LearnDialog(win.ctl, win.cheats.finder, c, win)
+    real = ah.install
+
+    def install_then_cancel(session, obj):
+        state = real(session, obj)
+        dlg.do_cancel()  # the player presses Cancel after the first hook went in
+        return state
+
+    monkeypatch.setattr(ah, "install", install_then_cancel)
+    dlg.start_btn.click()
+    fake = console.game.fake
+    assert fake.peek(fg.PID, fg.READER, 10) == fg.VMOVSS_R, "taken out again"
+    assert fake.peek(fg.PID, fg.MOV64_SITE, 7) == fg.MOV64_W
+    assert win.cheats.finder.installed == {}
+    assert dlg.hint.text() == (
+        "Couldn't learn fraction (part 2 of 2): you pressed Cancel. Nothing was changed."
+    )
+    assert win.ctl.project is None or win.ctl.project.cheats == []
+    assert len(c.moving_parts) == 2 and not dlg.cancel_btn.isEnabled()
+
+
+def test_cancel_while_learning_stops_before_the_next_part(win, console, monkeypatch):
+    connect(win)
+    c = two_moving(win, console.game)
+    dlg = LearnDialog(win.ctl, win.cheats.finder, c, win)
+    real, calls = rf.learn, []
+
+    def learn_then_cancel(*a, **k):
+        calls.append(a[3])
+        out = real(*a, **k)
+        dlg.do_cancel()
+        return out
+
+    monkeypatch.setattr(rf, "learn", learn_then_cancel)
+    dlg.start_btn.click()
+    assert calls == ["health"], "part 2 never starts"
+    assert dlg.hint.text().startswith("Couldn't learn health (part 1 of 2): you pressed Cancel.")
+    assert console.game.fake.peek(fg.PID, fg.READER, 10) == fg.VMOVSS_R
+
+
+def test_learn_a_combined_cheat_with_a_found_again_part(win, console):  # AC-1, AC-2
+    connect(win)
+    learn(win, add_health_cheat(win, console.game))
+    frac = session_part(win, "fraction", fraction_in_player(console.game), ValueType.INT32, 77)
+    win.ctl.cheats_changed.emit()
+    c = combine_all(win)
+    assert c.name == "Infinite Health + fraction" and len(c.moving_parts) == 1
+    assert frac not in win.ctl.cheat_file.cheats
+    win.cheats.table.selectRow(0)
+    assert win.cheats.learn_btn.isEnabled()
+    dlg = learn(win, c)
+    assert dlg.hint.text().startswith("Ready: fraction will be found by the game's code.")
+    assert c.found_again and len(win.ctl.project.cheats) == 1
+    win.ctl.shutdown()
+    run2 = console.restart(2)
+    connect(win)
+    tick(win)
+    assert run2.health() == 999.0 and run2.value(run2.player, "int32") == 77
+
+
+def test_learn_button_off_while_a_learned_part_is_not_found(win, console):  # AC-2
+    connect(win)
+    learn(win, add_health_cheat(win, console.game))
+    session_part(win, "fraction", fraction_in_player(console.game), ValueType.INT32, 77)
+    win.ctl.cheats_changed.emit()
+    combine_all(win)
+    win.ctl.live.trackers.clear()
+    win.ctl.cheats_changed.emit()
+    win.cheats.table.selectRow(0)
+    assert not win.cheats.learn_btn.isEnabled()
+
+
+# -- review fixes (combined cheats) ---------------------------------------------------------
+def test_combining_a_ticked_cheat_asks_before_writing_a_found_again_part(win, console):  # 1
+    connect(win)
+    learn(win, add_health_cheat(win, console.game))
+    game = console.game
+    frac = session_part(win, "fraction", fraction_in_player(game), ValueType.INT32, 77)
+    win.ctl.cheats_changed.emit()
+    tick(win, 1)  # the session cheat is on
+    assert frac.enabled
+    win.ctl.live.trackers["obj1"].confirmed = False  # a new run: not asked yet
+    game.set_health(50.0)
+    asked = []
+    win.cheats.finder.ask_confirm = lambda text: asked.append(text) or False
+    c = combine_all(win)
+    assert len(asked) == 1 and asked[0].startswith("Is this your Infinite Health + fraction?")
+    assert not c.enabled and game.health() == 50.0, "No: nothing written"
+    assert win.status.text() == hints.CONFIRM_NO.format(name=c.name)
+    assert str(id(c)) not in win.ctl.freezer.keys
+
+
+def test_combining_a_ticked_cheat_yes_turns_it_on(win, console):  # review 1
+    connect(win)
+    learn(win, add_health_cheat(win, console.game))
+    session_part(win, "fraction", fraction_in_player(console.game), ValueType.INT32, 77)
+    win.ctl.cheats_changed.emit()
+    tick(win, 1)
+    win.ctl.live.trackers["obj1"].confirmed = False
+    asked = []
+    win.cheats.finder.ask_confirm = lambda text: asked.append(text) or True
+    c = combine_all(win)
+    assert len(asked) == 1 and c.enabled and console.game.health() == 999.0
+
+
+def test_combine_saves_the_notes_once(win, console, monkeypatch):  # review 11
+    connect(win)
+    learn(win, add_health_cheat(win, console.game))
+    add_found_fraction(win)
+    saves = []
+    monkeypatch.setattr(pj, "save", lambda path, p: saves.append(path))
+    combine_all(win)
+    assert len(saves) == 1
+
+
+def test_learn_button_off_while_a_part_waits_for_a_moved_question(win, console):  # review 8
+    connect(win)
+    learn(win, add_health_cheat(win, console.game))
+    session_part(win, "fraction", fraction_in_player(console.game), ValueType.INT32, 77)
+    win.ctl.cheats_changed.emit()
+    combine_all(win)
+    tracker = win.ctl.live.trackers["obj1"]
+    tracker.pending = console.game.player + 0x1000
+    win.ctl.cheats_changed.emit()
+    win.cheats.table.selectRow(0)
+    assert not win.cheats.learn_btn.isEnabled()
+    tracker.pending, tracker.address = None, None
+    win.ctl.cheats_changed.emit()
+    win.cheats.table.selectRow(0)
+    assert not win.cheats.learn_btn.isEnabled(), "lost right now"
+
+
+def test_single_learn_keeps_a_combined_entry_with_the_same_name(win, console):  # review 9
+    c = combined_found_again(win, console)
+    p = win.ctl.project
+    [entry] = p.cheats
+    raw = struct.pack("<f", 5.0)
+    other = Cheat(
+        c.name,  # the same name as the combined cheat
+        [Location(LocationKind.SESSION_ADDRESS, console.game.health_addr, raw, raw)],
+        value_type=ValueType.FLOAT,
+    )
+    win.ctl.ensure_file().cheats.append(other)
+    learn(win, other)
+    assert entry in win.ctl.project.cheats
+
+
+def test_two_combined_cheats_with_the_same_parts_both_come_back(win, console):  # QA risk
+    c = combined_found_again(win, console)
+    second = Cheat(  # Combine refuses the same part twice, so make it by hand
+        "Health 2",
+        [
+            Location(
+                loc.kind, 0, loc.on, loc.off, anchor=loc.anchor, vtype=loc.vtype, part=loc.part
+            )
+            for loc in c.locations
+        ],
+        freeze=True,
+    )
+    win.ctl.cheat_file.cheats.append(second)
+    win.cheats.finder.remember_combined(second)
+    assert len(win.ctl.project.cheats) == 2
+    win.ctl.cheat_file.cheats.clear()  # a fresh app
+    win.ctl.shutdown()
+    console.restart(2)
+    connect(win)
+    assert [x.name for x in win.ctl.cheat_file.cheats] == [COMBINED, "Health 2"]
+
+
+def test_renaming_a_combined_cheat_is_kept(win, console):  # QA risk: name is in the key
+    from cheatmaker.ui.cheats_view import COL_NAME
+
+    combined_found_again(win, console)
+    win.cheats.table.item(0, COL_NAME).setText("Health")
+    assert [c.name for c in pj.load(pj.project_path(fg.TITLE, fg.VERSION)).cheats] == ["Health"]
+    win.cheats.table.selectRow(0)
+    win.cheats.delete_btn.click()
+    assert pj.load(pj.project_path(fg.TITLE, fg.VERSION)).cheats == []
+
+
+def test_a_failed_learn_leaves_an_already_learned_object_untouched(win, console):  # review 2
+    connect(win)
+    game = console.game
+    learn(win, add_health_cheat(win, game))
+    session_part(win, "fraction", fraction_in_player(game), ValueType.INT32, 77)
+    nowhere = fg.HEAP + 0xE000
+    game.fake.poke(fg.PID, nowhere, struct.pack("<i", 5))
+    session_part(win, "ammo", nowhere, ValueType.INT32, 5)
+    win.ctl.cheats_changed.emit()
+    c = combine_all(win)
+    dlg = learn(win, c)
+    assert dlg.hint.text().startswith("Couldn't learn ammo (part 2 of 2)")
+    [obj] = win.ctl.project.objects
+    assert [f.name for f in obj.fields] == ["Infinite Health"], "the notes are as before"
+    assert [f.name for f in win.ctl.live.trackers["obj1"].obj.fields] == ["Infinite Health"]
+    assert pj.load(pj.project_path(fg.TITLE, fg.VERSION)).objects[0].fields == obj.fields
+
+
+def test_an_unexpected_error_while_hooking_takes_the_hooks_out(win, console, monkeypatch):
+    connect(win)  # review 3
+    c = two_moving(win, console.game, money_in_enemy, ValueType.INT64)
+    real, calls = ah.install, []
+
+    def second_breaks(session, obj):
+        calls.append(obj.id)
+        if len(calls) == 2:
+            raise RuntimeError("garbage from the console")
+        return real(session, obj)
+
+    monkeypatch.setattr(ah, "install", second_breaks)
+    rooms = list(win.ctl.session.reserved_rooms)
+    learn(win, c)
+    fake = console.game.fake
+    assert fake.peek(fg.PID, fg.READER, 10) == fg.VMOVSS_R
+    assert win.cheats.finder.installed == {} and win.ctl.session.reserved_rooms == rooms
+    assert len(c.moving_parts) == 2
+
+
+def test_a_hook_that_cant_come_out_is_kept_and_said(win, console, monkeypatch):  # review 4
+    from cheatmaker.errors import ReadFailed
+
+    connect(win)
+    c = two_moving(win, console.game, money_in_enemy, ValueType.INT64)
+    dlg = LearnDialog(win.ctl, win.cheats.finder, c, win)
+    real = ah.install
+
+    def install_then_cancel(session, obj):
+        state = real(session, obj)
+        dlg.do_cancel()
+        return state
+
+    def remove_fails(*a, **k):
+        raise ReadFailed("the PS5 stopped answering")
+
+    monkeypatch.setattr(ah, "install", install_then_cancel)
+    monkeypatch.setattr(ah, "remove", remove_fails)
+    dlg.start_btn.click()
+    assert dlg.hint.text() == hints.LEARN_PART_STUCK.format(
+        part="fraction", k=2, n=2, reason=hints.LEARN_PART_CANCELLED
+    )
+    assert "Nothing was changed" not in dlg.hint.text()
+    [stuck] = win.cheats.finder.installed.values()
+    assert stuck.id == "obj1", "still ours: it comes out on close"
+    for room in ah.reserved_rooms([stuck]):
+        assert room in win.ctl.session.reserved_rooms, "its rooms stay kept"
+
+
+def test_a_hook_that_cant_go_in_is_said(win, console, monkeypatch):  # review 5
+    from cheatmaker.errors import LockFailed
+
+    connect(win)
+    c = two_moving(win, console.game, money_in_enemy, ValueType.INT64)
+    real = ah.install
+
+    def second_refused(session, obj):
+        if obj.id == "obj2":
+            raise LockFailed("Something else already changed that game code.")
+        return real(session, obj)
+
+    monkeypatch.setattr(ah, "install", second_refused)
+    dlg = learn(win, c)
+    assert dlg.hint.text().startswith("Ready: ")
+    assert "(Something else already changed that game code.)" in dlg.hint.text()
+
+
+def test_learning_a_ticked_cheat_puts_its_fixed_bytes_back(win, console):  # review 10
+    connect(win)
+    game = console.game
+    a = session_part(win, "health", game.health_addr, ValueType.FLOAT, 999.0)
+    b = session_part(win, "fraction", fraction_in_player(game), ValueType.INT32, 77)
+    god = Cheat(
+        "god", [Location(LocationKind.MODULE_VALUE, fg.DATA - fg.BASE + 0x80, b"\x01", b"\x00")]
+    )
+    win.ctl.cheat_file.cheats[:] = [combine([a, b, god], name="Health")]
+    win.ctl.cheats_changed.emit()
+    tick(win)
+    assert game.fake.peek(fg.PID, fg.DATA + 0x80, 1) == b"\x01"
+    learn(win, win.ctl.cheat_file.cheats[0])
+    assert game.fake.peek(fg.PID, fg.DATA + 0x80, 1) == b"\x00"
+
+
+# -- re-review fixes ------------------------------------------------------------------------
+def test_rename_while_disconnected_is_kept_in_the_notes(win, console):  # BUG-06
+    from cheatmaker.ui.cheats_view import COL_NAME
+
+    combined_found_again(win, console)
+    win.ctl.shutdown()  # no notes loaded now
+    win.cheats.table.item(0, COL_NAME).setText("Health")
+    console.restart(2)
+    connect(win)
+    assert [c.name for c in win.ctl.cheat_file.cheats] == ["Health"], "no second row"
+    assert [c.name for c in pj.load(pj.project_path(fg.TITLE, fg.VERSION)).cheats] == ["Health"]
+
+
+def test_rename_while_connected_comes_back_after_a_restart(win, console):  # BUG-06
+    from cheatmaker.ui.cheats_view import COL_NAME
+
+    combined_found_again(win, console)
+    win.cheats.table.item(0, COL_NAME).setText("Health")
+    win.ctl.shutdown()
+    win.ctl.cheat_file.cheats.clear()  # a fresh app
+    run2 = console.restart(2)
+    connect(win)
+    assert [c.name for c in win.ctl.cheat_file.cheats] == ["Health"]
+    tick(win)
+    assert run2.health() == 999.0
+
+
+def test_a_stuck_hooks_id_and_rooms_are_not_reused(win, console, monkeypatch):  # re-review 2
+    from cheatmaker.errors import ReadFailed
+
+    connect(win)
+    c = two_moving(win, console.game, money_in_enemy, ValueType.INT64)
+    dlg = LearnDialog(win.ctl, win.cheats.finder, c, win)
+    real = ah.install
+
+    def install_then_cancel(session, obj):
+        state = real(session, obj)
+        dlg.do_cancel()
+        return state
+
+    def remove_fails(*a, **k):
+        raise ReadFailed("the PS5 stopped answering")
+
+    monkeypatch.setattr(ah, "install", install_then_cancel)
+    monkeypatch.setattr(ah, "remove", remove_fails)
+    dlg.start_btn.click()
+    finder = win.cheats.finder
+    [stuck] = finder.installed.values()
+    assert stuck.id not in finder.new_object_ids(3)
+    single = Cheat("x", [Location(LocationKind.SESSION_ADDRESS, 0x10, b"\0", b"\0")])
+    assert finder.object_id_for(single) != stuck.id
+    finder.keep_rooms()  # e.g. after a save: the stuck hook's rooms stay kept
+    for room in ah.reserved_rooms([stuck]):
+        assert room in win.ctl.session.reserved_rooms
+
+
+def test_joining_a_learned_object_keeps_its_tracker(win, console):  # re-review 3
+    connect(win)
+    learn(win, add_health_cheat(win, console.game))
+    before = win.ctl.live.trackers["obj1"]
+    session_part(win, "fraction", fraction_in_player(console.game), ValueType.INT32, 77)
+    win.ctl.cheats_changed.emit()
+    learn(win, combine_all(win))
+    tracker = win.ctl.live.trackers["obj1"]
+    assert tracker is before and tracker.confirmed
+    assert [f.name for f in tracker.obj.fields] == ["Infinite Health", "fraction"]
+    assert tracker.obj is win.ctl.project.object("obj1")

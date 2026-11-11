@@ -12,6 +12,7 @@ import logging
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QTimer
@@ -33,7 +34,7 @@ from cheatmaker.core import refind as rf
 from cheatmaker.core.cheats import Cheat, Location, LocationKind
 from cheatmaker.core.session import GameInfo
 from cheatmaker.core.values import ValueType
-from cheatmaker.errors import CheatMakerError
+from cheatmaker.errors import CheatMakerError, ConnectionLost, FindFailed, ScanCancelled
 from cheatmaker.ui import hints
 from cheatmaker.ui.controller import Controller
 from cheatmaker.ui.tasks import _Signals
@@ -58,6 +59,67 @@ def read_field(ctl: Controller, obj: pj.ObjectSpec, addr: int, name: str) -> flo
     except (CheatMakerError, KeyError):
         return None
     return f.vtype.decode(raw)
+
+
+@dataclass
+class PartLearned:
+    """One moving part of a combined cheat after Find it next time: its line, the
+    object it was found in (shared by parts in the same object), its field and where
+    the object is now."""
+
+    loc: Location
+    obj: pj.ObjectSpec
+    field: str
+    obj_addr: int
+
+
+def part_field(cheat: Cheat, obj_id: str) -> tuple[str, str]:
+    """(field, label) of the first part of ``cheat`` found again by ``obj_id``: the
+    label is "fraction (part of Health)" for a combined cheat."""
+    if cheat.anchor is not None:
+        return cheat.anchor[1], cheat.name
+    for loc in cheat.learned_parts:
+        if loc.anchor is not None and loc.anchor[0] == obj_id:
+            return loc.anchor[1], hints.PART_OF.format(part=loc.part, name=cheat.name)
+    raise KeyError(obj_id)
+
+
+class PartFailed(FindFailed):
+    """A part of a combined cheat couldn't be learned (or Cancel was pressed): every
+    hook put in during the dialog is out again and nothing was changed. ``stuck``: a
+    hook couldn't be taken out (it still comes out on close)."""
+
+    def __init__(self, part: str, k: int, n: int, reason: str, stuck: bool = False) -> None:
+        text = hints.LEARN_PART_STUCK if stuck else hints.LEARN_PART_FAILED
+        super().__init__(text.format(part=part, k=k, n=n, reason=reason))
+        self.part, self.k, self.n, self.stuck = part, k, n, stuck
+
+
+def _reason(exc: BaseException) -> str:
+    """Why a part couldn't be learned, to follow "Couldn't learn x (part k of n): "."""
+    if isinstance(exc, ScanCancelled):
+        return hints.LEARN_PART_CANCELLED
+    notes = getattr(exc, "notes", None)
+    text = " ".join(notes) if notes else str(exc)
+    text = text.strip() or "it couldn't be done."
+    if not text.startswith("Cheat Maker") and text[1:2].islower():
+        text = text[0].lower() + text[1:]
+    return text if text.endswith(".") else text + "."
+
+
+def _join(obj: pj.ObjectSpec, other: pj.ObjectSpec, fld: pj.Field) -> None:
+    """Add ``fld`` (and the memory paths to it) from ``other`` to ``obj``, the same
+    object. A name ``obj`` already has gets " (2)", ..."""
+    old, n = fld.name, 2
+    names = {f.name for f in obj.fields}
+    while fld.name in names:
+        fld.name = f"{old} ({n})"
+        n += 1
+    obj.fields.append(fld)
+    for a in other.anchors_of(pj.ChainAnchor):
+        if a.field == old:
+            a.field = fld.name
+        obj.anchors.append(a)
 
 
 class FindAgain(QObject):
@@ -125,9 +187,15 @@ class FindAgain(QObject):
         return self.ctl.project
 
     def keep_rooms(self) -> None:
-        """New caves and slots never go where the notes' hooks live (even unused)."""
+        """New caves and slots never go where the notes' hooks live (even unused), nor
+        where a hook of ours still is that the notes don't hold (one that couldn't be
+        taken out after a failed Find it next time)."""
         p = self.ctl.project
-        self.ctl.session.reserved_rooms = ah.reserved_rooms(p.objects) if p else []
+        objects = list(p.objects) if p else []
+        in_notes = {o.id for o in objects}
+        with self._lock:
+            objects += [o for i, o in self.installed.items() if i not in in_notes]
+        self.ctl.session.reserved_rooms = ah.reserved_rooms(objects)
 
     def save(self) -> None:
         self.keep_rooms()
@@ -177,13 +245,37 @@ class FindAgain(QObject):
             self.start()
 
     def ensure_cheats(self) -> None:
-        """Live cheats saved in the notes come back (unticked) in My cheats."""
+        """Live cheats saved in the notes come back (unticked) in My cheats; a combined
+        cheat comes back as one row, never as rows of its own parts."""
         p = self.ctl.project
         if p is None:
             return
         cf = self.ctl.ensure_file()
         have = {c.anchor for c in cf.cheats if c.anchor}
+        rows = [c for c in cf.cheats if c.learned_parts]
+        have_parts = {self._key(c.name, self._anchors(c)) for c in rows}
+        noted = {self._key(pc.name, pc.anchors) for pc in p.cheats if pc.parts}
+        # Rows no notes entry names: renamed while the notes weren't loaded.
+        unnamed = [
+            c for c in rows if c.found_again and self._key(c.name, self._anchors(c)) not in noted
+        ]
+        renamed = False
         for pc in p.cheats:
+            if pc.parts:
+                if self._key(pc.name, pc.anchors) in have_parts:
+                    continue
+                row = next((c for c in unnamed if self._anchors(c) == pc.anchors), None)
+                if row is not None:  # that row is this entry: keep the row's new name
+                    unnamed.remove(row)
+                    pc.name = row.name
+                    have_parts.add(self._key(pc.name, pc.anchors))
+                    renamed = True
+                    continue
+                cheat = self._combined_from(p, pc)
+                if cheat is not None:
+                    cf.cheats.append(cheat)
+                    have_parts.add(self._key(pc.name, pc.anchors))
+                continue
             if (pc.object, pc.field) in have:
                 continue
             try:
@@ -201,6 +293,71 @@ class FindAgain(QObject):
                     anchor=(pc.object, pc.field),
                 )
             )
+        if renamed:
+            self.save()
+
+    @staticmethod
+    def _combined_from(p: pj.Project, pc: pj.ProjectCheat) -> Cheat | None:
+        """A combined cheat from its notes entry, or None if a part's object or field
+        is gone (then the whole cheat is left out)."""
+        locs = []
+        try:
+            for part in pc.parts:
+                if part.object is not None and part.field is not None:
+                    f = p.object(part.object).field(part.field)
+                    raw = f.vtype.encode(part.value)
+                    locs.append(
+                        Location(
+                            LocationKind.SESSION_ADDRESS,
+                            0,
+                            raw,
+                            raw,
+                            anchor=(part.object, part.field),
+                            vtype=f.vtype,
+                            part=part.name,
+                        )
+                    )
+                else:
+                    locs.append(
+                        Location(
+                            LocationKind(part.kind),
+                            part.offset,
+                            part.on,
+                            part.off,
+                            part.module,
+                            part.section,
+                            vtype=part.vtype,
+                            part=part.name,
+                        )
+                    )
+        except (KeyError, ValueError, OverflowError) as exc:
+            log.warning("action=project_cheat name=%r skipped: %s", pc.name, exc)
+            return None
+        return Cheat(
+            pc.name,
+            locs,
+            freeze=pc.action == "freeze",
+            hint="Found again each time you connect.",
+        )
+
+    @staticmethod
+    def _anchors(cheat: Cheat) -> list[tuple[str, str]]:
+        return [loc.anchor for loc in cheat.learned_parts if loc.anchor is not None]
+
+    @staticmethod
+    def _key(name: str, anchors: list[tuple[str, str]]) -> tuple:
+        """A combined cheat's notes entry: its name and learned parts (two combined
+        cheats may share the same parts)."""
+        return (name, tuple(anchors))
+
+    def _drop_entry(self, p: pj.Project, name: str, anchors: list[tuple[str, str]]) -> None:
+        key = self._key(name, anchors)
+        p.cheats = [c for c in p.cheats if not c.parts or self._key(c.name, c.anchors) != key]
+
+    @staticmethod
+    def uses(cheat: Cheat, obj_id: str) -> bool:
+        """``cheat`` is found again (wholly or in part) by the object ``obj_id``."""
+        return obj_id in cheat.objects
 
     # -- find again --------------------------------------------------------------
     def start(self, use_hook: bool = True) -> None:
@@ -243,7 +400,13 @@ class FindAgain(QObject):
         self.running = False
         _pid, results = result
         p = self.ctl.project
+        cheats = self.ctl.cheat_file.cheats if self.ctl.cheat_file else []
+        combined = [c for c in cheats if c.learned_parts]
+        # Objects only combined cheats use get one line per combined cheat instead.
+        single = {c.anchor[0] for c in cheats if c.anchor is not None}
+        in_combined = {o for c in combined for o in c.objects} - single
         lines = []
+        seconds: dict[str, float] = {}
         for obj, _state, out in results:
             if out.status == "disagree":
                 picked = self.ask_pick(obj, out.options)
@@ -255,14 +418,18 @@ class FindAgain(QObject):
                 tracker.confirmed = out.method == "picked"
                 tracker.on_lost = lambda o=obj: self.path_lost(o)
                 self.ctl.live.trackers[obj.id] = tracker
-                f = obj.fields[0]
-                f.last = read_field(self.ctl, obj, out.address, f.name)
+                for f in obj.fields:
+                    f.last = read_field(self.ctl, obj, out.address, f.name)
+                seconds[obj.id] = out.seconds
+                if obj.id in in_combined:
+                    continue
                 how = rf.METHOD_WORDS.get(out.method, out.method)
                 lines.append(hints.FOUND_AGAIN.format(name=obj.label, how=how, secs=out.seconds))
-            else:
+            elif obj.id not in in_combined:
                 f = obj.fields[0]
                 lines.append(hints.NOT_FOUND.format(name=obj.label))
                 self.open_search(f.vtype, f.last)
+        lines += [self._combined_line(c, seconds) for c in combined]
         if p is not None and p.dropped_hooks:
             lines.append(hints.OLD_NOTES)
             p.dropped_hooks = []
@@ -270,6 +437,27 @@ class FindAgain(QObject):
         self.ctl.cheats_changed.emit()
         if lines:
             self.ctl.message.emit(" ".join(lines))
+
+    def _combined_line(self, cheat: Cheat, seconds: dict[str, float]) -> str:
+        """One status line for a combined cheat: all its parts found, or the first part
+        that isn't (its search opens with that part's type and last value)."""
+        p = self.ctl.project
+        for loc in cheat.learned_parts:
+            if loc.anchor is None or loc.anchor[0] in seconds:
+                continue
+            last = None
+            vtype = loc.vtype
+            if p is not None:
+                with contextlib.suppress(KeyError):
+                    f = p.object(loc.anchor[0]).field(loc.anchor[1])
+                    vtype, last = f.vtype, f.last
+            if vtype is not None:
+                self.open_search(vtype, last)
+            return hints.COMBINED_NOT_FOUND.format(part=loc.part, name=cheat.name)
+        secs = sum(seconds[o] for o in cheat.objects)
+        n = len(cheat.learned_parts)
+        parts = hints.PART_COUNT[n == 1].format(n=n)
+        return hints.COMBINED_FOUND.format(name=cheat.name, parts=parts, secs=secs)
 
     def remove_hooks(self) -> None:
         with self._lock:
@@ -281,14 +469,21 @@ class FindAgain(QObject):
             self._ours.clear()
 
     def _remove(self, obj: pj.ObjectSpec) -> None:
+        if not self.take_out(obj):
+            self._unrecord(obj.id)
+
+    def take_out(self, obj: pj.ObjectSpec) -> bool:
+        """Take ``obj``'s hook out. False if it couldn't be: then it stays recorded as
+        ours (another try on close)."""
         try:
             ah.remove(self.ctl.session, obj, self.sleep)
         except CheatMakerError as exc:
             log.warning("action=hook_remove object=%s reason=%s", obj.id, exc)
-        else:
-            with self._lock:
-                self._mine.pop(obj.id, None)
+            return False
+        with self._lock:
+            self._mine.pop(obj.id, None)
         self._unrecord(obj.id)
+        return True
 
     def path_lost(self, obj: pj.ObjectSpec) -> None:
         """A value found by a memory path stopped checking out (it moved). Simple games
@@ -311,21 +506,22 @@ class FindAgain(QObject):
         self.ctl.message.emit(hints.PATH_LOST.format(name=obj.label))
 
     def before_on(self, cheat: Cheat) -> None:
-        """Turning on a cheat that is found again: put its hook back if it was taken
-        out when the last one went off, so the value keeps being followed."""
-        if cheat.anchor is None or not self.ctl.session.connected:
+        """Turning on a cheat that is found again: put its hooks back if they were
+        taken out when the last one went off, so the values keep being followed."""
+        if not self.ctl.session.connected:
             return
-        tracker = self.ctl.live.trackers.get(cheat.anchor[0])
-        obj = tracker.obj if tracker is not None else None
-        if obj is None or obj.hook is None or obj.has_proven_chain or obj.id in self.installed:
-            return
-        if obj.id in self.by_chain:
-            return
-        try:
-            state = ah.install(self.ctl.session, obj)
-            self.note_install(obj, state, self.ctl.session.require_game().pid)
-        except CheatMakerError as exc:
-            log.warning("action=hook_install object=%s reason=%s", obj.id, exc)
+        for obj_id in cheat.objects:
+            tracker = self.ctl.live.trackers.get(obj_id)
+            obj = tracker.obj if tracker is not None else None
+            if obj is None or obj.hook is None or obj.has_proven_chain:
+                continue
+            if obj.id in self.installed or obj.id in self.by_chain:
+                continue
+            try:
+                state = ah.install(self.ctl.session, obj)
+                self.note_install(obj, state, self.ctl.session.require_game().pid)
+            except CheatMakerError as exc:
+                log.warning("action=hook_install object=%s reason=%s", obj.id, exc)
 
     def after_off(self, cheat: Cheat) -> None:
         """AC-11.2: the hook comes out when the last cheat on its value is turned off.
@@ -334,12 +530,12 @@ class FindAgain(QObject):
         if not self.ctl.session.connected:
             return
         cheats = self.ctl.cheat_file.cheats if self.ctl.cheat_file else []
-        if cheat.anchor is not None:
-            obj_id = cheat.anchor[0]
-            still_on = any(c.enabled and c.anchor and c.anchor[0] == obj_id for c in cheats)
-            obj = self.installed.get(obj_id)
-            if obj is not None and not still_on:
-                self._remove(obj)
+        if cheat.objects:
+            for obj_id in cheat.objects:
+                still_on = any(c.enabled and self.uses(c, obj_id) for c in cheats)
+                obj = self.installed.get(obj_id)
+                if obj is not None and not still_on:
+                    self._remove(obj)
             return
         for obj in list(self.installed.values()):
             try:
@@ -356,19 +552,20 @@ class FindAgain(QObject):
         for obj_id, tracker in list(self.ctl.live.trackers.items()):
             if tracker.pending is None:
                 continue
-            mine = [c for c in cheats if c.enabled and c.anchor and c.anchor[0] == obj_id]
+            mine = [c for c in cheats if c.enabled and self.uses(c, obj_id)]
             if not mine:
                 continue
             pend = tracker.pending
-            value = read_field(self.ctl, tracker.obj, pend, mine[0].anchor[1])
+            field_name, label = part_field(mine[0], obj_id)
+            if not mine[0].combined:
+                label = tracker.obj.label
+            value = read_field(self.ctl, tracker.obj, pend, field_name)
             self._asking = True
             # The freezer keeps checking while the question is open: if only one
             # object still verifies the question answers itself and the box closes.
             self._ask_still = lambda t=tracker, p=pend: t.pending == p
             try:
-                ok = self.ask_confirm(
-                    hints.CONFIRM_MOVED.format(name=tracker.obj.label, value=fmt(value))
-                )
+                ok = self.ask_confirm(hints.CONFIRM_MOVED.format(name=label, value=fmt(value)))
             finally:
                 self._asking = False
                 self._ask_still = lambda: True
@@ -380,16 +577,18 @@ class FindAgain(QObject):
             kept = tracker.pending_both
             tracker.reject_pending(pend)
             if kept:  # the first one still checks out: keep changing it
-                self.ctl.message.emit(hints.KEPT_FIRST.format(name=tracker.obj.label))
+                self.ctl.message.emit(hints.KEPT_FIRST.format(name=label))
                 continue
-            for c in mine:
+            for c in mine:  # the whole cheat, every part
                 self.ctl.live.turn_off(c, restore=False)
-            self.ctl.message.emit(hints.CONFIRM_NO.format(name=tracker.obj.label))
+            self.ctl.message.emit(hints.CONFIRM_NO.format(name=label))
             self.ctl.cheats_changed.emit()
 
     # -- confirm before the first write (AC-12.2) -----------------------------------
     def confirm(self, cheat: Cheat) -> bool:
         """True when the cheat may write. Asks once per run per object."""
+        if cheat.learned_parts:
+            return self._confirm_parts(cheat)
         if cheat.anchor is None:
             return True
         obj_id, name = cheat.anchor
@@ -404,6 +603,30 @@ class FindAgain(QObject):
             tracker.confirmed = True
             return True
         self.ctl.message.emit(hints.CONFIRM_NO.format(name=tracker.obj.label))
+        return False
+
+    def _confirm_parts(self, cheat: Cheat) -> bool:
+        """One question for the whole combined cheat, naming each learned part's value
+        now. Skipped when every part's object was already confirmed this run. A part
+        not found right now: True, and turn_on refuses with a plain message."""
+        trackers = [self.ctl.live.trackers.get(o) for o in cheat.objects]
+        if any(t is None for t in trackers) or all(t.confirmed for t in trackers if t):
+            return True
+        values = []
+        for loc in cheat.learned_parts:
+            assert loc.anchor is not None
+            tracker = self.ctl.live.trackers[loc.anchor[0]]
+            addr = tracker.current()
+            if addr is None:
+                return True
+            value = read_field(self.ctl, tracker.obj, addr, loc.anchor[1])
+            values.append(hints.CONFIRM_PART_VALUE.format(part=loc.part, value=fmt(value)))
+        if self.ask_confirm(hints.CONFIRM_PARTS.format(name=cheat.name, values=", ".join(values))):
+            for t in trackers:
+                if t is not None:
+                    t.confirmed = True
+            return True
+        self.ctl.message.emit(hints.CONFIRM_NO.format(name=cheat.name))
         return False
 
     def _ask_confirm(self, text: str) -> bool:
@@ -426,9 +649,24 @@ class FindAgain(QObject):
         if cheat.anchor is not None:
             return cheat.anchor[0]
         for pc in p.cheats:
-            if pc.name == cheat.name:
+            if pc.name == cheat.name and not pc.parts:
                 return pc.object  # a new find updates the anchor (AC-12.4)
-        return p.new_object_id()
+        return self.new_object_ids(1)[0]
+
+    def new_object_ids(self, n: int) -> list[str]:
+        """``n`` object ids not used in the notes yet, nor by a hook of ours still in
+        the game (one per part to learn)."""
+        p = self.ensure_project()
+        used = {o.id for o in p.objects}
+        with self._lock:
+            used |= set(self.installed) | set(self._mine)
+        ids: list[str] = []
+        k = 1
+        while len(ids) < n:
+            if f"obj{k}" not in used:
+                ids.append(f"obj{k}")
+            k += 1
+        return ids
 
     def adopt(self, cheat: Cheat, learned: rf.Learned, value_addr: int, state: str) -> None:
         p = self.ensure_project()
@@ -437,7 +675,7 @@ class FindAgain(QObject):
         if cheat.value is not None:
             rf.widen(f, cheat.value)
         p.put_object(obj)
-        p.cheats = [c for c in p.cheats if c.name != cheat.name and c.object != obj.id]
+        p.cheats = [c for c in p.cheats if c.parts or (c.name != cheat.name and c.object != obj.id)]
         p.cheats.append(
             pj.ProjectCheat(
                 cheat.name,
@@ -454,13 +692,95 @@ class FindAgain(QObject):
         self.save()
         self.ctl.cheats_changed.emit()
 
-    def forget(self, cheat: Cheat) -> None:
-        """A deleted cheat doesn't come back next time (the object's notes stay)."""
+    def forget(self, cheat: Cheat, save: bool = True) -> None:
+        """A deleted cheat doesn't come back next time (the object's notes stay).
+        ``save=False``: the caller saves once after several changes."""
         p = self.ctl.project
-        if p is None or cheat.anchor is None:
+        if p is None:
             return
-        p.cheats = [c for c in p.cheats if (c.object, c.field) != cheat.anchor]
-        self.save()
+        if cheat.learned_parts:
+            self._drop_entry(p, cheat.name, self._anchors(cheat))
+        elif cheat.anchor is not None:
+            p.cheats = [c for c in p.cheats if c.parts or (c.object, c.field) != cheat.anchor]
+        else:
+            return
+        if save:
+            self.save()
+
+    def renamed(self, cheat: Cheat, old: str) -> None:
+        """A combined cheat's new name is kept in its notes entry (its key)."""
+        p = self.ctl.project
+        if p is None or not cheat.learned_parts:
+            return
+        key = self._key(old, self._anchors(cheat))
+        for pc in p.cheats:
+            if pc.parts and self._key(pc.name, pc.anchors) == key:
+                pc.name = cheat.name
+                self.save()
+                return
+
+    def remember_combined(self, cheat: Cheat, save: bool = True) -> None:
+        """Save a combined cheat with nothing moving as one notes entry (its parts in
+        order), replacing an entry with the same name and learned parts."""
+        p = self.ctl.project
+        if p is None or not cheat.found_again or cheat.anchor is not None:
+            return
+        parts = []
+        for loc in cheat.locations:
+            if loc.anchor is None:
+                parts.append(
+                    pj.ProjectPart(
+                        loc.part or "",
+                        kind=loc.kind.value,
+                        module=loc.module,
+                        section=loc.section,
+                        offset=loc.offset,
+                        on=loc.on,
+                        off=loc.off,
+                        vtype=loc.vtype,
+                    )
+                )
+                continue
+            obj_id, name = loc.anchor
+            try:
+                f = p.object(obj_id).field(name)
+            except KeyError:
+                log.warning("action=project_cheat name=%r part=%s gone", cheat.name, loc.part)
+                return
+            value = f.vtype.decode(loc.on)
+            rf.widen(f, value)
+            parts.append(pj.ProjectPart(loc.part or name, obj_id, name, value))
+        self._drop_entry(p, cheat.name, self._anchors(cheat))
+        p.cheats.append(
+            pj.ProjectCheat(cheat.name, action="freeze" if cheat.freeze else "set", parts=parts)
+        )
+        if save:
+            self.save()
+
+    def adopt_parts(self, cheat: Cheat, results: list[PartLearned]) -> None:
+        """Every moving part was learned (Find it next time on a combined cheat): its
+        objects go in the notes, each part becomes learned, and the cheat is saved
+        once as one entry. The player just found them by hand: confirmed."""
+        p = self.ensure_project()
+        placed: set[str] = set()
+        for r in results:
+            r.loc.anchor = (r.obj.id, r.field)
+            r.loc.offset = 0  # unused from now on: the tracker holds the address
+            if r.obj.id in placed:  # a second part in the same object
+                continue
+            placed.add(r.obj.id)
+            p.put_object(r.obj)
+            tracker = self.ctl.live.trackers.get(r.obj.id)
+            if tracker is None:
+                tracker = rf.Tracker(self.ctl.session, r.obj, r.obj_addr)
+                self.ctl.live.trackers[r.obj.id] = tracker
+            else:  # an already-learned object got a field: keep following it as it is
+                with tracker._lock:
+                    tracker.obj = r.obj
+            tracker.confirmed = True
+            tracker.on_lost = lambda o=r.obj: self.path_lost(o)
+        self.remember_combined(cheat)
+        self.ctl.cheats_changed.emit()
 
     def cheat_changed(self, cheat: Cheat) -> None:
         """The player edited an anchored cheat's value: remember it for next time."""
@@ -482,18 +802,21 @@ class LearnDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle(f"Find it next time: {cheat.name}")
         self.ctl, self.finder, self.cheat = ctl, finder, cheat
+        # A combined cheat learns each of its moving parts in turn (parts mode).
+        self.parts = cheat.moving_parts if cheat.combined else []
         self.address = cheat.locations[0].address(ctl.session.require_game().module_base)
         tracker = ctl.live.trackers.get(cheat.anchor[0]) if cheat.anchor else None
         if tracker is not None and cheat.anchor is not None:
             self.address = tracker.field_address(cheat.anchor[1]) or self.address
         self.learned: rf.Learned | None = None
+        self.parts_done = False
         self._cancel: threading.Event | None = None
         self._step = _Signals()
         self._step.done.connect(self._on_step)
         self._progress = _Signals()
         self._progress.done.connect(lambda f: self.progress.setValue(int(f * 100)))
 
-        self.hint = QLabel(hints.FIND_NEXT_START.format(name=cheat.name))
+        self.hint = QLabel(self._start_text())
         self.hint.setWordWrap(True)
         self.pointers = QCheckBox(hints.FIND_NEXT_POINTERS)
         self.progress = QProgressBar()
@@ -517,13 +840,29 @@ class LearnDialog(QDialog):
         self.pc_off_btn.clicked.connect(self.do_pc_off)
         self._update()
 
+    def _start_text(self) -> str:
+        if not self.parts:
+            return hints.FIND_NEXT_START.format(name=self.cheat.name)
+        names = [loc.part or "?" for loc in self.parts]
+        parts = names[0] if len(names) == 1 else ", ".join(names[:-1]) + " and " + names[-1]
+        return hints.FIND_NEXT_START_PARTS.format(
+            parts=parts,
+            secs=hints.PART_SECONDS,
+            total=hints.PART_SECONDS * len(names),
+            name=self.cheat.name,
+        )
+
     def _update(self) -> None:
         busy = self._cancel is not None
-        self.start_btn.setEnabled(not busy and self.learned is None)
-        self.pointers.setEnabled(not busy and self.learned is None)
+        done = self.learned is not None or self.parts_done
+        self.start_btn.setEnabled(not busy and not done)
+        self.pointers.setEnabled(not busy and not done)
         self.cancel_btn.setEnabled(busy)
         hook = self.learned.obj.hook if self.learned is not None else None
-        self.pc_off_btn.setVisible(hook is not None and hook.filter.kind != "none")
+        # No PC-off cheat for a combined cheat (spec-restart-combined AC-2).
+        self.pc_off_btn.setVisible(
+            not self.parts and hook is not None and hook.filter.kind != "none"
+        )
 
     def do_pc_off(self) -> None:
         """AC-13.1: one routine that finds the value and keeps it at the cheat's value
@@ -546,12 +885,23 @@ class LearnDialog(QDialog):
         self.pc_off_btn.setEnabled(False)
         self.ctl.message.emit(hints.PC_OFF_MADE.format(name=pc_off.name))
 
-    def _on_step(self, step: str) -> None:
+    def _on_step(self, step: str | tuple[int, str]) -> None:
+        """A step of the single learn ("watch"), or (part number, step) in parts mode."""
+        if isinstance(step, tuple):
+            k, step = step
+            part = self.parts[k - 1].part or ""
+            text = hints.FIND_NEXT_STEPS.get(step, "")
+            head = hints.FIND_NEXT_PART.format(k=k, n=len(self.parts), part=part)
+            self.hint.setText(f"{head} {text.format(name=part)}".strip())
+            return
         text = hints.FIND_NEXT_STEPS.get(step, "")
         if text:
             self.hint.setText(text.format(name=self.cheat.name))
 
     def do_start(self) -> None:
+        if self.parts:
+            self._start_parts()
+            return
         cheat, session, finder = self.cheat, self.ctl.session, self.finder
         if cheat.value_type is None:
             return
@@ -618,6 +968,203 @@ class LearnDialog(QDialog):
     def do_cancel(self) -> None:
         if self._cancel is not None:
             self._cancel.set()
+
+    # -- a combined cheat: learn every moving part in one Start ---------------------
+    def _start_parts(self) -> None:
+        cheat, session, finder = self.cheat, self.ctl.session, self.finder
+        parts = list(self.parts)
+        if any(loc.vtype is None for loc in parts):
+            return
+        if cheat.enabled:  # our own freeze would hide the game's reads and writes
+            # Fixed parts get their bytes back; learned parts are left as they are.
+            fixed = any(loc.kind is not LocationKind.SESSION_ADDRESS for loc in cheat.locations)
+            self.ctl.live.turn_off(cheat, restore=fixed)
+            self.ctl.cheats_changed.emit()
+        ids = finder.new_object_ids(len(parts))
+        seeds = self._seed_objects()
+        rooms0 = list(session.reserved_rooms)
+        by_chain0 = set(finder.by_chain)
+        pointer_scan = self.pointers.isChecked()
+        self._cancel = threading.Event()
+        cancel = self._cancel
+        self._update()
+        n = len(parts)
+        installed_here: list[pj.ObjectSpec] = []
+
+        def rollback() -> list[pj.ObjectSpec]:
+            """Every hook put in during this dialog comes out; the notes' rooms and the
+            memory-path list are as before. Returns the hooks that couldn't come out:
+            they stay recorded and their rooms stay kept."""
+            stuck = [obj for obj in installed_here if not finder.take_out(obj)]
+            with finder._lock:
+                finder.by_chain.clear()
+                finder.by_chain.update(by_chain0)
+            session.reserved_rooms = rooms0 + ah.reserved_rooms(stuck)
+            return stuck
+
+        def work():
+            try:
+                results, learned, notes = self._learn_parts(parts, ids, pointer_scan, cancel, seeds)
+                states = self._install_parts(
+                    results, cancel, installed_here, {o.id for o, _ in seeds}, notes
+                )
+            except BaseException as exc:  # whatever went wrong, nothing stays changed
+                stuck = rollback()
+                if isinstance(exc, CheatMakerError) and not isinstance(exc, ConnectionLost):
+                    at = min(max(self._part_k, 1), n)
+                    part = parts[at - 1].part or "?"
+                    raise PartFailed(part, at, n, _reason(exc), bool(stuck)) from exc
+                raise
+            return results, learned, notes, states
+
+        self._part_k = 0
+        self.ctl.tasks.run(work, self._done_parts, self._failed_parts)
+
+    def _seed_objects(self) -> list[tuple[pj.ObjectSpec, int]]:
+        """The cheat's learned parts' objects (copies) and where they start now, so a
+        part found in one of them joins it. Copies: the notes change only on success."""
+        seeds = []
+        for obj_id in self.cheat.objects:
+            tracker = self.ctl.live.trackers.get(obj_id)
+            if tracker is None or tracker.address is None or tracker.obj.vtable is None:
+                continue
+            seeds.append((pj.ObjectSpec.from_json(tracker.obj.to_json()), tracker.address))
+        return seeds
+
+    def _learn_parts(
+        self,
+        parts: list[Location],
+        ids: list[str],
+        pointer_scan: bool,
+        cancel: threading.Event,
+        seeds: list[tuple[pj.ObjectSpec, int]],
+    ) -> tuple[list[PartLearned], list[rf.Learned], list[str]]:
+        """Learn each part in turn (one watchpoint at a time). A part in the same object
+        (same start, same class) as an earlier part or as one of ``seeds`` joins that
+        object: two fields, one hook."""
+        session, n = self.ctl.session, len(parts)
+        rooms0 = list(session.reserved_rooms)
+        results: list[PartLearned] = []
+        learned_all: list[rf.Learned] = []
+        notes: list[str] = []
+        objs: list[tuple[pj.ObjectSpec, int]] = list(seeds)  # distinct objects, start
+        for k, loc in enumerate(parts, 1):
+            self._part_k = k
+            if cancel.is_set():
+                raise ScanCancelled("Find it next time was cancelled")
+            self._progress.done.emit((k - 1) / n)
+            assert loc.vtype is not None and loc.part is not None
+            learned = rf.learn(
+                session,
+                loc.offset,
+                loc.vtype,
+                loc.part,
+                ids[k - 1],
+                pointer_scan=pointer_scan,
+                step=lambda st, k=k: self._step.done.emit((k, st)),
+                progress=lambda f, k=k: self._progress.done.emit((k - 1 + f) / n),
+                cancel=cancel,
+            )
+            if cancel.is_set():
+                raise ScanCancelled("Find it next time was cancelled")
+            fld = learned.obj.fields[0]
+            start = loc.offset - fld.off
+            same = next(
+                (
+                    o
+                    for o, at in objs
+                    if at == start and o.vtable is not None and o.vtable == learned.obj.vtable
+                ),
+                None,
+            )
+            if same is not None:  # two fields, one hook
+                _join(same, learned.obj, fld)
+                obj = same
+                log.info("action=learn object=%s part=%s same object", obj.id, loc.part)
+            else:
+                obj = learned.obj
+                objs.append((obj, start))
+            results.append(PartLearned(loc, obj, fld.name, start))
+            learned_all.append(learned)
+            notes += learned.notes
+            # The next part's hook never takes this one's spare room.
+            session.reserved_rooms = rooms0 + ah.reserved_rooms([o for o, _ in objs])
+            self._progress.done.emit(k / n)
+        return results, learned_all, notes
+
+    def _install_parts(
+        self,
+        results: list[PartLearned],
+        cancel: threading.Event,
+        installed_here: list[pj.ObjectSpec],
+        existing: set[str],
+        notes: list[str],
+    ) -> list[str]:
+        """Put in each new object's hook (or note its memory path), like a single
+        cheat. Objects already in the notes (``existing``) are left as they are. A hook
+        that can't go in is added to ``notes``. Cancel is checked before each hook goes
+        in: pressed during the last one, the work is done and it ends as a success.
+        Returns the install states."""
+        session, finder = self.ctl.session, self.finder
+        pid = session.require_game().pid
+        states: list[str] = []
+        seen: set[str] = set(existing)
+        for k, r in enumerate(results, 1):
+            obj = r.obj
+            if obj.id in seen:
+                continue
+            seen.add(obj.id)
+            self._part_k = k  # a failure now names the part whose hook goes in
+            if cancel.is_set():
+                raise ScanCancelled("Find it next time was cancelled")
+            if obj.anchors_of(pj.ChainAnchor):
+                with finder._lock:
+                    finder.by_chain.add(obj.id)
+                continue
+            if obj.hook is None:
+                continue
+            state = ""
+            try:
+                state = ah.install(session, obj)
+            except CheatMakerError as exc:
+                log.warning("action=hook_install object=%s reason=%s", obj.id, exc)
+                notes.append(str(exc))
+            finder.note_install(obj, state, pid)
+            if finder.is_ours(obj.id, pid):
+                installed_here.append(obj)
+            states.append(state)
+        return states
+
+    def _done_parts(self, result) -> None:
+        self._cancel = None
+        results, learned, notes, states = result
+        self.parts_done = True
+        self.progress.setValue(100)
+        names = [r.loc.part for r in results]
+        self.finder.adopt_parts(self.cheat, results)
+        said = []
+        for name, lr in zip(names, learned, strict=True):
+            first = next(
+                (m for m in ("static", "chain", "hook_slot", "vtable_scan") if m in lr.methods),
+                "",
+            )
+            if first:
+                said.append(hints.READY_PART[first].format(name=name))
+        text = hints.READY_PARTS.format(parts="; ".join(said))
+        if any(states):
+            text += " " + hints.HOOK_NOTE.format(name=self.cheat.name)
+        if notes:
+            text += " (" + " ".join(notes) + ")"
+        self.hint.setText(text)
+        self.ctl.message.emit(text)
+        self._update()
+
+    def _failed_parts(self, exc: BaseException) -> None:
+        self._cancel = None
+        self.hint.setText(str(exc) if isinstance(exc, PartFailed) else self._start_text())
+        self.progress.setValue(0)
+        self._update()
+        self.ctl.fail(exc, "find_next_time")
 
 
 class PickDialog(QDialog):

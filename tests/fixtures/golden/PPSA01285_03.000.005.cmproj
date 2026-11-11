@@ -1,6 +1,6 @@
 {
  "format": "cheatmaker-project",
- "format_version": 2,
+ "format_version": 3,
  "title_id": "PPSA01285",
  "version": "03.000.005",
  "process": "eboot.bin",
