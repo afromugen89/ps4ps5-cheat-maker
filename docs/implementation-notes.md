@@ -281,3 +281,26 @@ Review follow-ups (2026-11-11):
   anchored cheats are matched by their tracker's address. A cancelled or closed
   dialog still reports `not_restored` on the status line; a disconnect waits up to
   3 s (`STOP_WAIT_S`) for the trace to put its test values back.
+
+QA and re-review round (2026-11-11, qa/reports/2026-11-11-trace-shown-number.md):
+
+- The walk keeps the narrowest width the value passes through (the writer's store,
+  narrower register moves and extends; carried into a caller as `Path.width`). Only a
+  load wider than that gets TRUNCATE, so `mov rax,[m] ; mov [d],rax` watched at its low
+  4 bytes is a 4-byte source (a Set no longer writes over the field next to it).
+- `mov [m],ah` is byte 1 of rax; a move from a high-byte register on the path isn't
+  followed. `xchg [m],reg` is a store, not read-modify-write. `movss x,[K] ; mulss x,[m]`
+  (and VEX) is followed as `[m]` x K.
+- Inverse: an 8-byte decimal narrowed to 4 bytes on the way is nudged in float32 steps;
+  a decimal screen value equals the typed one to its digits (relative 1e-6), not by bytes.
+- A self-copy writer follows the read-modify-write rule (most hits, or no other source
+  passes). The exec fallback carries the source load's registers forward to the max load.
+  The guide suggests the trace when every checked row is a copy, ignoring failed rows.
+- Find's rows are told apart by (address, type) for "added", "frozen", Freeze and Remove;
+  the type each Find freeze was made as is kept in `FindWizard._frozen_type`.
+- `TraceDialog.release` pauses Find's freezes from the Freezer's own entries and resumes
+  them with the same bytes. The Freezer has no public view of its entries and
+  core/freezer.py belongs to another branch for now, so `_find_freezes` reads
+  `_entries` under its lock: worth a public accessor when that branch lands.
+- A share of a max of 0 shows "(screen: ?)". TOO_FAR says "1 step", and "ran out of time"
+  when TOTAL_S ended it.
