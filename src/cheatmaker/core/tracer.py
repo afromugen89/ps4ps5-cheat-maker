@@ -46,6 +46,8 @@ EARLY_MORE_S = 2.0
 MAX_WRITERS = 3
 MAX_HOPS = 4
 MAX_CALLERS = 4  # return addresses tried for one writer
+EXEC_HITS = 16  # execute breakpoint: at most this many hits...
+EXEC_S = 10.0  # ...or this long (AC-T4 rule 4)
 STEADY_S = 1.0  # the copy holds one value this long before it is checked
 CHANGE_WAIT_S = 30.0
 POLL_S = 0.25
@@ -208,7 +210,7 @@ class Tracer:
         self.pid = self.game.pid
         self.address, self.vtype = address, vtype
         self.release = release
-        self.exec_breakpoint = exec_breakpoint  # used by the exec fallback (later step)
+        self.exec_breakpoint = exec_breakpoint  # setting trace_exec_breakpoint (C20d)
         self.sleep, self.clock = sleep, clock
         self.settle_s = settle_s
         self.hops: list[Hop] = []
@@ -365,6 +367,8 @@ class Tracer:
         self._check_cancel()
         self._say(hop, 2, CHECK_STEP, STEADY_HINT)
         winner = self._check(hop, options) if options else None
+        if winner is None and self.exec_breakpoint:
+            winner = self.exec_fallback(hop)
         if winner is None:
             raise _Stop(self._no_address(hop, options, total))
         hop.source, hop.way = winner.cand, winner.way
@@ -543,6 +547,65 @@ class Tracer:
             out += [_Option(c, _with_max(way, c)) for c in cands]
         return out
 
+    # -- execute breakpoint fallback (AC-T4 rule 4, setting trace_exec_breakpoint) ----------
+    def exec_fallback(self, hop: Hop) -> _Option | None:
+        """A 1-byte execute breakpoint on each path's load: the registers come from
+        before the load, so its address is exact. Only addresses that pass the memory
+        check count. Whether NG sets RF on continue is UNVERIFIED (C20d): the same
+        breakpoint firing EXEC_HITS times with the very same registers means it
+        repeats instead of the game running on, which is logged and ends the fallback."""
+        options: dict[int, _Option] = {}
+        for wp in hop.writers:
+            path = wp.path
+            if path is None or path.end is not tf.End.SOURCE or path.load is None:
+                continue
+            if path.way is None:
+                continue
+            hits = self._exec_watch(path.load.ip)
+            if _repeats(hits):
+                log.warning(
+                    "action=trace_source method=exec ip=%#x the breakpoint repeats "
+                    "(%d hits, same registers): stopped",
+                    path.load.ip,
+                    len(hits),
+                )
+                hop.stop = "the breakpoint repeats"
+                continue
+            for h in hits:
+                addr = tf.exec_address(path.load, h)
+                if addr is None or addr in options:
+                    continue
+                max_address = None
+                if path.max_load is not None:
+                    max_address = tf.exec_address(path.max_load, h)
+                    if max_address is None:
+                        continue
+                expr = path.load.mem.text() + (f"+{path.load.lane:X}h" if path.load.lane else "")
+                cand = tf.Candidate(addr, "exec", expr, max_address, wp.writer.address)
+                options[addr] = _Option(cand, _with_max(path.way, cand))
+                log.info(
+                    "action=trace_source method=exec addr=%#x expr=%r load=%#x",
+                    addr,
+                    expr,
+                    path.load.ip,
+                )
+        if not options:
+            return None
+        self._check_cancel()
+        return self._check(hop, list(options.values()))
+
+    def _exec_watch(self, ip: int) -> list[WatchHit]:
+        def until(hits: list[WatchHit], _elapsed: float) -> bool:
+            stop = self._cancel is not None and self._cancel.is_set()
+            return stop or len(hits) >= EXEC_HITS
+
+        started = self.clock()
+        hits = self.client.watch(self.pid, ip, 1, "execute", EXEC_S, until=until)
+        self._waited += self.clock() - started
+        log.info("action=trace_watch kind=execute ip=%#x hits=%d", ip, len(hits))
+        self._check_cancel()
+        return hits
+
     # -- memory check (AC-T5) --------------------------------------------------------------
     def _copy_value(self, hop: Hop) -> float | int:
         t = hop.watched
@@ -695,6 +758,15 @@ def _with_max(way: Way, cand: tf.Candidate) -> Way:
         for s in way.steps
     )
     return replace(way, steps=steps)
+
+
+def _repeats(hits: list[WatchHit]) -> bool:
+    """EXEC_HITS hits at one place with identical registers: the breakpoint fires again
+    and again without the game moving on."""
+    if len(hits) < EXEC_HITS:
+        return False
+    first = hits[0]
+    return all(h.rip == first.rip and h.regs == first.regs for h in hits)
 
 
 def _nan(v) -> bool:

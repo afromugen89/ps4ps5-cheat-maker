@@ -916,3 +916,21 @@ def follow_into_caller(
     allowed = frozenset(CALLEE_SAVED - written)
     cands = candidates(win, path, hit, watched, read, allowed=allowed, method="caller")
     return path, cands
+
+
+def exec_address(load: Load, hit: WatchHit) -> int | None:
+    """The address ``load`` reads, from an execute breakpoint's trap on it: the
+    registers are those before the load runs, so this is exact (AC-T4 rule 4).
+    None when a register is missing."""
+    ref = load.mem
+    if ref.rip_target is not None:
+        return (ref.rip_target + load.lane) & _MASK64
+    total = ref.disp + load.lane
+    for name, scale in ((ref.base, 1), (ref.index, ref.scale)):
+        if name is None:
+            continue
+        value = hit.regs.get(name)
+        if value is None:
+            return None
+        total += value * scale
+    return total & _MASK64

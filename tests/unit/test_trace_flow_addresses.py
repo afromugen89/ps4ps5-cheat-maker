@@ -163,3 +163,23 @@ def test_store_address_and_no_candidates_for_other_ends():
     assert path.end is End.CONSTANT and cands == []
     assert store_address(win.writer, WatchHit(0, {"rdi": HUD})) == HUD + 0x40
     assert store_address(win.writer, WatchHit(0, {})) is None
+
+
+def test_exec_address_uses_the_registers_before_the_load():
+    from cheatmaker.core.trace_flow import exec_address
+
+    path, _c, _w = run(
+        ins("MOV_R64_RM64", "rax", mem("rax", 8)),
+        ins("MOV_RM64_R64", mem("rdi"), "rax"),
+        regs={"rax": 0, "rdi": HUD},
+        shown=ValueType.INT64,
+    )
+    assert exec_address(path.load, WatchHit(0, {"rax": OBJ})) == OBJ + 8
+    assert exec_address(path.load, WatchHit(0, {})) is None
+    g_path, _c, _w = run(
+        ins("MOV_R32_RM32", "eax", rip(DATA + 0x40)),
+        ins("MOV_RM32_R32", mem("rdi"), "eax"),
+        regs={"rdi": HUD},
+        shown=I32,
+    )
+    assert exec_address(g_path.load, WatchHit(0, {})) == DATA + 0x40

@@ -93,3 +93,13 @@ def test_build_notice_hidden_setting():
     assert Settings.load().build_notice_hidden is True
     Settings.path().write_text('{"build_notice_hidden": "yes"}', encoding="utf-8")
     assert Settings.load().build_notice_hidden is False, "not a yes/no: shown again"
+
+
+def test_trace_exec_breakpoint_setting():
+    s = Settings.load()
+    assert s.trace_exec_breakpoint is False, "off until C20d passes"
+    s.trace_exec_breakpoint = True
+    s.save()
+    assert Settings.load().trace_exec_breakpoint is True
+    Settings.path().write_text('{"trace_exec_breakpoint": 1}', encoding="utf-8")
+    assert Settings.load().trace_exec_breakpoint is False

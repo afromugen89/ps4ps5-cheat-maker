@@ -530,3 +530,53 @@ def test_progress_steps_and_bad_rows():
     assert fracs == sorted(fracs) and all(0 <= f <= 1 for f in fracs)
     with pytest.raises(ValueError, match="Pick one row"):
         Tracer(g.session, 0, F)
+
+
+# -- execute breakpoint fallback (setting trace_exec_breakpoint) --------------------------
+def wrong_regs_game():
+    """A float copy whose trap registers are wrong (rbx points at a decoy)."""
+    g = TraceGame()
+    obj, hud, decoy = g.alloc(0x40), g.alloc(0x80), g.alloc(0x40)
+    g.set(decoy + 0x10, F, 12.0)
+    g.set(obj + 0x10, F, 87.0)
+    r = g.routine(
+        ins("MOVSS_XMM_XMMM32", "xmm0", mem("rbx", 0x10)),
+        ins("MOVSS_XMMM32_XMM", mem("rdi", 0x40), "xmm0"),
+        regs={"rbx": obj, "rdi": hud},
+        trap_regs={"rbx": decoy},
+    )
+    return g, obj, hud, decoy, r.start
+
+
+def test_exec_fallback_finds_the_load_address(caplog):
+    caplog.set_level(logging.INFO, logger="cheatmaker.core.tracer")
+    g, obj, hud, decoy, load_ip = wrong_regs_game()
+    g.fake.exec_hits[load_ip] = [
+        WatchHit(load_ip, {"rbx": decoy, "rip": load_ip}),  # fails the memory check
+        WatchHit(load_ip, {"rbx": obj, "rip": load_ip}),
+    ]
+    player = Player(setter(g, obj + 0x10, F, 50.0), setter(g, obj + 0x10, F, 40.0))
+    r, _t, _c = run(g, hud + 0x40, F, player, exec_breakpoint=True)
+    assert r.outcome is Outcome.FOUND and r.address == obj + 0x10
+    assert r.hops[0].source.method == "exec" and r.hops[0].source.expr == "[rbx+10h]"
+    assert (load_ip, 1, "execute", tr.EXEC_S) in g.fake.watched
+    assert "method=exec" in caplog.text
+
+
+def test_exec_fallback_stops_when_the_breakpoint_repeats(caplog):
+    caplog.set_level(logging.INFO, logger="cheatmaker.core.tracer")
+    g, obj, hud, _decoy, load_ip = wrong_regs_game()
+    same = WatchHit(load_ip, {"rbx": obj, "rip": load_ip})
+    g.fake.exec_hits[load_ip] = [same] * tr.EXEC_HITS
+    r, _t, _c = run(g, hud + 0x40, F, Player(), exec_breakpoint=True)
+    assert r.outcome is Outcome.SEARCH_THAT_WAY
+    assert "the breakpoint repeats" in caplog.text
+    assert g.fake.writes == []
+
+
+def test_exec_fallback_is_off_by_default():
+    g, _obj, hud, _decoy, load_ip = wrong_regs_game()
+    g.fake.exec_hits[load_ip] = [WatchHit(load_ip, {"rbx": 0, "rip": load_ip})]
+    r, _t, _c = run(g, hud + 0x40, F)
+    assert r.outcome is Outcome.SEARCH_THAT_WAY
+    assert all(kind != "execute" for _a, _s, kind, _t in g.fake.watched)
