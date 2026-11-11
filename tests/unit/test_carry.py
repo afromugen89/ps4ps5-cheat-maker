@@ -17,6 +17,7 @@ from cheatmaker.core.values import ValueType
 from tests import fakegame as fg
 
 READER_OFF = fg.READER - fg.BASE
+NEW_V = fg.V2.version
 
 
 # -- helpers ------------------------------------------------------------------------------
@@ -791,3 +792,93 @@ def test_code_part_in_another_module_fails():
     old.cheats.append(pc)
     _plan, _new, report, _ = run_carry(old, fg.build(3, layout=fg.V2))
     assert report.failed["God"] == cr.OTHER_MODULE
+
+
+# -- AC-U9: cheat files holding the notes' hook ---------------------------------------------
+def hook_file(old: pj.Project) -> tuple:
+    """A V1 cheat file: the find-it-again hook, a plain code cheat, the PC-off cheat."""
+    from cheatmaker.core.cheats import Cheat, CheatFile, Location, LocationKind
+
+    g = fg.build(1)
+    obj = old.objects[0]
+    find = ah.hook_cheat(g.session, obj, "Find Health again")
+    keep = ah.hook_cheat(
+        g.session, obj, "Health (PC off)", ValueType.FLOAT.encode(999.0), ValueType.FLOAT
+    )
+    nop = Cheat(
+        "No death",
+        [Location(LocationKind.CODE_PATCH, fg.SUB_SITE - fg.BASE, b"\x90" * 6, fg.SUB_W)],
+    )
+    cf = CheatFile("Returnal", fg.TITLE, fg.VERSION, [find, nop, keep])
+    sigs = up.learn(cf, up.read_code_image(g.session))
+    return cf, sigs
+
+
+SHIFTED = dataclasses.replace(fg.V2, field_shift=0)  # code moved, the sub didn't change
+
+
+def test_split_hook_cheats_finds_the_notes_hook_and_pc_off_cheats():
+    old = learned_v1(1)
+    cf, _ = hook_file(old)
+    rest, lines = cr.split_hook_cheats(cf, old)
+    assert [c.name for c in rest.cheats] == ["No death"] and cf.cheats[1] is rest.cheats[0]
+    assert [(ln.cheat.name, ln.label, ln.kind) for ln in lines] == [
+        ("Find Health again", "Health", "find"),
+        ("Health (PC off)", "Health", "keep"),
+    ]
+    assert len(cf.cheats) == 3, "the file itself is unchanged"
+    assert cr.split_hook_cheats(cf, None) == (cf, [])
+
+
+def test_update_with_hooks_rebuilds_them_from_the_brought_over_notes():
+    old = learned_v1(1)
+    cf, sigs = hook_file(old)
+    g = fg.build(1, layout=SHIFTED)
+    _plan, new, report, _ = run_carry(old, g, pick=lambda _n: g.player)
+    assert report.carried == ["Infinite health"]
+    image = up.read_code_image(g.session)
+    out, rep = cr.update_with_hooks(g.session, cf, sigs, image, NEW_V, old, new)
+    assert [c.name for c in out.cheats] == ["Find Health again", "No death", "Health (PC off)"]
+    assert rep.moved == [c.name for c in out.cheats] and rep.failed == {}
+    h = new.objects[0].hook
+    find, nop, keep = out.cheats
+    assert [loc.offset for loc in find.locations] == [h.cave, h.hook]
+    assert [loc.offset for loc in keep.locations] == [ah.keep_cave(h), h.hook]
+    assert keep.value == 999.0 and keep.value_type is ValueType.FLOAT
+    assert nop.locations[0].offset == SHIFTED.sub_site - fg.BASE
+    assert out.version == NEW_V
+
+
+def test_update_with_hooks_before_a_bring_over_says_so():
+    old = learned_v1(1)
+    cf, sigs = hook_file(old)
+    g = fg.build(1, layout=SHIFTED)
+    image = up.read_code_image(g.session)
+    out, rep = cr.update_with_hooks(g.session, cf, sigs, image, NEW_V, old, None)
+    assert [c.name for c in out.cheats] == ["No death"]
+    assert rep.failed == {
+        "Find Health again": cr.HOOK_FILE_FIRST,
+        "Health (PC off)": cr.HOOK_FILE_FIRST,
+    }
+    assert "Not moved: Find Health again (bring your notes over first (My cheats))" in (
+        rep.summary(NEW_V)
+    )
+    plain = pj.Project(fg.TITLE, NEW_V, objects=list(old.objects))  # not brought over
+    _o, rep2 = cr.update_with_hooks(g.session, cf, sigs, image, NEW_V, old, plain)
+    assert rep2.failed["Find Health again"] == cr.HOOK_FILE_FIRST
+
+
+def test_rebuild_fails_plainly_without_a_hook_or_a_value():
+    old = learned_v1(1)
+    cf, _ = hook_file(old)
+    _rest, (find, keep) = cr.split_hook_cheats(cf, old)
+    g = fg.build(1, layout=fg.V2)
+    lost = cr.carried_object(old.objects[0])
+    lost.anchors = []
+    new = pj.Project(fg.TITLE, NEW_V, objects=[lost], carried_from=fg.VERSION)
+    with pytest.raises(cr.CarryFailed, match="the game's code changed where Health was found"):
+        cr.rebuild_hook_cheat(g.session, find, new)
+    keep.cheat.value_type = None
+    new.objects = [cr.carried_object(old.objects[0])]
+    with pytest.raises(cr.CarryFailed, match="make the PC-off cheat again"):
+        cr.rebuild_hook_cheat(g.session, keep, new)

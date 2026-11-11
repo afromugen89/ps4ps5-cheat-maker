@@ -472,3 +472,36 @@ def test_advanced_with_no_other_notes_says_so(make):
     app.connect()
     app.w.carry.open_advanced()
     assert app.w.status.text() == "There are no notes for Returnal from another version."
+
+
+# == AC-U9: Update for this version with the notes' hook in the file =========================
+def test_update_rebuilds_hook_lines_after_a_bring_over(make):
+    old = tc.learned_v1(1)
+    cf, sigs = tc.hook_file(old)
+    up.save_signatures(up.signatures_path(fg.TITLE, fg.VERSION), fg.TITLE, fg.VERSION, sigs)
+    app = make(Console(layout=tc.SHIFTED))
+    app.connect()
+
+    def update(file):
+        app.ctl.cheat_file = file
+        app.w.cheats._check_version()
+        assert not app.w.cheats.update_btn.isHidden()
+        app.w.cheats.update_btn.click()
+        return app.w.status.text()
+
+    first, _ = tc.hook_file(old)
+    text = update(first)
+    assert text == (
+        "Updated 1 of 3 cheats for version 03.001.000. Not moved: Find Health again (bring "
+        "your notes over first (My cheats)); Health (PC off) (bring your notes over first "
+        "(My cheats))"
+    )
+    app.ctl.cheat_file = None
+    app.bring()
+    assert app.w.status.text().startswith("Brought over 1 of 1 cheats")
+    text = update(cf)
+    assert text == "Updated 3 of 3 cheats for version 03.001.000."
+    h = pj.load(new_path()).objects[0].hook
+    find, _nop, keep = app.ctl.cheat_file.cheats
+    assert find.locations[1].offset == h.hook and find.locations[0].offset == h.cave
+    assert keep.value == 999.0

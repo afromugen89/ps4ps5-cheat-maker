@@ -20,11 +20,13 @@ from PySide6.QtWidgets import (
 )
 
 from cheatmaker import formats
+from cheatmaker.core import carry as cr
 from cheatmaker.core import cave as cv
+from cheatmaker.core import project as pj
 from cheatmaker.core import updater as up
 from cheatmaker.core.cheats import Cheat, Location, LocationKind, combine, versions_differ
 from cheatmaker.core.values import parse_number
-from cheatmaker.errors import CheatMakerError
+from cheatmaker.errors import CheatMakerError, ProjectFileError
 from cheatmaker.ui import hints
 from cheatmaker.ui.controller import Controller
 from cheatmaker.ui.find_again import FindAgain, LearnDialog
@@ -490,12 +492,22 @@ class CheatsView(QWidget):
             return
         session = self.ctl.session
         old_path = up.signatures_path(cf.title_id, cf.version)
+        notes_path = pj.project_path(cf.title_id, cf.version)
+        p = self.ctl.project  # the brought-over notes, if this version has them
+        new_notes = p if p is not None and not versions_differ(p.version, g.version) else None
         self.update_btn.setEnabled(False)
         self.hint.setText(hints.UPDATE_RUNNING)
 
         def work():
             image = up.read_code_image(session)
-            new, report = up.update_file(cf, up.load_signatures(old_path), image, g.version)
+            try:  # the old version's notes: read only, for its hook cheats (AC-U9)
+                old_notes = pj.load(notes_path)
+            except ProjectFileError as exc:
+                log.info("action=update_version old_notes=unreadable reason=%s", exc)
+                old_notes = None
+            new, report = cr.update_with_hooks(
+                session, cf, up.load_signatures(old_path), image, g.version, old_notes, new_notes
+            )
             up.save_signatures(
                 up.signatures_path(g.title_id, g.version),
                 g.title_id,

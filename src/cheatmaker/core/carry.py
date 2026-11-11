@@ -68,6 +68,8 @@ OTHER_MODULE = "it changes another part of the game"
 PART_FAILED = "part {part} couldn't be found ({why}); make it again"
 NO_OBJECT = "its value isn't in the notes any more"
 NOT_PICKED = "none of the places was picked"
+HOOK_FILE_FIRST = "bring your notes over first (My cheats)"
+PC_OFF_AGAIN = "make the PC-off cheat again (Find it next time)"
 
 HookHow = Literal["exact", "loose", "original"]
 
@@ -866,6 +868,104 @@ def _chain_object(obj: ObjectSpec, a: ChainAnchor, base: int, read_u64) -> int |
     return None if end is None else end - f.off
 
 
+# -- cheat files holding the notes' hook (AC-U9) ------------------------------------------
+@dataclass
+class HookLine:
+    """A cheat-file cheat that is a notes hook: ``find`` (capture routine + jump: find it
+    again) or ``keep`` (keep-value routine + jump: the PC-off cheat) of ``label``."""
+
+    cheat: Cheat
+    label: str
+    kind: Literal["find", "keep"]
+
+
+def split_hook_cheats(cf: CheatFile, old: Project | None) -> tuple[CheatFile, list[HookLine]]:
+    """The cheats that are the old notes' hook (two code lines: the hook's jump and its
+    capture or keep-value room) apart from the rest, which v2 moves as usual."""
+    if old is None:
+        return cf, []
+    hooks = [(o.label, a) for o in old.objects for a in o.anchors_of(HookAnchor)]
+    rest: list[Cheat] = []
+    lines: list[HookLine] = []
+    for c in cf.cheats:
+        offs = sorted(loc.offset for loc in c.locations if loc.kind is LocationKind.CODE_PATCH)
+        kind: Literal["find", "keep"] | None = None
+        label = ""
+        if len(offs) == 2 and len(c.locations) == 2:
+            for lbl, a in hooks:
+                if offs == sorted((a.hook, a.cave)):
+                    kind, label = "find", lbl
+                elif offs == sorted((a.hook, ah.keep_cave(a))):
+                    kind, label = "keep", lbl
+                if kind:
+                    break
+        if kind is None:
+            rest.append(c)
+        else:
+            lines.append(HookLine(c, label, kind))
+    return replace(cf, cheats=rest, credits=list(cf.credits)), lines
+
+
+def rebuild_hook_cheat(session: Session, line: HookLine, new: Project | None) -> Cheat:
+    """The hook cheat made again from the brought-over notes (new place, room and slot).
+    A PC-off cheat keeps its value. Raises CarryFailed."""
+    obj = None
+    if new is not None and new.carried_from is not None:
+        obj = next((o for o in new.objects if o.label == line.label), None)
+    if obj is None:
+        raise CarryFailed(HOOK_FILE_FIRST)
+    if obj.hook is None:
+        raise CarryFailed(CODE_CHANGED.format(label=line.label))
+    c = line.cheat
+    try:
+        if line.kind == "find":
+            return ah.hook_cheat(session, obj, c.name)
+        if c.value is None or c.value_type is None:
+            raise CarryFailed(PC_OFF_AGAIN)
+        return ah.hook_cheat(session, obj, c.name, c.value_type.encode(c.value), c.value_type)
+    except CarryFailed:
+        raise
+    except (FindFailed, LockFailed, ReadFailed) as exc:
+        raise CarryFailed(str(exc)) from exc
+
+
+def update_with_hooks(
+    session: Session,
+    cf: CheatFile,
+    sigs: dict[int, up.Signature],
+    image: up.CodeImage,
+    new_version: str,
+    old: Project | None,
+    new: Project | None,
+) -> tuple[CheatFile, up.UpdateReport]:
+    """v2's Update for this version, where the notes' hook cheats are made again from
+    the brought-over notes instead of moved (AC-U9). Cheats keep their order."""
+    rest, lines = split_hook_cheats(cf, old)
+    moved, report = up.update_file(rest, sigs, image, new_version)
+    if not lines:
+        return moved, report
+    rebuilt: dict[int, Cheat] = {}
+    for line in lines:
+        try:
+            rebuilt[id(line.cheat)] = rebuild_hook_cheat(session, line, new)
+        except CarryFailed as exc:
+            report.failed[line.cheat.name] = exc.reason
+            log.info("action=update_hook cheat=%s result=failed reason=%s", line.cheat.name, exc)
+    hook_ids = {id(line.cheat) for line in lines}
+    rest_failed = {c.name for c in rest.cheats if c.name in report.failed}
+    moved_iter = iter(moved.cheats)
+    cheats: list[Cheat] = []
+    for c in cf.cheats:
+        if id(c) in hook_ids:
+            if id(c) in rebuilt:
+                cheats.append(rebuilt[id(c)])
+        elif c.name not in rest_failed:
+            cheats.append(next(moved_iter))
+    report.moved = [c.name for c in cheats]
+    report.failed = {c.name: report.failed[c.name] for c in cf.cheats if c.name in report.failed}
+    return replace(moved, cheats=cheats), report
+
+
 # -- fingerprints for the notes (AC-U2) -------------------------------------------------
 def _code_parts(project: Project) -> list[ProjectPart]:
     return [
@@ -981,6 +1081,7 @@ __all__ = [
     "CarryReport",
     "Choice",
     "Classes",
+    "HookLine",
     "HookSite",
     "Item",
     "NeedPick",
@@ -1004,9 +1105,12 @@ __all__ = [
     "parts_to_learn",
     "place_hook",
     "prepare",
+    "rebuild_hook_cheat",
     "reset_class",
     "settle",
     "shift_fields",
+    "split_hook_cheats",
+    "update_with_hooks",
     "usable_version",
     "version_key",
 ]
