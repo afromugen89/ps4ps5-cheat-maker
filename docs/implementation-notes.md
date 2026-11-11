@@ -253,3 +253,31 @@ continues after an execute breakpoint (a repeating hit is logged as "the breakpo
 repeats" and ends the fallback; `trace_exec_breakpoint` stays off until C20d). The button
 stays under Advanced "(being tested)" until C20a passes (`hints.TRACE_TESTED`).
 Console tests C20a-i.
+
+Review follow-ups (2026-11-11):
+
+- A wider whole-number load (`mov rax,[m] ; mov [d],eax`, or `movzx` wider than the
+  copy) makes the source the loaded size, with `Kind.TRUNCATE` (wraps forward, kept as
+  is going back). `cvt(t)ss2si` into a 1- or 2-byte copy works in a 4-byte register and
+  keeps the low bits; an 8-byte whole number to float32 rounds once.
+- `writer_at` prefers a `rep movs` at RIP only when the instruction ending at RIP
+  doesn't store over the watched address by the trap's registers. `xorps`/`xorpd`
+  with a sign mask is a negation: not followed (not "scrambled").
+- `Tracer.run` turns any `CheatMakerError` into an outcome: a copy freed mid-check is
+  NOT_FOLLOWED, anything else the new FAILED; `trace_result`/`trace_restore` are logged
+  on every path, `not_restored` is always attached and shown for every outcome.
+- Running out of TOTAL_S in the memory check ends TOO_FAR with the last tested source
+  "not sure"; watches are capped at the time left.
+- A read-modify-write writer decides "already real" only with strictly the most
+  hits, or when no other writer's source passes the check (a tie goes to the check).
+- "Search for it that way" isn't offered when the way is the copy's own search (same
+  type, factor 1, no share of a max): NOT_FOLLOWED.
+- Traced rows are listed by (address, type) next to a search match at the same
+  address, and screen units convert only on a row of the traced type. When no real
+  value shows the typed number exactly, the nearest is written and the player told.
+- The button needs Advanced on while it sits there; suggesting it turns Advanced on.
+- `release` resumes what it paused if pausing fails half way, and resumes each item
+  on its own; only freezing cheats are paused (a one-shot cheat isn't written again);
+  anchored cheats are matched by their tracker's address. A cancelled or closed
+  dialog still reports `not_restored` on the status line; a disconnect waits up to
+  3 s (`STOP_WAIT_S`) for the trace to put its test values back.

@@ -291,8 +291,8 @@ health as 0.87 or as 870, or as a number of a different size, and your search on
 the HUD's copies. **Find the real one behind it** follows the copy back to the value the
 game really uses.
 
-It is still being tested on a real PS5, so for now it's under **Advanced**, labelled
-**Find the real one behind it (being tested)**. The hint suggests it (and the button
+It is still being tested on a real PS5, so for now it's under **Advanced** (tick
+Advanced to use it), labelled **Find the real one behind it (being tested)**. The hint suggests it (and the button
 turns bold) when **Check which is real** marks every row a copy, or when a value you
 Set or Freeze is put back by the game within 2 seconds.
 
@@ -316,7 +316,8 @@ list, marked **checked: real** (or **not sure** if it couldn't test it).
 **On a found row, you type what the screen shows.** Value now shows both, like
 `0.87 (screen: 87)`; Stored as shows how the game keeps it; Notes say which copy it was
 found behind. Set, Freeze and Make a cheat take the number as you see it on screen, so
-typing 100 sets the game's 1.0. A cheat saved from it holds the game's own number.
+typing 100 sets the game's 1.0. If the game can't show the exact number you typed, the app
+writes the nearest it can and says so. A cheat saved from it holds the game's own number.
 
 **Search for it that way**: the result also offers to start a new search with the right
 number type and "Game stores it as" already filled in, and today's on-screen number typed
@@ -333,6 +334,7 @@ Other answers you may see:
 | The game scrambles this value, which isn't supported yet. | The game hides this value on purpose. |
 | Followed it N steps without reaching the real value. | The last place it checked is added to the list, marked not sure. |
 | This address can't be watched. | Pick another row of the same group. |
+| The PS5 refused a step of the check. | Try again; if it keeps happening, press Copy log. |
 
 The button waits while a search or a check is still running. A frozen row or a cheat on
 the same value is paused during the trace and put back afterwards.
