@@ -47,6 +47,14 @@ Every console change goes through one `Builder._installed` record under a lock, 
 is idempotent (worker `finally`, Cancel, or `Controller.before_disconnect`). A crash note
 in `app_data_dir()/build_notes.json` is open while any candidate's bytes are in the game.
 
+Added after review (2026-11-11): installing a fix (Collect's sampler included), finalize's
+writes and the put back each run under one write lock (`Builder._op`), so `close()` from
+another thread waits for writes in progress (`CLOSE_WAIT_S`, else it reports
+`NOT_RESTORED`) and then puts back; `close()` is final. Cancel and closing the dialog only
+set the job's cancel while a job runs, so the worker puts back (no 2 s wait on the UI
+thread); Disconnect calls `close()` and waits. A put back the PS5 didn't take sets the
+sticky `Builder.not_restored`: no further fix is tried and the dialog says Restart.
+
 ## (1) Routine generation: `cave.effect_code`
 
 ```python

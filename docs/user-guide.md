@@ -352,7 +352,7 @@ or 8 bytes. For a combined cheat or one that is found again each run, the button
    - **Never goes down**: anything that would lower the value is ignored. Raising it
      still works (you can still pick up health or money).
    - **Always full**: the value always goes back to **Full**. Fill it up before you press
-     Start; you can type another Full number in the box.
+     Start: the value at Start is Full. To use another number, type it in the box.
    - **Half damage**: anything that lowers the value lowers it by half as much.
    - **Only me** (tick box): the cheat works for your character only. Enemies go through
      the game's own code, so they still take damage.
@@ -376,9 +376,11 @@ Good to know:
 - If enemies stop dying, make it again with **Only me** ticked.
 - **Cancel**, closing the window, or disconnecting puts the game back as it was.
 - If the game stops responding during a test, the app puts the game back and tries the
-  next fix. A fix that crashed the game is never tried again for that game version. If
-  the PS5 didn't answer at all, the app says "Restart the game: fixes only live in
-  memory until then."
+  next fix. A fix that crashed the game is never tried again for that game version
+  (leaving the game with the PS button doesn't count as a crash). If the PS5 didn't
+  answer at all, the app stops and says "Restart the game: fixes only live in memory
+  until then."
+- If no cheat is made, the My cheats row you started from is switched back on.
 - **Advanced: show details** lists the game code it caught, the ones it skipped and why,
   and every fix it tried.
 - Values that need two places held at once (like Returnal's health and its fraction) are
