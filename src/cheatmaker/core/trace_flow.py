@@ -230,6 +230,7 @@ class Path:
     reg: str | None = None  # BLOCK_START: the register the value arrives in
     followed: tuple[str, ...] = ()  # instruction texts, writer first (Advanced)
     reason: str = ""  # e.g. "add eax,ecx at 0x40123a"
+    lane: int = 0  # BLOCK_START: the byte of ``reg`` the value is in
 
 
 @dataclass(frozen=True)
@@ -390,7 +391,15 @@ def follow(win: Window, lane: int, read: Read, is_const: IsConst, shown: ValueTy
         return Path(
             End.NOT_FOLLOWED, None, followed=(first,), reason=f"the copy isn't all in {_where(w)}"
         )
-    walk = _Walk(win, read, is_const, shown, full_name(src), lane, shown, [], [first])
+    return follow_reg(win, full_name(src), lane, read, is_const, shown)
+
+
+def follow_reg(
+    win: Window, reg: str, lane: int, read: Read, is_const: IsConst, shown: ValueType
+) -> Path:
+    """Like ``follow``, but the value is in ``reg`` (byte ``lane``) when the window's
+    last instruction runs (a call that passes it as an argument)."""
+    walk = _Walk(win, read, is_const, shown, reg, lane, shown, [], [text(win.writer)])
     try:
         return _walk_back(walk, len(win.insns) - 2)
     except _Stop as stop:
@@ -419,7 +428,7 @@ def _walk_back(walk: _Walk, i: int) -> Path:
         if done is not None:
             return done
         i -= 1
-    return walk.path(End.BLOCK_START, reg=walk.tracked)
+    return walk.path(End.BLOCK_START, reg=walk.tracked, lane=walk.lane)
 
 
 def _dst_src(insn: ix.Instruction) -> tuple[int, int]:
@@ -833,3 +842,77 @@ def candidates(
     kind = method if method == "caller" else ("replay" if res.reads else "regs")
     address = (got[0] + path.load.lane) & _MASK64
     return [Candidate(address, kind, _expr(got, path.load.lane), max_address, writer)]
+
+
+# -- one caller up (AC-T4 rule 3) --------------------------------------------------------
+STACK_SEARCH = 512  # bytes of stack searched for return addresses
+ARGUMENT_REGS = frozenset({"rdi", "rsi", "rdx", "rcx", "r8", "r9"} | {f"xmm{i}" for i in range(8)})
+
+
+def _is_call(insn: ix.Instruction) -> bool:
+    return insn.flow_control in (ix.FlowControl.CALL, ix.FlowControl.INDIRECT_CALL)
+
+
+def _call_before(read: Read, ret: int) -> tuple[int, bytes, str] | None:
+    """The call instruction that ends at return address ``ret``, if there is one."""
+    for n in (2 * MAX_INSN, MAX_INSN):
+        try:
+            before = read(ret - n, n)
+        except Exception:  # near the start of a map: try fewer bytes
+            continue
+        return instruction_before(before, ret, want=_is_call)
+    return None
+
+
+def call_sites(stack: bytes, rsp: int, code_range: tuple[int, int], read: Read) -> list[int]:
+    """Return addresses on the stack at the trap (nearest first): qwords inside the
+    game's code whose preceding bytes decode to a call ending exactly there."""
+    lo, hi = code_range
+    out: list[int] = []
+    for off in range(0, len(stack) - 7, 8):
+        (v,) = struct.unpack_from("<Q", stack, off)
+        if lo <= v < hi and v not in out and _call_before(read, v) is not None:
+            out.append(v)
+    log.debug("action=trace_callers rsp=%#x found=%s", rsp, ",".join(f"{a:#x}" for a in out))
+    return out
+
+
+def caller_window(read: Read, ret: int) -> Window | None:
+    """The caller's code block that ends with the call returning to ``ret``."""
+    found = _call_before(read, ret)
+    if found is None:
+        return None
+    call_ip, call_code, _text = found
+    for n in (WINDOW, 64, 16, 0):
+        try:
+            code = read(call_ip - n, n) + call_code
+        except Exception:  # near the start of a map
+            continue
+        return decode_window(code, call_ip, len(call_code))
+    return None
+
+
+def follow_into_caller(
+    read: Read,
+    ret: int,
+    reg: str,
+    lane: int,
+    hit: WatchHit,
+    is_const: IsConst,
+    shown: ValueType,
+    callee: Window,
+    watched: int,
+) -> tuple[Path, list[Candidate]]:
+    """The value arrived in argument register ``reg`` at the start of the callee
+    (``callee``): follow it back in the caller from the call that returns to ``ret``,
+    then work out the address with only the registers a call keeps (rbx, rbp,
+    r12-r15) from the trap, and only those the callee's own code doesn't write.
+    ``shown`` is the type the callee's path starts from (its way's ``real``)."""
+    win = caller_window(read, ret)
+    if win is None:
+        return Path(End.NOT_FOLLOWED, None, reason=f"no call before {ret:#x}"), []
+    path = follow_reg(win, reg, lane, read, is_const, shown)
+    written = set().union(*(written_registers(i) for i in callee.insns))
+    allowed = frozenset(CALLEE_SAVED - written)
+    cands = candidates(win, path, hit, watched, read, allowed=allowed, method="caller")
+    return path, cands
