@@ -547,7 +547,10 @@ for about 2 minutes."*
    values that don't move, or memory paths, is done in under 30 seconds.
 2. At the end one line says what came over, for example *"Brought over 3 of 4 cheats for
    version 03.001.000. Check them: Health, Obolites. Not brought over: Shield (the game's
-   code changed where it was found)."*
+   code changed where it was found)."* If the game didn't use a value while you played,
+   the line says so, for example *"Health: brought over, not seen yet; take a hit (or
+   change it in the game) and it will be found."* Its cheat came over: take a hit, then
+   press **Find it again**.
 3. **Not now** hides the offer for this pair of versions. You can still use **Advanced:
    Bring notes from an older version...** in My cheats (with *Advanced: show details* on);
    it lets you pick the version, and into notes that already hold values it adds only
@@ -570,8 +573,10 @@ didn't come over stays in the old version's notes; make it again.
 **Cheat files** made for an older version: a warning appears with an **Update for this
 version** button. It finds your cheats in the new version's code and moves them there.
 Lines that are the find-it-again hook or a cheat that works with the PC off are made again
-from your brought-over notes, so bring your notes over first. Tick each one to test it,
-then **Save**: the new file is named for the new version.
+from your brought-over notes, so bring your notes over first. A cheat that works with the
+PC off is made again only after you confirmed its value (tick it in My cheats, answer
+Yes), then press **Update for this version** again. Tick each one to test it, then
+**Save**: the new file is named for the new version.
 
 ---
 

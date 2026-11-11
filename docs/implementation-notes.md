@@ -353,10 +353,7 @@ Small changes against the design, each keeping the spec's behaviour:
 - **Rollback.** Cancel, an error, a dropped link or another game process takes out every
   hook this run put in (`finder.take_out`), re-keeps the notes' rooms and saves nothing;
   the offer shows again (or on the next connect after a dropped link). A value not found
-  by locate has its hook taken out *before* `settle` drops its ways. If that take-out
-  fails, the hook stays recorded in FindAgain but its notes object no longer names it, so
-  it isn't taken out on close (rare: the console refused a write); a later Find it next
-  time reuses the room only if it's free.
+  by locate after its hook was placed keeps the hook (see the review fixes below).
 - **The run reads the code once.** The new version's fingerprints are learned from the
   same image at the end (on a copy, applied on the UI thread), and `NoteFingerprints`
   is told (`mark_learned`) so it doesn't read again. While `finder.carrying` is set the
@@ -381,3 +378,48 @@ Small changes against the design, each keeping the spec's behaviour:
 - Tests: `tests/ui/test_carry_over.py` (offer, run, Cancel at each step, dropped link,
   merge, AC-U9, dry run with the tool), `tests/ui/test_game_update.py` (question, check it,
   fingerprints), `tests/unit/test_carry.py`, `tests/unit/test_tools.py`.
+
+## Bring notes over: review fixes (2026-11-11)
+
+- **Not seen yet (decision from review M4).** When locate finds nothing after the new
+  hook went in and its slot was proven, the hook and its class are kept and the hook
+  stays in the game (recorded with `note_install`, taken out on close or when its last
+  cheat goes off, like any notes hook). The object is saved with `check=True`, gets no
+  tracker, and is found by Find it again / the next connect once the game runs that
+  code. Its cheats count as brought over; the summary adds "<value>: brought over, not
+  seen yet; take a hit (or change it in the game) and it will be found." Only when
+  nothing was placed are all ways dropped. This replaces "take the hook out before
+  settle" from steps 7-12.
+- **A rollback while a pick dialog is open** (disconnect, another game process) ends the
+  run quietly: each step checks that its run is still the current one after `ask_pick`
+  and returns early instead of asserting.
+- **place_hook** checks Cancel and that the game process is the same right before
+  `ah.install` (the slot check can be long). A hook that still goes in after a rollback
+  is recorded, then taken out at once.
+- **Rooms are passed, not set from workers**: `cv.find_slot(session, extra_reserved)`,
+  `cv.collect_objects(..., extra_reserved=)` and `ah.plan_hook(..., reserved=)`;
+  `session.reserved_rooms` is only written on the UI thread (`keep_rooms`).
+- **Update for this version (AC-U9)** passes `reserved` (the session's rooms, the
+  brought-over notes' hook rooms and code-part rooms, snapshot on the UI thread) to
+  `update_file`, so a moved cave never lands on them. Results are matched to cheats by
+  identity, not name (two cheats may share a name). A PC-off ("keep") hook line is
+  rebuilt only once its value is confirmed (`check` cleared): until then it says "confirm
+  Health in My cheats first, then update again", since the class may still be unlearned.
+- **The old class is taken as is** only when the hook site didn't move either (a dry run).
+- **A hooked instruction under 5 bytes** in the new code fails its hook (the jump would
+  cover the next instruction).
+- **Only fixed code parts in the game's module** make prepare read the game's code; a
+  fixed data value or another module's part still fails its cheat without a read.
+- **Ids**: brought-over objects get ids that neither the notes nor a hook still in the
+  game (`finder.installed`) use (`for_merge(..., avoid=)`, also without a merge).
+- **One job on the game at a time**: Bring them over waits (plain message) while Find it
+  again runs or the code is being read; Find it again doesn't start while bringing over;
+  Update for this version is disabled while bringing over.
+- **After the run**, `run` is cleared and `carrying` is off before the final fingerprint
+  learning, which runs detached (bar mode `learning`, no Cancel) with `code_reading` set
+  so no second code read starts.
+- **tools/make_old_notes.py** writes `<TITLE>_make_old_notes.json` (title, both versions,
+  files it wrote) next to the notes. `--undo` refuses without a record for the same title
+  and versions (so a typo never touches real notes), uses the versions as recorded for
+  the file names, and moves its copies aside as `.carried` instead of deleting them. A
+  second dry run is refused until `--undo`.

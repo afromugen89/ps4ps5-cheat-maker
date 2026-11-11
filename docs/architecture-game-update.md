@@ -168,16 +168,23 @@ Rules:
   watched")`. Player-only field guess: find the player by the old guess (as is, then
   shifted); one match -> take it; several plausible -> `NeedPick`; none -> fail. Then
   `cv.compare_objects(player, objects)` gives the new `HookFilter("field")`, or `none`.
-- **place_hook**: `session.reserved_rooms = plan.reserved + rooms placed so far`;
-  `ah.plan_hook(...)` (re-checks the 5+ byte single-instruction rule, orig bytes from the
-  new code), `ah.prove_slot(..., cancel)`, `ah.install`, `on_install` (=
-  `finder.note_install`). Errors raise `CarryFailed` with existing plain text.
+- **place_hook**: `ah.plan_hook(..., reserved=plan.reserved + rooms placed so far)` (the
+  rooms are passed, never set on the session from a worker; re-checks the 5+ byte
+  single-instruction rule, orig bytes from the new code), `ah.prove_slot(..., cancel)`,
+  then Cancel and an unchanged game process are checked again, `ah.install`, `on_install`
+  (= `finder.note_install`; a run already rolled back takes the hook out at once). Errors
+  raise `CarryFailed` with existing plain text. `Item.placed` is set once the hook is in.
 - **locate**: `rf.find_again(session, obj, use_scan=False, learn_chains=False,
   cancel=cancel)`; `disagree` goes to the UI (`ask_pick`, then `rf.confirm_pick`).
 - **settle**: static kept only if it gives the address; chains that resolve there kept with
-  `runs_seen=1`, others dropped; a placed hook kept; no address -> all anchors dropped
-  (saved with no way to be found, AC-U7). Static/chain objects, and hooked objects with no
-  class collected, get `reset_class`.
+  `runs_seen=1`, others dropped; a placed hook kept. No address after a hook was placed
+  (slot proven) -> the hook (and its class) is kept and stays in the game, static/chain
+  ways are dropped; the object is saved with `check=True` and found by the normal Find
+  again path (or the next connect) once the game runs that code; the summary says
+  "Health: brought over, not seen yet; take a hit (or change it in the game) and it will
+  be found." and its cheats count as brought over. No address and nothing placed -> all
+  anchors dropped (saved with no way to be found, AC-U7). Static/chain objects, and hooked
+  objects with no class collected, get `reset_class`.
 - **assemble**: `Project(title, new_version, process, objects, cheats, history=[],
   carried_from=old.version)`; every object `check=True`; single cheats always copied;
   combined only if every fixed part moved (new offsets/bytes, `test=True` if code parts).
