@@ -15,6 +15,7 @@ Pure: it takes decoded iced-x86 instructions, the trap registers and an injected
 from __future__ import annotations
 
 import logging
+import math
 import struct
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -103,6 +104,7 @@ _MULDIV = {  # (kind, number type)
 _ZEROING = {M.XOR, M.PXOR, M.XORPS, M.XORPD, M.VPXOR, M.VXORPS, M.VXORPD, M.SUB}
 _SCRAMBLE = {M.XOR, M.PXOR, M.XORPS, M.XORPD, M.VPXOR, M.VXORPS, M.VXORPD}
 _SCRAMBLE |= {M.ROL, M.ROR, M.NOT, M.BSWAP}
+_FLOAT_XORS = {M.XORPS, M.XORPD, M.VXORPS, M.VXORPD}  # with a sign mask: a negation
 _OFFSETS = {M.ADD, M.SUB, M.INC, M.DEC, M.NEG, M.ADDSS, M.SUBSS, M.ADDSD, M.SUBSD}
 _OFFSETS |= {M.VADDSS, M.VSUBSS, M.VADDSD, M.VSUBSD}
 CALLEE_SAVED = frozenset({"rbx", "rbp", "r12", "r13", "r14", "r15"})
@@ -306,19 +308,42 @@ def decode_window(code: bytes, writer_ip: int, writer_len: int) -> Window:
     return Window((*reversed(back), writer), marker)
 
 
-def writer_at(code_before: bytes, code_at: bytes, rip: int) -> tuple[int, bytes, str] | None:
+def writer_at(
+    code_before: bytes,
+    code_at: bytes,
+    rip: int,
+    hit: WatchHit | None = None,
+    watched: int | None = None,
+) -> tuple[int, bytes, str] | None:
     """The writing instruction for a data trap at ``rip``. Normally the one that ends
     at ``rip`` (``locker.instruction_before``). A ``rep movs``/``rep stos`` trapped
     mid-copy can leave RIP **at** itself, so that one is preferred when it is there
-    (UNVERIFIED on the console: the caller logs which reading was used)."""
+    (UNVERIFIED on the console: the caller logs which reading was used), unless the
+    instruction ending at ``rip`` stores over ``watched`` by the trap's registers: then
+    the trap is that store's, and the ``rep`` after it hasn't run yet."""
     at = ix.Decoder(64, code_at, ip=rip).decode()
+    before = instruction_before(code_before, rip)
     if (
         at.code != ix.Code.INVALID
         and (at.has_rep_prefix or at.has_repe_prefix)
         and at.mnemonic in (M.MOVSB, M.MOVSW, M.MOVSD, M.MOVSQ, M.STOSB, M.STOSW, M.STOSD, M.STOSQ)
+        and not _stores_over(before, hit, watched)
     ):
         return rip, bytes(code_at[: at.len]), text(at)
-    return instruction_before(code_before, rip)
+    return before
+
+
+def _stores_over(
+    found: tuple[int, bytes, str] | None, hit: WatchHit | None, watched: int | None
+) -> bool:
+    """Does the instruction ``found`` store over ``watched``, by ``hit``'s registers?"""
+    if found is None or hit is None or watched is None:
+        return False
+    insn = ix.Decoder(64, found[1], ip=found[0]).decode()
+    addr = store_address(insn, hit)
+    if addr is None:
+        return False
+    return addr <= watched < addr + max(1, ix.MemorySizeInfo(insn.memory_size).size)
 
 
 # -- following the value -------------------------------------------------------------------
@@ -479,6 +504,8 @@ def _step(walk: _Walk, insn: ix.Instruction, i: int) -> Path | None:
         raise _Stop(End.CONSTANT, _where(insn))
     if m in _ZEROING and insn.op_count >= 2 and _same_regs(insn):
         raise _Stop(End.CONSTANT, _where(insn))
+    if m in _FLOAT_XORS and _negates(walk, insn, i):
+        raise _Stop(End.NOT_FOLLOWED, f"{_where(insn)} flips its sign")
     if m in _SCRAMBLE:
         raise _Stop(End.SCRAMBLED, _where(insn))
 
@@ -664,6 +691,16 @@ def _constant(
                 return _bits(prev.immediate(1), double), None
         return None, None
     return None, None
+
+
+def _negates(walk: _Walk, insn: ix.Instruction, i: int) -> bool:
+    """``xorps xmm0,[sign mask]``: the other operand is the constant -0.0 (only the sign
+    bit set), so the value is negated, not scrambled."""
+    for op in (2, 1) if insn.op_count == 3 else (1,):
+        const, _load = _constant(walk, insn, i, op)
+        if const == 0 and math.copysign(1.0, const) < 0:
+            return True
+    return False
 
 
 def _bits(raw: int, double: bool) -> float:

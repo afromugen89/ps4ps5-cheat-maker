@@ -415,7 +415,11 @@ class Tracer:
             at = self._read(rip, tf.MAX_INSN)
         except ReadFailed:
             at = b""
-        found = tf.writer_at(before[-CONTEXT:], at, rip) if before or at else None
+        found = (
+            tf.writer_at(before[-CONTEXT:], at, rip, hits[0], hop.watched.address)
+            if before or at
+            else None
+        )
         if found is None:
             log.warning("action=trace_writer rip=%#x no writing instruction found", rip)
             return None

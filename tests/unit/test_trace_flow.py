@@ -7,6 +7,7 @@ import struct
 
 import pytest
 
+from cheatmaker.console.client import WatchHit
 from cheatmaker.core.trace_flow import (
     End,
     MemRef,
@@ -26,6 +27,7 @@ RODATA = 0x404000
 DATA = 0x405000
 K100 = RODATA + 0x10
 KEY = RODATA + 0x20
+SIGN = RODATA + 0x30  # 0x80000000: the sign bit of a float
 GMAX = DATA + 0x30  # a writable global
 
 
@@ -39,6 +41,7 @@ class Memory:
         }
         self.put(K100, struct.pack("<f", 100.0))
         self.put(KEY, struct.pack("<I", 0x5A5A5A5A))
+        self.put(SIGN, struct.pack("<I", 0x80000000))
 
     def put(self, addr: int, data: bytes) -> None:
         for start, buf in self.regions.items():
@@ -340,6 +343,21 @@ def test_ends(insns, end):
     assert p.way is None
 
 
+def test_float_xor_with_a_sign_mask_is_a_negation_not_scrambling():
+    p = trace(
+        ins("MOVSS_XMM_XMMM32", "xmm0", mem("rbx")),
+        ins("XORPS_XMM_XMMM128", "xmm0", rip(SIGN)),
+        ins("MOVSS_XMMM32_XMM", mem("rdi"), "xmm0"),
+    )
+    assert p.end is End.NOT_FOLLOWED and p.reason.endswith("flips its sign")
+    p = trace(
+        ins("MOVSS_XMM_XMMM32", "xmm0", mem("rbx")),
+        ins("XORPS_XMM_XMMM128", "xmm0", rip(KEY)),
+        ins("MOVSS_XMMM32_XMM", mem("rdi"), "xmm0"),
+    )
+    assert p.end is End.SCRAMBLED
+
+
 def test_not_followed_names_the_instruction():
     p = trace(
         ins("MOV_R32_RM32", "eax", mem("rsi", 8)),
@@ -403,6 +421,14 @@ def test_block_copy_and_writer_at():
     # an ordinary writer ends at RIP
     plain = asm(CODE, ins("MOV_RM32_R32", mem("rdi"), "eax"))
     assert writer_at(b"\xcc" * 8 + plain, b"\xcc" * 8, CODE + len(plain))[0] == CODE
+    # a store right before the rep that wrote the watched address: the trap is its own
+    store = asm(CODE, ins("MOV_RM32_R32", mem("rdi"), "eax"), rep_movsb())
+    rep2 = ends(store, CODE)[0]
+    head, tail = b"\xcc" * 16 + store[: rep2 - CODE], store[rep2 - CODE :]
+    hit = WatchHit(rep2, {"rdi": 0x5000, "rip": rep2})
+    assert writer_at(head, tail, rep2, hit, 0x5000)[0] == CODE
+    assert writer_at(head, tail, rep2, hit, 0x6000)[0] == rep2, "stored elsewhere"
+    assert writer_at(head, tail, rep2)[0] == rep2, "no trap registers: the rep"
     win = decode_window(b"\xcc" * 8 + code, rep_ip, 2)
     p = follow(win, 0, Memory().read, Memory.is_const, I32)
     assert p.end is End.BLOCK_COPY and p.way.real is I32
