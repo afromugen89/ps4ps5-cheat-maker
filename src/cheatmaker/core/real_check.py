@@ -75,8 +75,8 @@ class Result:
 
 def probe_value(vtype: ValueType, current: float | int) -> float | int:
     """A value the game would not write by itself: about three quarters of the current
-    one (lower, so a game that caps a value at its maximum doesn't put it back). 0, 1
-    and odd decimals go up a little instead."""
+    one (lower, so a game that caps a value at its maximum doesn't put it back). Whole
+    numbers -1 to 1 and decimals 0, NaN and infinity go up a little instead."""
     if vtype.is_float:
         if not math.isfinite(current) or current == 0:
             return float(TEST_STEP)
@@ -102,7 +102,11 @@ def targets_from_groups(
     for g in groups:
         if not g.head.changed:
             continue
-        members = [Target(m.address, m.vtype) for m in g.members if m.address not in skip]
+        members = [
+            Target(m.address, m.vtype)
+            for m in g.members
+            if not any(m.address - 7 <= a < m.address + m.vtype.size for a in skip)
+        ]
         members = members[:ROUNDS_LIMIT]
         members = members[: CHECK_LIMIT - total]
         if members:
@@ -122,7 +126,8 @@ def targets_from_list(
     seen: set[Key] = set()
     out = []
     for addr, vt in rows:
-        if addr and addr not in skip and (addr, vt) not in seen:
+        frozen = any(addr - 7 <= a < addr + vt.size for a in skip)
+        if addr and not frozen and (addr, vt) not in seen:
             seen.add((addr, vt))
             out.append(Target(addr, vt))
     return [out[:LIST_LIMIT]] if out else []
@@ -133,6 +138,7 @@ class _Written:
     target: Target
     original: bytes
     test: bytes
+    failed: bool = False  # the console refused the write (part may have landed)
 
 
 def _overlap(a: Target, b: Target) -> bool:
@@ -144,14 +150,17 @@ def _follows(
 ) -> bool:
     """``o`` changed the way the tried value did: from x to about x * test / old (a copy
     keeps the same factor to the value it copies). When the tried value was 0 the factor
-    isn't known, so any change counts."""
+    isn't known, so a copy that was 0 and changed the same way (sign) counts."""
     if before is None or after is None or before == after:
         return False
     x, y = o.vtype.decode(before), o.vtype.decode(after)
     if not (math.isfinite(x) and math.isfinite(y)):
         return False
     if old == 0 or not math.isfinite(old):
-        return True
+        # A copy of 0 is 0 at any factor: only a 0 that changed can be following it.
+        return x == 0 and y != 0 and (y > 0) == (test > 0)
+    if x == 0:
+        return False  # a copy of a value that isn't 0 isn't 0
     want = x * (test / old)
     slack = FOLLOW_TOL * abs(want) + (1e-6 if o.vtype.is_float else 1.0)
     return y != x and abs(y - want) <= slack
@@ -176,6 +185,7 @@ class RealChecker:
         self.settle_s = SETTLE_S if settle_s is None else settle_s
         self.wait = wait or time.sleep
         self.results: dict[Key, Result] = {}
+        self.not_restored: list[int] = []  # addresses a lost link kept from being put back
 
     @property
     def rounds(self) -> int:
@@ -225,10 +235,19 @@ class RealChecker:
                     # as two types in two groups): writing both would mix them up
                     self.results[key] = Result(Verdict.FAILED)
                     continue
-                orig = before[key]
+                # Read again right before the write: earlier writes this round took
+                # time, and the game may have changed it since (picked up ammo).
+                try:
+                    orig = self.client.read(self.pid, t.address, t.vtype.size)
+                except ReadFailed:
+                    self.results[key] = Result(Verdict.FAILED)
+                    continue
+                before[key] = orig
                 try:
                     data = t.vtype.encode(probe_value(t.vtype, t.vtype.decode(orig)))
                 except (ValueError, OverflowError):
+                    data = orig
+                if data == orig:  # e.g. the tiniest decimal: 3/4 of it is itself
                     self.results[key] = Result(Verdict.FAILED)
                     continue
                 w = _Written(t, orig, data)
@@ -236,16 +255,25 @@ class RealChecker:
                 try:
                     self.client.write(self.pid, t.address, data)
                 except WriteFailed:
-                    written.pop()  # refused: nothing landed
-                    self.results[key] = Result(Verdict.FAILED)
+                    # Refused, but part of it may have landed (NG checks after sending):
+                    # it stays noted, so the put-back puts the original back if it did.
+                    w.failed = True
             self.wait(self.settle_s)
             after = self._read_all(everyone)
         except Exception:
-            self._put_back([w for _g, w in written], None)
+            self._put_back([w for _g, w in written])
             raise
+        # Members written this round are someone else's test value, not followers.
+        busy = [w.target for _g, w in written]
         for g, w in written:
-            self.results[(w.target.address, w.target.vtype)] = self._judge(g, w, before, after)
-        self._put_back([w for _g, w in written], after)
+            key = (w.target.address, w.target.vtype)
+            if w.failed:
+                self.results[key] = Result(Verdict.FAILED)
+                continue
+            # its own bytes read as another type would "follow" it exactly
+            others = [w.target] + [o for o in g if not any(_overlap(o, b) for b in busy)]
+            self.results[key] = self._judge(others, w, before, after)
+        self._put_back([w for _g, w in written])
         if written:
             self.wait(self.settle_s / 2)  # let the copies follow the put-back value
 
@@ -269,18 +297,25 @@ class RealChecker:
         )
         return Result(Verdict.REAL if followers else Verdict.KEPT, followers)
 
-    def _put_back(self, written: list[_Written], after: dict[Key, bytes] | None) -> None:
-        """Original bytes back where the test value still is. Where the game already
-        wrote its own value, that one stays. Tries all, then raises the first error."""
+    def _put_back(self, written: list[_Written]) -> None:
+        """Original bytes back where the test value still is, read again right before
+        each write. Where the game already wrote its own value, that one stays. Tries
+        all, then raises the first error; ``not_restored`` lists what may still hold a
+        test value."""
         first: Exception | None = None
         for w in written:
             t = w.target
-            if after is not None and after.get((t.address, t.vtype)) not in (w.test, None):
-                continue
             try:
+                try:
+                    now = self.client.read(self.pid, t.address, t.vtype.size)
+                except ReadFailed:
+                    continue  # gone (an area unloaded): nothing to put back
+                if now != w.test:
+                    continue
                 self.client.write(self.pid, t.address, w.original)
             except Exception as exc:  # a lost link: try the rest, report the first
                 log.warning("action=real_check_restore_failed addr=%#x", t.address)
+                self.not_restored.append(t.address)
                 first = first or exc
         if first is not None:
             raise first

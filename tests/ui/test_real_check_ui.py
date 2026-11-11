@@ -148,3 +148,36 @@ def test_lost_link_during_the_check(win, fake):
     f.check_btn.click()
     assert not win.ctl.session.connected
     assert f._cancel is None
+
+
+def test_results_of_a_check_that_outlived_its_search_are_dropped(win, fake):
+    f = win.find
+    full_and_three_hits(win, fake)
+    game_copies_health(fake)
+    checker = real_check.RealChecker(
+        fake, PID, real_check.targets_from_groups(f.groups), wait=lambda _s: None
+    )
+    gen = f._search_gen
+    checker.run()
+    f.do_reset()  # e.g. a new game started while it ran
+    f._after_check(checker, False, gen)
+    assert f.verdicts == {}
+
+
+def test_hint_when_nothing_could_be_checked(win, fake):
+    f = win.find
+    full_and_three_hits(win, fake)
+    fake.fail_writes = True
+    f.check_btn.click()
+    assert {r.verdict for r in f.verdicts.values()} == {Verdict.FAILED}
+    assert f.hint.text() == hints.CHECK_REAL_FAILED
+
+
+def test_live_list_runs_again_and_a_second_check_works(win, fake):
+    f = win.find
+    full_and_three_hits(win, fake)
+    game_copies_health(fake)
+    f.check_btn.click()
+    assert f.timer.isActive()
+    f.check_btn.click()
+    assert f.groups[0].head.address == HP and hp_now(fake) == 25.0

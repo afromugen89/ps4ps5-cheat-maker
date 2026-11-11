@@ -241,3 +241,117 @@ def test_same_bytes_in_two_groups_are_not_written_twice(game):
     assert chk.results[(REAL, I32)].verdict is Verdict.FAILED
     assert chk.results[(REAL, F)].verdict is Verdict.KEPT
     assert get(game, REAL) == 3.0
+
+
+# -- review fixes ------------------------------------------------------------------
+@pytest.mark.parametrize(
+    ("vt", "cur", "want"), [(ValueType.INT8, -128, -96), (ValueType.INT8, -2, -1), (I32, -1, 6)]
+)
+def test_probe_value_edges(vt, cur, want):
+    assert probe_value(vt, cur) == want
+
+
+def test_tiniest_decimal_is_not_checked(game):
+    tiny = HEAP_BASE + 0xD00
+    game.poke(PID, tiny, b"\x01\x00\x00\x00")  # 3/4 of it rounds back to itself
+    chk = run(game, [[Target(tiny, F)]])
+    assert chk.results[(tiny, F)].verdict is Verdict.FAILED
+    assert game.writes == []
+
+
+def test_original_is_read_right_before_the_write(game):
+    """The game changes it between the round's first read and its write: that value,
+    not the older one, goes back."""
+    ammo = HEAP_BASE + 0xD10
+    game.poke(PID, ammo, struct.pack("<i", 30))
+    reads = []
+
+    def pick_up() -> None:
+        reads.append(1)
+        if len(reads) == 2:  # after the round's first read, before the write
+            game.poke(PID, ammo, struct.pack("<i", 40))
+
+    game.game_ticks.append(pick_up)
+    run(game, [[Target(ammo, I32)]])
+    assert get(game, ammo, I32) == 40
+
+
+def test_game_change_after_the_read_back_is_kept(game):
+    """A hit lands after the read back, before the put-back: the game's value stays."""
+    hp = HEAP_BASE + 0xD20
+    game.poke(PID, hp, struct.pack("<i", 100))
+    state = {"n": 0}
+
+    def hit() -> None:
+        if get(game, hp, I32) == 75:
+            state["n"] += 1
+            if state["n"] == 2:  # the read back has seen 75; now the game writes 70
+                game.poke(PID, hp, struct.pack("<i", 70))
+
+    game.game_ticks.append(hit)
+    run(game, [[Target(hp, I32)]])
+    assert get(game, hp, I32) == 70
+
+
+def test_lost_link_on_the_second_write_puts_the_first_back(game):
+    other = HEAP_BASE + 0xD30
+    game.poke(PID, other, f32(5.0))
+    real_write = game.write
+
+    def write(pid, addr, data):
+        if addr == other:
+            raise ConnectionLost("gone")
+        real_write(pid, addr, data)
+
+    game.write = write
+    chk = RealChecker(game, PID, [[Target(REAL, F)], [Target(other, F)]], wait=lambda _s: None)
+    with pytest.raises(ConnectionLost):
+        chk.run()
+    assert get(game, REAL) == 3.0
+
+
+def test_refused_write_that_landed_is_put_back(game):
+    from cheatmaker.errors import WriteFailed
+
+    real_write = game.write
+
+    def write(pid, addr, data):
+        real_write(pid, addr, data)
+        if data == f32(2.25):
+            raise WriteFailed("read-back differs")
+
+    game.write = write
+    chk = run(game, [[Target(REAL, F)]])
+    assert chk.results[(REAL, F)].verdict is Verdict.FAILED
+    assert get(game, REAL) == 3.0
+
+
+def test_failed_put_back_tries_the_rest_and_says_which(game):
+    from cheatmaker.errors import WriteFailed
+
+    a, b = HEAP_BASE + 0xD40, HEAP_BASE + 0xD50
+    game.poke(PID, a, f32(8.0))
+    game.poke(PID, b, f32(8.0))
+    real_write = game.write
+
+    def write(pid, addr, data):
+        if addr == a and data == f32(8.0):
+            raise WriteFailed("no")
+        real_write(pid, addr, data)
+
+    game.write = write
+    chk = RealChecker(game, PID, [[Target(a, F)], [Target(b, F)]], wait=lambda _s: None)
+    with pytest.raises(WriteFailed):
+        chk.run()
+    assert chk.not_restored == [a]
+    assert get(game, b) == 8.0
+
+
+def test_a_zero_tried_value_only_counts_zeros_that_changed():
+    from cheatmaker.core.real_check import _follows
+
+    i = Target(0, I32)
+    enc = I32.encode
+    assert not _follows(i, enc(1234), enc(1300), 0, 7), "a moving counter isn't a copy of 0"
+    assert _follows(i, enc(0), enc(700), 0, 7)
+    assert not _follows(i, enc(0), enc(1), 100, 75), "a copy of 100 isn't 0"

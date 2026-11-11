@@ -106,6 +106,8 @@ class FindWizard(QWidget):
         self.manual: dict[int, ValueType] = {}  # addresses the player typed in
         # Check which is real: what each checked match did with its test value
         self.verdicts: dict[tuple[int, ValueType], Result] = {}
+        self._search_gen = 0  # bumped when the search ends: a running check's results drop
+        self._checking = False
         self.pointers: dict[Chain, ValueType] = {}  # chains followed on every refresh
         self.row_chains: list[Chain | None] = []
         self._cancel: threading.Event | None = None
@@ -682,6 +684,16 @@ class FindWizard(QWidget):
     def do_cancel(self) -> None:
         if self._cancel is not None:
             self._cancel.set()
+            if self._checking:
+                self.hint.setText(hints.CHECK_REAL_STOPPING)
+
+    def _end_search(self) -> None:
+        """The matches are gone: a running check stops after its round (with the values
+        put back) and its results are thrown away."""
+        self._search_gen += 1
+        if self._checking and self._cancel is not None:
+            self._cancel.set()
+        self.verdicts.clear()
 
     def do_reset(self) -> None:
         try:
@@ -697,7 +709,7 @@ class FindWizard(QWidget):
             self._guide_set_advanced = False
         self.rows = []
         self._n_matches = 0
-        self.verdicts.clear()
+        self._end_search()
         self._show_groups([])
         self.count.setText("")
         self.number.clear()
@@ -882,7 +894,7 @@ class FindWizard(QWidget):
             item.setText(2, "")
         elif member is None:  # the group's row
             notes = [g.label] if g.label else []
-            if checked is not None and checked.verdict is Verdict.REAL:
+            if checked is not None and (checked.verdict is Verdict.REAL or not g.copies):
                 notes = [checked.verdict.short]
             if g.copies:
                 notes.append(f"+{g.copies} {'copy' if g.copies == 1 else 'copies'}")
@@ -986,7 +998,7 @@ class FindWizard(QWidget):
         self.unknown_mode = False
         self.rows = []
         self._n_matches = 0
-        self.verdicts.clear()
+        self._end_search()
         self._show_groups([])
         self.tree.clear()
         self.count.setText("")
@@ -1089,19 +1101,25 @@ class FindWizard(QWidget):
         self.hint.setText(hints.CHECK_REAL_RUNNING)
         self._cancel = threading.Event()
         cancel = self._cancel
+        gen = self._search_gen
+        self._checking = True
         self.progress.setValue(0)
         self.progress.setFormat("%p%")
         self._started = time.monotonic()
         self._update_buttons()
         self.ctl.tasks.run(
             lambda: checker.run(self._progress.done.emit, cancel),
-            lambda _r: self._after_check(checker, cancel.is_set()),
-            self._check_failed,
+            lambda _r: self._after_check(checker, cancel.is_set(), gen),
+            lambda exc: self._check_failed(exc, checker, gen),
         )
 
-    def _after_check(self, checker: RealChecker, stopped: bool) -> None:
+    def _after_check(self, checker: RealChecker, stopped: bool, gen: int) -> None:
         self._cancel = None
+        self._checking = False
         self.progress.setValue(100)
+        if gen != self._search_gen:  # the search ended while it ran: these are stale
+            self._update_buttons()
+            return
         self.verdicts.update(checker.results)
         found = [b for grp in checker.groups if (b := checker.best(grp)) is not None]
         verdicts = [r.verdict for r in checker.results.values()]
@@ -1113,10 +1131,12 @@ class FindWizard(QWidget):
             )
         elif Verdict.KEPT in verdicts:
             text = hints.CHECK_REAL_KEPT
-        elif verdicts and all(v is Verdict.COPY for v in verdicts):
+        elif Verdict.COPY in verdicts and all(
+            v in (Verdict.COPY, Verdict.FAILED) for v in verdicts
+        ):
             text = hints.CHECK_REAL_NONE
         else:
-            text = hints.CHECK_REAL_STOPPED if stopped else hints.CHECK_REAL_KEPT
+            text = hints.CHECK_REAL_STOPPED if stopped else hints.CHECK_REAL_FAILED
         if stopped:
             text = f"{hints.CHECK_REAL_STOPPED} {text}" if found else hints.CHECK_REAL_STOPPED
         self.hint.setText(text)
@@ -1131,13 +1151,18 @@ class FindWizard(QWidget):
                 self._select_row(rows[0])
         self._update_buttons()
 
-    def _check_failed(self, exc: BaseException) -> None:
+    def _check_failed(self, exc: BaseException, checker: RealChecker, gen: int) -> None:
         self._cancel = None
+        self._checking = False
         self.progress.setValue(0)
-        self.hint.setText(hints.FIND_FEW)
+        if checker.not_restored:
+            addrs = ", ".join(f"{a:#x}" for a in checker.not_restored)
+            self.hint.setText(hints.CHECK_REAL_NOT_RESTORED.format(addrs=addrs))
+        elif gen == self._search_gen:
+            self.hint.setText(hints.FIND_FEW)
         self._update_buttons()
         self.ctl.fail(exc, "check")
-        if self.ctl.session.connected:
+        if self.ctl.session.connected and gen == self._search_gen:
             self.refresh_live()
 
     def _test_candidates(self) -> tuple[list[int], Scale]:

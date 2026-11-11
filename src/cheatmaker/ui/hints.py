@@ -206,3 +206,12 @@ CHECK_REAL_NONE = (
     "listed. Search again, or try Advanced > another number type."
 )
 CHECK_REAL_STOPPED = "Stopped. Everything that was checked has its own value back."
+CHECK_REAL_FAILED = (
+    "Couldn't check these: they couldn't be read or written right now. Search again, "
+    "then try once more."
+)
+CHECK_REAL_STOPPING = "Stopping after this round: putting the values back first..."
+CHECK_REAL_NOT_RESTORED = (
+    "The connection dropped before these got their own value back: {addrs}. Reload a "
+    "save or restart the game if a number looks wrong."
+)
