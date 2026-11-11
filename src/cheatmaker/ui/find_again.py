@@ -170,6 +170,11 @@ class FindAgain(QObject):
             self._carrying = on
             self.carrying_changed.emit(on)
 
+    @property
+    def unreadable(self) -> Path | None:
+        """This version's notes file that couldn't be read (kept, never overwritten)."""
+        return self._unreadable
+
     # -- hooks we put in ----------------------------------------------------------
     def record(self, obj: pj.ObjectSpec, pid: int) -> None:
         """Called the moment our install returns, from any thread, so a disconnect or

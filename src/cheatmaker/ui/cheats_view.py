@@ -113,6 +113,8 @@ class CheatsView(QWidget):
         self.again_btn.setToolTip("Look for your remembered values in the game now")
         self.skip_hook = QCheckBox("Find again without the game's code (slower, for testing)")
         self.skip_hook.setVisible(False)  # Advanced only (console test C10e)
+        self.bring_btn = QPushButton(hints.ADVANCED_BRING)
+        self.bring_btn.setVisible(False)  # Advanced only (spec-game-update AC-U1)
         self.open_btn = QPushButton("Open cheat file...")
         self.save_btn = QPushButton("Save...")
         self.update_btn = QPushButton("Update for this version")
@@ -136,6 +138,7 @@ class CheatsView(QWidget):
             buttons.addWidget(w)
         buttons.addStretch(1)
         buttons.addWidget(self.skip_hook)
+        buttons.addWidget(self.bring_btn)
         buttons.addWidget(self.show_details)
         lay = QVBoxLayout(self)
         lay.addWidget(self.hint)
@@ -150,6 +153,7 @@ class CheatsView(QWidget):
         self.table.itemSelectionChanged.connect(self._update_buttons)
         self.show_details.toggled.connect(lambda _on: self.fill())
         self.show_details.toggled.connect(self.skip_hook.setVisible)
+        self.show_details.toggled.connect(self.bring_btn.setVisible)
         self.delete_btn.clicked.connect(self.do_delete)
         self.combine_btn.clicked.connect(self.do_combine)
         self.lock_btn.clicked.connect(lambda: self._with_selected(self.open_lock))
@@ -248,6 +252,7 @@ class CheatsView(QWidget):
         self.learn_btn.setEnabled(up and not carrying and self._can_learn(c, located))
         p = self.ctl.project
         self.again_btn.setEnabled(up and not carrying and p is not None and bool(p.objects))
+        self.bring_btn.setEnabled(up and not carrying)
         self.save_btn.setEnabled(any(ch.saveable for ch in self.cheats))
 
     def _can_learn(self, c: Cheat | None, located: bool) -> bool:

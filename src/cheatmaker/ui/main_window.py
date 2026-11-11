@@ -18,7 +18,7 @@ from cheatmaker.core.cheats import Cheat
 from cheatmaker.logs import read_latest_log
 from cheatmaker.ui import hints
 from cheatmaker.ui.build_dialog import MakeItWorkDialog
-from cheatmaker.ui.carry import NoteFingerprints
+from cheatmaker.ui.carry import CarryBar, CarryOver, NoteFingerprints
 from cheatmaker.ui.cheats_view import CheatsView
 from cheatmaker.ui.connect_view import ConnectView
 from cheatmaker.ui.controller import Controller
@@ -44,6 +44,9 @@ class MainWindow(QMainWindow):
         self.find = FindWizard(ctl)
         self.cheats = CheatsView(ctl)
         self.fingerprints = NoteFingerprints(ctl, self.cheats.finder)
+        self.carry_bar = CarryBar()
+        self.carry = CarryOver(ctl, self.cheats.finder, self.carry_bar, self.fingerprints)
+        self.cheats.bring_btn.clicked.connect(self.carry.open_advanced)
         self.tabs = QTabWidget()
         self.tabs.addTab(self.find, "1. Find a value")
         self.tabs.addTab(self.cheats, "2. My cheats")
@@ -57,6 +60,7 @@ class MainWindow(QMainWindow):
         lay = QVBoxLayout(root)
         lay.addWidget(self.connect_view)
         lay.addWidget(self.tabs, 1)
+        lay.addWidget(self.carry_bar)
         lay.addLayout(bottom)
         self.setCentralWidget(root)
 
