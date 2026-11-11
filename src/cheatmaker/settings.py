@@ -29,6 +29,7 @@ class Settings:
     percent_pc_limit: int = 20_000  # a Full search checks % on the PC from this many down
     build_notice_hidden: bool = False  # Make it work's "Save your game first" notice
     trace_exec_breakpoint: bool = False  # Find the real one: execute breakpoint fallback (C20d)
+    trace_notice_hidden: bool = False  # Find the real one's "Save your game first" notice
 
     @classmethod
     def path(cls) -> Path:
@@ -68,6 +69,8 @@ class Settings:
             s.build_notice_hidden = False
         if not isinstance(s.trace_exec_breakpoint, bool):
             s.trace_exec_breakpoint = False
+        if not isinstance(s.trace_notice_hidden, bool):
+            s.trace_notice_hidden = False
         return s
 
     def save(self) -> None:

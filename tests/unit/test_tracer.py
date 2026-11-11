@@ -40,14 +40,14 @@ class Player:
 
     def __init__(self, *changes) -> None:
         self.changes = list(changes)  # callables, one per "change the number" hint
-        self.seen: list[tuple[float, str, str]] = []
-        self.on_hint: dict[str, object] = {}
+        self.seen: list[tuple[float, tr.Stage, int]] = []
+        self.on_hint: dict[tr.Stage, object] = {}
 
-    def __call__(self, frac: float, step: str, hint: str) -> None:
-        self.seen.append((frac, step, hint))
-        if hint == tr.CHANGE_HINT and self.changes:
+    def __call__(self, frac: float, stage: tr.Stage, hop: int) -> None:
+        self.seen.append((frac, stage, hop))
+        if stage is tr.Stage.CHANGE and self.changes:
             self.changes.pop(0)()
-        action = self.on_hint.get(hint)
+        action = self.on_hint.get(stage)
         if action is not None:
             action()
 
@@ -106,12 +106,10 @@ def test_float_copy(caplog):
     g = TraceGame()
     obj, hud = float_copy(g)
     r, t, _clock = run(g, hud + 0x40, F, Player(setter(g, obj + 0x10, F, 80.25)))
-    assert r.outcome is Outcome.FOUND, r.message
+    assert r.outcome is Outcome.FOUND, r.reason
     assert r.address == obj + 0x10 and r.vtype is F and r.verdict is Verdict.REAL
     assert r.way.label() == "as shown" and r.behind == hud + 0x40
-    assert (
-        r.message == "Found the value the game uses: 80.25, a decimal; the screen shows it as is."
-    )
+    assert r.value == 80.25 and r.way.screen_text() == "as is"
     [hop] = r.hops
     assert hop.source.method == "regs" and hop.source.expr == "rbx+10h" and hop.hits > 0
     assert hop.writers[0].writer.text == "movss [rdi+40h],xmm0"
@@ -135,7 +133,7 @@ def test_int_copy():
     )
     r, _t, _c = run(g, hud, I32, Player(setter(g, obj + 8, I32, 40)))
     assert r.outcome is Outcome.FOUND and r.address == obj + 8 and r.vtype is I32
-    assert "40, a whole number; the screen shows it as is" in r.message
+    assert r.value == 40
 
 
 def test_cut_conversion():
@@ -175,7 +173,7 @@ def test_x100_by_a_rip_relative_constant():
     r, _t, _c = run(g, hud, I32, Player(setter(g, obj + 0x10, F, 0.5)))
     assert r.outcome is Outcome.FOUND and r.address == obj + 0x10 and r.vtype is F
     assert r.way.factor() == 100 and r.way.label() == "x0.01 of the screen"
-    assert r.message == "Found the value the game uses: 0.5, a decimal; the screen shows it x100."
+    assert r.value == 0.5 and r.way.screen_text() == "x100"
     # Set 87 on the traced row: the float written shows 87 after the game's cut x100
     g.set(obj + 0x10, F, r.way.to_real(87))
     g.fake.read(PID, hud, 4)
@@ -297,7 +295,7 @@ def test_already_real():
     g.routine(ins("SUB_RM32_R32", mem("rax", 0x2B0), "ecx"), regs={"rax": obj, "rcx": 0})
     r, _t, _c = run(g, obj + 0x2B0, I32)
     assert r.outcome is Outcome.ALREADY_REAL and r.address is None
-    assert r.message == "This is already the value the game uses."
+    assert r.reason == "read-modify-write"
     assert g.fake.writes == []
 
 
@@ -313,7 +311,7 @@ def test_scrambled():
         regs={"rbx": obj, "rdi": hud},
     )
     r, _t, _c = run(g, hud, I32)
-    assert r.outcome is Outcome.SCRAMBLED and r.message == tr.SCRAMBLED_TEXT
+    assert r.outcome is Outcome.SCRAMBLED
     assert r.hops[0].writers[0].skipped == "scrambled"
     assert g.fake.writes == []
 
@@ -333,9 +331,7 @@ def test_wrong_registers_fail_the_memory_check_and_write_nothing():
     r, _t, _c = run(g, hud + 0x40, F)
     assert r.outcome is Outcome.SEARCH_THAT_WAY and r.address is None
     assert [why for _c, why in r.hops[0].tried] == ["held 12, expected 87"]
-    assert r.message == (
-        "The game keeps it as decimal (4 bytes), the screen shows it as is. Search for it that way?"
-    )
+    assert r.way.real is F and r.way.screen_text() == "as is"
     assert g.fake.writes == []
 
 
@@ -363,7 +359,7 @@ def test_two_hops_hud_widget_real():
     obj, widget, hud = two_hops(g)
     player = Player(setter(g, obj + 0x10, F, 0.5), setter(g, obj + 0x10, F, 0.25))
     r, _t, _c = run(g, hud, I32, player)
-    assert r.outcome is Outcome.FOUND, (r.message, [h.stop for h in r.hops])
+    assert r.outcome is Outcome.FOUND, (r.reason, [h.stop for h in r.hops])
     assert r.address == obj + 0x10 and r.vtype is F and r.verdict is Verdict.REAL
     assert [h.source.address for h in r.hops] == [widget + 0x20, obj + 0x10]
     assert r.hops[0].verdict is Verdict.COPY
@@ -372,7 +368,7 @@ def test_two_hops_hud_widget_real():
     # hop 2's write test wrote only the real one (its group: real, widget, HUD)
     hop2 = [a for _p, a, _d in g.fake.writes][-2:]
     assert hop2 == [obj + 0x10, obj + 0x10]
-    assert any(s.startswith("Watching (2 of up to 4)") for _f, s, _h in player.seen)
+    assert (tr.Stage.WATCH, 2) in [(st, n) for _f, st, n in player.seen]
     no_test_value_left(g, (obj + 0x10, F, 0.25))
 
 
@@ -396,10 +392,10 @@ def test_circle():
         return lambda: (g.set(a, F, v), g.set(b, F, v))
 
     r, _t, _c = run(g, a, F, Player(both(4.0), both(3.0)))
-    assert r.outcome is Outcome.TOO_FAR, r.message
+    assert r.outcome is Outcome.TOO_FAR, r.reason
     assert r.address == b and r.verdict is None and not r.sure
     assert r.hops[-1].stop == "goes round in a circle"
-    assert r.message == "Followed it 2 steps without reaching the real value."
+    assert len(r.hops) == 2 and r.reason == "goes round in a circle"
 
 
 def test_four_hops_is_the_limit():
@@ -416,20 +412,20 @@ def test_four_hops_is_the_limit():
     r, _t, _c = run(g, cells[5], F, Player(*changes))
     assert r.outcome is Outcome.TOO_FAR and len(r.hops) == tr.MAX_HOPS
     assert r.address == cells[1] and r.verdict is None
-    assert r.message == "Followed it 4 steps without reaching the real value."
+    assert r.reason == "4 hops"
 
 
 def test_no_writer():
     g = TraceGame()
     quiet = g.alloc(0x10)
     r, _t, _c = run(g, quiet, I32)
-    assert r.outcome is Outcome.NO_WRITER and r.message == tr.NO_WRITER_TEXT
+    assert r.outcome is Outcome.NO_WRITER and r.reason == "nothing wrote to it"
 
 
 def test_cant_watch():
     g = TraceGame()
     r, _t, _c = run(g, g.alloc(0x10) + 1, I32)
-    assert r.outcome is Outcome.CANT_WATCH and r.message == "This address can't be watched."
+    assert r.outcome is Outcome.CANT_WATCH
     assert g.fake.watched == []
 
 
@@ -446,7 +442,7 @@ def test_number_that_never_changes_is_unconfirmed():
     g = TraceGame()
     _obj, hud = float_copy(g)
     r, _t, clock = run(g, hud + 0x40, F)
-    assert r.outcome is Outcome.UNCONFIRMED and r.message == tr.UNCONFIRMED_TEXT
+    assert r.outcome is Outcome.UNCONFIRMED and r.reason == "the number didn't change"
     assert clock.t <= tr.CHANGE_WAIT_S + 5
     assert g.fake.writes == []
 
@@ -470,7 +466,7 @@ def test_cancel_during_the_watch():
     _obj, hud = float_copy(g)
     stop = threading.Event()
     player = Player()
-    player.on_hint[tr.WATCH_HINT] = stop.set
+    player.on_hint[tr.Stage.WATCH] = stop.set
     resumed = []
     clock = Clock()
     t = Tracer(
@@ -491,10 +487,10 @@ def test_lost_connection_while_checking():
     g = TraceGame()
     _obj, hud = float_copy(g)
     player = Player()
-    player.on_hint[tr.CHANGE_HINT] = g.fake.disconnect
+    player.on_hint[tr.Stage.CHANGE] = g.fake.disconnect
     resumed = []
     r, _t, _c = run(g, hud + 0x40, F, player, release=lambda a, n: lambda: resumed.append(a))
-    assert r.outcome is Outcome.LOST and r.message == "Lost connection to the PS5."
+    assert r.outcome is Outcome.LOST
     assert resumed == [hud + 0x40]
 
 
@@ -504,7 +500,7 @@ def test_lost_connection_during_the_write_test_names_what_stayed():
     clock = Clock()
     testing = []
     player = Player(setter(g, obj + 0x10, F, 50.0))
-    player.on_hint[tr.TEST_HINT] = lambda: testing.append(True)
+    player.on_hint[tr.Stage.TEST] = lambda: testing.append(True)
 
     def sleep(s: float) -> None:
         clock.sleep(s)
@@ -523,10 +519,10 @@ def test_progress_steps_and_bad_rows():
     obj, hud = float_copy(g)
     player = Player(setter(g, obj + 0x10, F, 2.0))
     run(g, hud + 0x40, F, player)
-    steps = [s for _f, s, _h in player.seen]
-    assert steps[0] == "Watching (1 of up to 4)"
-    assert "Reading the game's code" in steps and "Checking" in steps
-    fracs = [f for f, _s, _h in player.seen]
+    steps = [st for _f, st, _n in player.seen]
+    assert steps[0] is tr.Stage.WATCH
+    assert {tr.Stage.READ, tr.Stage.STEADY, tr.Stage.CHANGE, tr.Stage.TEST} <= set(steps)
+    fracs = [f for f, _st, _n in player.seen]
     assert fracs == sorted(fracs) and all(0 <= f <= 1 for f in fracs)
     with pytest.raises(ValueError, match="Pick one row"):
         Tracer(g.session, 0, F)

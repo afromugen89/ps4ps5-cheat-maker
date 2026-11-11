@@ -55,45 +55,22 @@ TOTAL_S = 240.0  # whole trace, including the player's changes
 HOP_WORK_S = 15.0  # one hop without waiting for the player (logged when over)
 CODE_READ = tf.WINDOW + tf.MAX_INSN  # bytes read before a writer's RIP
 
-# Plain words (spec AC-T2, AC-T5, AC-T7, AC-T8, AC-T9).
-WATCH_STEP = "Watching ({n} of up to {most})"
-READ_STEP = "Reading the game's code"
-CHECK_STEP = "Checking"
-WATCH_HINT = "Keep playing and make the number change (take a hit, spend some) within 30 seconds."
-STEADY_HINT = "Checking what the game reads it from..."
-CHANGE_HINT = (
-    "Now change the number once in the game (take a hit, spend some) so the app can check."
-)
-TEST_HINT = "Testing it with a test value..."
-NO_WRITER_TEXT = "Nothing wrote to it. Make the number change while it watches, then try again."
-CANT_WATCH_TEXT = "This address can't be watched."
-ALREADY_REAL_TEXT = "This is already the value the game uses."
-NOT_FOLLOWED_TEXT = (
-    "The game works this number out in a way the app can't follow yet. "
-    "Try Check which is real or I don't know the number."
-)
-SCRAMBLED_TEXT = "The game scrambles this value, which isn't supported yet."
-TOO_FAR_TEXT = "Followed it {n} steps without reaching the real value."
-UNCONFIRMED_TEXT = "Change the number in the game so the app can check."
-SEARCH_WAY_TEXT = (
-    "The game keeps it as {type}, the screen shows it {shown}. Search for it that way?"
-)
-CANCELLED_TEXT = "Stopped. Nothing was left changed."
-LOST_TEXT = "Lost connection to the PS5."
-NOT_CHECKED_TEXT = "The value behind it couldn't be checked. " + NOT_FOLLOWED_TEXT
 
-_TYPE_WORDS = {
-    ValueType.FLOAT: "a decimal",
-    ValueType.DOUBLE: "an 8-byte decimal",
-    ValueType.INT8: "a 1-byte whole number",
-    ValueType.INT16: "a 2-byte whole number",
-    ValueType.INT32: "a whole number",
-    ValueType.INT64: "an 8-byte whole number",
-}
+class Stage(Enum):
+    """Where a hop is, for the dialog's step label and hint (words in ui/hints.py)."""
+
+    WATCH = "watch"  # watching the copy: the player keeps playing
+    READ = "read"  # reading the game's code
+    STEADY = "steady"  # checking: waiting for the number to hold still
+    CHANGE = "change"  # checking: the player changes the number once
+    TEST = "test"  # the write test
+
+
+_STAGE_AT = {Stage.WATCH: 0, Stage.READ: 1, Stage.STEADY: 2, Stage.CHANGE: 2, Stage.TEST: 3}
 _METHOD_ORDER = {"regs": 0, "replay": 1, "block": 2, "caller": 3, "exec": 4}
 
-Progress = Callable[[float, str, str], None]
-"""``progress(fraction, step, hint)``."""
+Progress = Callable[[float, Stage, int], None]
+"""``progress(fraction, stage, hop number)``."""
 Release = Callable[[int, int], Callable[[], None]]
 """``release(address, size)`` pauses the app's freezes on that range; returns resume."""
 
@@ -162,7 +139,9 @@ class TraceResult:
     verdict: rc.Verdict | None = None  # REAL / KEPT; None = not sure
     hops: tuple[Hop, ...] = ()
     not_restored: tuple[int, ...] = ()
-    message: str = ""
+    value: float | int | None = None  # FOUND: the found value now
+    max_now: dict[int, float | int] | None = None  # a share-of-max way's max, read now
+    reason: str = ""  # why it ended, for Advanced ("goes round in a circle")
 
     @property
     def sure(self) -> bool:
@@ -240,10 +219,10 @@ class Tracer:
         except _Stop as stop:
             result = stop.result
         except _Cancelled:
-            result = self._end(Outcome.CANCELLED, CANCELLED_TEXT)
+            result = self._end(Outcome.CANCELLED)
         except ConnectionLost:
             log.warning("action=trace_lost hops=%d", len(self.hops))
-            result = self._end(Outcome.LOST, LOST_TEXT)
+            result = self._end(Outcome.LOST, "lost connection")
         finally:
             self._resume_all()
         if self.not_restored:
@@ -262,8 +241,8 @@ class Tracer:
         )
         return result
 
-    def _end(self, outcome: Outcome, message: str, **kw) -> TraceResult:
-        return TraceResult(outcome, self.address, hops=tuple(self.hops), message=message, **kw)
+    def _end(self, outcome: Outcome, reason: str = "", **kw) -> TraceResult:
+        return TraceResult(outcome, self.address, hops=tuple(self.hops), reason=reason, **kw)
 
     def _hops(self) -> TraceResult:
         copy = rc.Target(self.address, self.vtype)
@@ -280,7 +259,7 @@ class Tracer:
             option = self._hop(hop, total)
             if option is None:  # the watched copy is the real one (read-modify-write)
                 if n == 1:
-                    return self._end(Outcome.ALREADY_REAL, ALREADY_REAL_TEXT)
+                    return self._end(Outcome.ALREADY_REAL, "read-modify-write")
                 return self._found(copy.address, total or Way(copy.vtype, copy.vtype), None)
             way = option.way if total is None else option.way.then(total)
             src = option.cand.address
@@ -297,7 +276,7 @@ class Tracer:
                 return self._found(src, way, verdict)
             if verdict is not rc.Verdict.COPY:
                 hop.stop = "couldn't be checked"
-                return self._end(Outcome.NOT_FOLLOWED, NOT_CHECKED_TEXT)
+                return self._end(Outcome.NOT_FOLLOWED, "couldn't be checked")
             hop.stop = "a copy: following it"
             seen.add(src)
             earlier.insert(0, copy)
@@ -308,34 +287,38 @@ class Tracer:
     def _too_far(self, last: tuple[int, Way] | None, why: str) -> TraceResult:
         log.info("action=trace_stop reason=%r", why)
         if last is None:
-            return self._end(Outcome.TOO_FAR, TOO_FAR_TEXT.format(n=len(self.hops)))
+            return self._end(Outcome.TOO_FAR, why)
         addr, way = last
         return self._end(
             Outcome.TOO_FAR,
-            TOO_FAR_TEXT.format(n=len(self.hops)),
+            why,
             address=addr,
             vtype=way.real,
             way=way,
         )
 
     def _found(self, addr: int, way: Way, verdict: rc.Verdict | None) -> TraceResult:
+        now, max_now = None, None
         try:
             now = way.real.decode(self.client.read(self.pid, addr, way.real.size))
-            shown = way.screen_text(self._max_now(way))
-            text = (
-                f"Found the value the game uses: {way.real.text(now)}, "
-                f"{_TYPE_WORDS[way.real]}; the screen shows it {shown}."
-            )
-        except (ReadFailed, ValueError):
-            text = "Found the value the game uses."
+            max_now = self._max_now(way)
+        except ReadFailed as exc:
+            log.info("action=trace_found_read addr=%#x reason=%s", addr, exc)
         return self._end(
-            Outcome.FOUND, text, address=addr, vtype=way.real, way=way, verdict=verdict
+            Outcome.FOUND,
+            address=addr,
+            vtype=way.real,
+            way=way,
+            verdict=verdict,
+            value=now,
+            max_now=max_now,
         )
 
     # -- one hop -------------------------------------------------------------------------
-    def _say(self, hop: Hop, stage: int, step: str, hint: str) -> None:
+    def _say(self, hop: Hop, stage: Stage) -> None:
         if self._progress is not None:
-            self._progress(min(1.0, ((hop.n - 1) * 4 + stage) / (MAX_HOPS * 4)), step, hint)
+            at = _STAGE_AT[stage]
+            self._progress(min(1.0, ((hop.n - 1) * 4 + at) / (MAX_HOPS * 4)), stage, hop.n)
 
     def _check_cancel(self) -> None:
         if self._cancel is not None and self._cancel.is_set():
@@ -345,17 +328,17 @@ class Tracer:
         span = watch_span(hop.watched.address, hop.watched.vtype)
         if span is None:
             hop.stop = "can't be watched"
-            raise _Stop(self._end(Outcome.CANT_WATCH, CANT_WATCH_TEXT))
+            raise _Stop(self._end(Outcome.CANT_WATCH, hop.stop))
         hop.span = span
-        self._say(hop, 0, WATCH_STEP.format(n=hop.n, most=MAX_HOPS), WATCH_HINT)
+        self._say(hop, Stage.WATCH)
         if self.release is not None:
             self._resumes.append(self.release(*span))
         hits = self._watch(hop)
         self._check_cancel()
         if not hits:
             hop.stop = "nothing wrote to it"
-            raise _Stop(self._end(Outcome.NO_WRITER, NO_WRITER_TEXT))
-        self._say(hop, 1, READ_STEP, STEADY_HINT)
+            raise _Stop(self._end(Outcome.NO_WRITER, hop.stop))
+        self._say(hop, Stage.READ)
         by_writer = self._writers(hop, hits)
         if any(wp.path and wp.path.end is tf.End.ALREADY_REAL for wp, _h in by_writer):
             hop.stop = "read-modify-write: it's the real one"
@@ -365,7 +348,7 @@ class Tracer:
             hop.stop = "read back from the same place: it's the real one"
             return None
         self._check_cancel()
-        self._say(hop, 2, CHECK_STEP, STEADY_HINT)
+        self._say(hop, Stage.STEADY)
         winner = self._check(hop, options) if options else None
         if winner is None and self.exec_breakpoint:
             winner = self.exec_fallback(hop)
@@ -641,15 +624,15 @@ class Tracer:
         first = self._wait_steady(hop, self._deadline(CHANGE_WAIT_S))
         if first is None:
             hop.stop = "the number never held still"
-            raise _Stop(self._end(Outcome.UNCONFIRMED, UNCONFIRMED_TEXT))
+            raise _Stop(self._end(Outcome.UNCONFIRMED, hop.stop))
         alive = [o for o in options if self._matches(hop, o, first)]
         if not alive:
             return None
-        self._say(hop, 2, CHECK_STEP, CHANGE_HINT)
+        self._say(hop, Stage.CHANGE)
         second = self._wait_steady(hop, self._deadline(CHANGE_WAIT_S), differ_from=first)
         if second is None:
             hop.stop = "the number didn't change"
-            raise _Stop(self._end(Outcome.UNCONFIRMED, UNCONFIRMED_TEXT))
+            raise _Stop(self._end(Outcome.UNCONFIRMED, hop.stop))
         alive = [o for o in alive if self._matches(hop, o, second)]
         return alive[0] if alive else None
 
@@ -699,26 +682,27 @@ class Tracer:
             way = ways[0] if total is None else ways[0].then(total)
             hop.stop = "no address passed the memory check"
             try:
-                shown = way.screen_text(self._max_now(way))
-            except (ValueError, ReadFailed):
-                shown = "differently"
-            text = SEARCH_WAY_TEXT.format(type=way.real.label.lower(), shown=shown)
-            return self._end(Outcome.SEARCH_THAT_WAY, text, vtype=way.real, way=way)
+                max_now = self._max_now(way)
+            except ReadFailed:
+                max_now = None
+            return self._end(
+                Outcome.SEARCH_THAT_WAY, hop.stop, vtype=way.real, way=way, max_now=max_now
+            )
         if any(p.end is tf.End.SCRAMBLED for p in paths):
             hop.stop = "scrambled"
-            return self._end(Outcome.SCRAMBLED, SCRAMBLED_TEXT)
+            return self._end(Outcome.SCRAMBLED, hop.stop)
         if paths and all(p.end is tf.End.CONSTANT for p in paths):
             hop.stop = "sets it to a fixed number"
-            return self._end(Outcome.NO_WRITER, NO_WRITER_TEXT)
+            return self._end(Outcome.NO_WRITER, hop.stop)
         hop.stop = "; ".join(p.reason or p.end.value for p in paths) or "no writer could be read"
-        return self._end(Outcome.NOT_FOLLOWED, NOT_FOLLOWED_TEXT)
+        return self._end(Outcome.NOT_FOLLOWED, hop.stop)
 
     # -- write test (AC-T6) ----------------------------------------------------------------
     def _test(
         self, hop: Hop, option: _Option, copy: rc.Target, earlier: list[rc.Target]
     ) -> rc.Verdict:
         self._check_cancel()
-        self._say(hop, 3, CHECK_STEP, TEST_HINT)
+        self._say(hop, Stage.TEST)
         src = rc.Target(option.cand.address, option.way.real)
         group = [src, copy, *earlier]
         checker = rc.RealChecker(

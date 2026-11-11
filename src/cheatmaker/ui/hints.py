@@ -247,3 +247,72 @@ BUILD_ADV_SKIPPED = "Skipped {addr}: {text} - {reason}"
 BUILD_ADV_TRIED = "Fix {n}: {label} - {result}"
 BUILD_Q_TITLE = "Make it work"
 BUILD_Q_ENEMIES_HINT = "Not sure counts as No: the fix is put back."
+
+# -- Find the real one behind it (docs/spec-trace.md) -------------------------------------
+TRACE_TESTED = False  # C20a passed: the button leaves Advanced for the action row
+TRACE_BUTTON = "Find the real one behind it"
+TRACE_BUTTON_TESTING = "Find the real one behind it (being tested)"
+TRACE_BUTTON_TIP = (
+    "The game copies its real value into the number on screen. Watch who writes this "
+    "copy, read the game's code to see where the number comes from, and check it"
+)
+TRACE_PICK_ONE = "Pick one row in the list."
+TRACE_TITLE = "Find the real one behind it"
+TRACE_READY = "Press Start, then keep playing. The app tells you when to change the number."
+TRACE_NOTICE_TITLE = "Save your game first"
+TRACE_NOTICE = "Save your game first. This writes test values and briefly pauses the game."
+TRACE_NOTICE_HIDE = "Don't show this again"
+TRACE_STEP_WATCH = "Watching ({n} of up to {most})"
+TRACE_STEP_READ = "Reading the game's code"
+TRACE_STEP_CHECK = "Checking"
+TRACE_WATCHING = (
+    "Keep playing and make the number change (take a hit, spend some) within 30 seconds."
+)
+TRACE_READING = "Reading the game's code..."
+TRACE_STEADY = "Checking where the game reads it from..."
+TRACE_CHANGE = (
+    "Now change the number once in the game (take a hit, spend some) so the app can check."
+)
+TRACE_TESTING = "Testing it with a test value..."
+TRACE_FOUND = "Found the value the game uses: {value}, {kind}; the screen shows it {shown}."
+TRACE_FOUND_PLAIN = "Found the value the game uses."
+TRACE_ALREADY_REAL = "This is already the value the game uses."
+TRACE_NO_WRITER = "Nothing wrote to it. Make the number change while it watches, then try again."
+TRACE_CANT_WATCH = "This address can't be watched."
+TRACE_SEARCH_WAY = (
+    "The game keeps it as {type}, the screen shows it {shown}. Search for it that way?"
+)
+TRACE_SEARCH_WAY_BUTTON = "Search for it that way"
+TRACE_NOT_FOLLOWED = (
+    "The game works this number out in a way the app can't follow yet. "
+    "Try Check which is real or I don't know the number."
+)
+TRACE_SCRAMBLED = "The game scrambles this value, which isn't supported yet."
+TRACE_TOO_FAR = "Followed it {n} steps without reaching the real value."
+TRACE_NOT_SURE = "The last place it checked is added to the list, marked not sure."
+TRACE_UNCONFIRMED = "Change the number in the game so the app can check."
+TRACE_CANCELLED = "Stopped. Nothing was left changed."
+TRACE_LOST = "Lost connection to the PS5."
+TRACE_NOT_RESTORED = "These may still hold a test value; restart the game to be safe: {addrs}"
+TRACE_KINDS = {
+    "FLOAT": "a decimal",
+    "DOUBLE": "an 8-byte decimal",
+    "INT8": "a 1-byte whole number",
+    "INT16": "a 2-byte whole number",
+    "INT32": "a whole number",
+    "INT64": "an 8-byte whole number",
+}
+TRACE_ADV_HOP = "Hop {n}: watched {addr} ({size} bytes), {hits} writes"
+TRACE_ADV_WRITER = "  Writer {addr}: {text} ({hits} writes){skipped}"
+TRACE_ADV_PATH = "    Followed: {path} -> {end}{reason}"
+TRACE_ADV_TRIED = "    {addr} ({how}: {expr}): {why}"
+TRACE_ADV_SOURCE = "  Source {addr} worked out from {how}: {expr}; stored as {way}"
+TRACE_ADV_VERDICT = "  Write test: {verdict}"
+TRACE_ADV_STOP = "  Stopped: {why}"
+TRACE_HOW = {
+    "regs": "the registers",
+    "replay": "replaying the loads",
+    "block": "a block copy",
+    "caller": "the caller",
+    "exec": "an execute breakpoint",
+}

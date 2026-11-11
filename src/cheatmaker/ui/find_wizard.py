@@ -45,6 +45,7 @@ from cheatmaker.core.real_check import (
 from cheatmaker.core.scan_log import way_label
 from cheatmaker.core.scanner import ABOUT, FEW_MATCHES, MAX_SHOW, NOTED, TOO_MANY, Match
 from cheatmaker.core.templates import TEMPLATES, make_cheat
+from cheatmaker.core.tracer import TraceResult
 from cheatmaker.core.values import (
     OF_FULL,
     SHOWN,
@@ -64,6 +65,7 @@ from cheatmaker.ui.controller import Controller
 from cheatmaker.ui.hit_test_dialog import HitTestDialog
 from cheatmaker.ui.pointer_dialog import PointerDialog
 from cheatmaker.ui.tasks import _Signals
+from cheatmaker.ui.trace_dialog import result_text as trace_result_text
 
 log = logging.getLogger(__name__)
 
@@ -109,6 +111,7 @@ class FindWizard(QWidget):
         # Check which is real: what each checked match did with its test value
         self.verdicts: dict[tuple[int, ValueType], Result] = {}
         self.open_build: Callable[..., None] = lambda **kw: None  # MainWindow.open_build
+        self.open_trace: Callable[..., None] = lambda **kw: None  # MainWindow.open_trace
         self._search_gen = 0  # bumped when the search ends: a running check's results drop
         self._checking = False
         self.pointers: dict[Chain, ValueType] = {}  # chains followed on every refresh
@@ -138,6 +141,10 @@ class FindWizard(QWidget):
         )
         self.check_btn = QPushButton("Check which is real")
         self.check_btn.setToolTip(hints.CHECK_REAL_TIP)
+        # spec-trace: under Advanced, "(being tested)", until console test C20a passes
+        self.trace_btn = QPushButton(
+            hints.TRACE_BUTTON if hints.TRACE_TESTED else hints.TRACE_BUTTON_TESTING
+        )
         self.number = QLineEdit()
         self.number.setPlaceholderText("The number you see, e.g. 2450 or 40%")
         self.number.setToolTip(
@@ -218,6 +225,11 @@ class FindWizard(QWidget):
         scale_row.addWidget(QLabel("max"))
         scale_row.addWidget(self.scale_max)
         scale_row.addStretch(1)
+        if not hints.TRACE_TESTED:
+            trace_row = QHBoxLayout()
+            adv_box.addLayout(trace_row)
+            trace_row.addWidget(self.trace_btn)
+            trace_row.addStretch(1)
         self.advanced.toggled.connect(lambda _on: self._fill_table())
 
         self.add_addr = QLineEdit()
@@ -304,6 +316,8 @@ class FindWizard(QWidget):
             self.build_btn,
         ):
             act.addWidget(w)
+        if hints.TRACE_TESTED:
+            act.addWidget(self.trace_btn)
         shows_row = QHBoxLayout()
         shows_row.addWidget(QLabel("What does the game show?"))
         for shows, b in self.shows_btns.items():
@@ -350,6 +364,7 @@ class FindWizard(QWidget):
         self.freeze_btn.clicked.connect(self.do_freeze)
         self.make_btn.clicked.connect(self.do_make)
         self.build_btn.clicked.connect(self.do_build)
+        self.trace_btn.clicked.connect(self.do_trace)
         self.add_btn.clicked.connect(self.do_add_address)
         self.add_addr.returnPressed.connect(self.do_add_address)
         self.remove_btn.clicked.connect(self.do_remove_address)
@@ -366,6 +381,7 @@ class FindWizard(QWidget):
         ctl.search_lost.connect(self._search_lost)
         self._game_key: tuple[str, str] | None = None
         ctl.connection_changed.connect(lambda _up: self._update_buttons())
+        ctl.tasks.busy_changed.connect(lambda _busy: self._update_buttons())
         self._update_buttons()
 
     # -- state ----------------------------------------------------------------
@@ -406,6 +422,10 @@ class FindWizard(QWidget):
         sel = ready and self.selected() is not None and self.selected().address != 0
         for w in (self.set_btn, self.freeze_btn, self.make_btn, self.build_btn):
             w.setEnabled(sel)
+        # one debugger job at a time: not while Lock it / Make it work / a check runs
+        can_trace = sel and not self.ctl.tasks.busy
+        self.trace_btn.setEnabled(can_trace)
+        self.trace_btn.setToolTip(hints.TRACE_BUTTON_TIP if can_trace else hints.TRACE_PICK_ONE)
         self.add_btn.setEnabled(ready)
         m = self.selected()
         i = self._selected_row()
@@ -498,7 +518,7 @@ class FindWizard(QWidget):
             Action.START_OVER: self.try_btn,
             Action.FULL: self.full_btn,
             Action.PERCENT: self.search_btn,
-            Action.TRACE: self.check_btn,  # the trace button comes with its dialog
+            Action.TRACE: self.trace_btn,
         }[action]
 
     def _suggest(self, tip: Suggestion | None, show_text: bool = True) -> None:
@@ -1320,6 +1340,51 @@ class FindWizard(QWidget):
         self.ctl.ensure_file().cheats.append(cheat)
         self.ctl.cheats_changed.emit()
         self.ctl.message.emit(f'Made "{cheat.name}". Tick it to turn it on.')
+
+    # -- Find the real one behind it (spec-trace) ------------------------------------------
+    def do_trace(self) -> None:
+        """Trace the picked row (a group row traces its head, an expanded member that
+        member: the selection already says which)."""
+        m = self.selected()
+        if m is None or not m.address:
+            self.ctl.message.emit(hints.TRACE_PICK_ONE)
+            return
+        vt = self._row_type()
+        frozen = {
+            a: self.row_types[i].size
+            for i, row in enumerate(self.rows)
+            if (a := row.address) in self.ctl.frozen_addresses
+        }
+        self.open_trace(
+            address=m.address,
+            vtype=vt,
+            on_found=self.use_traced,
+            on_search_way=self.search_traced_way,
+            frozen=frozen,
+        )
+
+    def use_traced(self, result: TraceResult) -> None:
+        """The value behind the copy goes in the list like Test the hits' winner."""
+        if result.address is None or result.vtype is None:
+            return
+        log.info(
+            "action=trace_use addr=%#x type=%s sure=%s",
+            result.address,
+            result.vtype.name,
+            result.sure,
+        )
+        self.manual[result.address] = result.vtype
+        self.refresh_live()
+        rows = [i for i, m in enumerate(self.rows) if m.address == result.address]
+        if rows:
+            self._select_row(rows[-1])
+        self.hint.setText(trace_result_text(result))
+
+    def search_traced_way(self, result: TraceResult, screen: float | int | None) -> None:
+        """Search for it that way: a new search with the traced number type."""
+        if result.way is None:
+            return
+        self.prefill(result.way.real, screen)
 
     # -- Make it work (spec-cheat-builder B1) ------------------------------------------
     def _group_of(self, addr: int, vt: ValueType) -> Group | None:
