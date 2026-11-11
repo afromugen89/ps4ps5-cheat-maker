@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import logging
+import math
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer, QUrl
@@ -32,7 +34,7 @@ from PySide6.QtWidgets import (
 from cheatmaker.core import cave as cv
 from cheatmaker.core import pointers as ptr
 from cheatmaker.core.grouping import Group, promote
-from cheatmaker.core.guide import Action, Guide, Scan, Shows, Suggestion
+from cheatmaker.core.guide import PUT_BACK_S, Action, Guide, Scan, Shows, Suggestion
 from cheatmaker.core.hit_tester import TEST_LIMIT
 from cheatmaker.core.pointers import Chain
 from cheatmaker.core.real_check import (
@@ -45,6 +47,7 @@ from cheatmaker.core.real_check import (
 from cheatmaker.core.scan_log import way_label
 from cheatmaker.core.scanner import ABOUT, FEW_MATCHES, MAX_SHOW, NOTED, TOO_MANY, Match
 from cheatmaker.core.templates import TEMPLATES, make_cheat
+from cheatmaker.core.trace_way import Way
 from cheatmaker.core.tracer import TraceResult
 from cheatmaker.core.values import (
     OF_FULL,
@@ -94,6 +97,22 @@ def fmt_value(v: float | int) -> str:
 
 
 ROW = Qt.ItemDataRole.UserRole  # tree items keep their index into FindWizard.rows
+TRACED_SCALE = "traced"  # "Game stores it as" item that Search for it that way adds
+PUT_BACK_MS = int(PUT_BACK_S * 1000)  # a Set the game undid this soon: it's a copy
+
+
+@dataclass(frozen=True)
+class TracedRow:
+    """A row Find the real one behind it added (spec-trace AC-T7): typed numbers are
+    in screen units and go through ``way`` before they are written."""
+
+    way: Way
+    behind: int  # the copy it was found behind
+    check: str  # "checked: real", "checked: kept the test value", "not sure"
+    sure: bool
+
+    def notes(self) -> str:
+        return f"found behind {self.behind:#x}, {self.check}"
 
 
 class FindWizard(QWidget):
@@ -108,6 +127,9 @@ class FindWizard(QWidget):
         # (address, is an expanded member) selected before the tree was built again
         self._tree_pick: tuple[int, ValueType, bool] | None = None
         self.manual: dict[int, ValueType] = {}  # addresses the player typed in
+        self.traced: dict[int, TracedRow] = {}  # manual rows found by a trace
+        self._trace_max: dict[int, dict[int, float | int] | None] = {}  # per refresh
+        self._traced_scale: Scale | None = None  # Search for it that way's factor
         # Check which is real: what each checked match did with its test value
         self.verdicts: dict[tuple[int, ValueType], Result] = {}
         self.open_build: Callable[..., None] = lambda **kw: None  # MainWindow.open_build
@@ -637,6 +659,8 @@ class FindWizard(QWidget):
         if not self.advanced.isChecked():
             return SHOWN
         kind = self.scale.currentData()
+        if kind == TRACED_SCALE and self._traced_scale is not None:
+            return self._traced_scale
         if kind != "fraction":
             return make_scale(kind)
         return make_scale(kind, parse_number(self.scale_max.text() or "100"))
@@ -790,6 +814,7 @@ class FindWizard(QWidget):
             self.ctl.fail(exc, "read")
             return
         self.rows, self.row_types, self.row_chains = rows, types, chains
+        self._read_trace_maxes()
         self._show_groups(groups)
         self._fill_table()
         # Big lists refresh less often (each separate read costs ~36 ms on the PS5).
@@ -845,8 +870,11 @@ class FindWizard(QWidget):
     def _row_text(self, i: int) -> str:
         m = self.rows[i]
         frozen = " (frozen)" if m.address in self.ctl.frozen_addresses else ""
+        t = self.traced.get(m.address) if m.address in self.manual else None
         if m.address in self.manual:
             frozen += f" (added, {self.manual[m.address].label})"
+        if t is not None and not self.grouped:  # the tree says these in its columns
+            frozen += f" ({t.way.label()}, {t.notes()})"
         chain = self.row_chains[i] if i < len(self.row_chains) else None
         if chain is not None:
             frozen += f" (pointer {chain.label()})"
@@ -855,7 +883,41 @@ class FindWizard(QWidget):
         r = self.verdicts.get((m.address, self.row_types[i])) if i < self._n_matches else None
         if r is not None and not self.grouped:  # the tree says it in Notes
             frozen += f" ({r.verdict.short})"
-        return fmt_value(m.value) + frozen
+        return self._value_text(m.address, m.value) + frozen
+
+    def _value_text(self, addr: int, value: float | int) -> str:
+        """Value now; a traced row also shows the screen value: ``0.87 (screen: 87)``."""
+        t = self.traced.get(addr) if addr in self.manual else None
+        if t is None or (isinstance(value, float) and not math.isfinite(value)):
+            return fmt_value(value)
+        try:
+            screen = t.way.to_screen(value, self._trace_max.get(addr))
+        except (ValueError, OverflowError):
+            return fmt_value(value)
+        return f"{fmt_value(value)} (screen: {fmt_value(screen)})"
+
+    def _read_trace_maxes(self) -> None:
+        """A share-of-max way's max, read once per refresh (one read per traced row)."""
+        self._trace_max = {}
+        for addr, t in self.traced.items():
+            if not t.way.max_addresses:
+                continue
+            try:
+                self._trace_max[addr] = self._read_maxes(t.way)
+            except Exception as exc:  # shown without the screen value this time
+                log.info("action=trace_max_read addr=%#x reason=%s", addr, exc)
+
+    def _read_maxes(self, way: Way) -> dict[int, float | int] | None:
+        if not way.max_addresses:
+            return None
+        g = self.ctl.session.require_game()
+        client = self.ctl.session.require_client()
+        out: dict[int, float | int] = {}
+        for s in way.steps:
+            if s.max_at is not None:
+                vt = ValueType.DOUBLE if s.to is ValueType.DOUBLE else ValueType.FLOAT
+                out[s.max_at] = vt.decode(client.read(g.pid, s.max_at, vt.size))
+        return out
 
     def _fill_table(self) -> None:
         if self.grouped:
@@ -924,7 +986,11 @@ class FindWizard(QWidget):
         item.setText(1, way_label(m.way) if self.ctl.scanner.has_ways else "")
         item.setText(3, f"{m.address:#x}")
         checked = self.verdicts.get((m.address, self.row_types[i]))
-        if g is None:
+        traced = self.traced.get(m.address) if g is None and m.address in self.manual else None
+        if traced is not None:
+            item.setText(1, traced.way.label())
+            item.setText(2, traced.notes())
+        elif g is None:
             item.setText(2, "")
         elif member is None:  # the group's row
             notes = [g.label] if g.label else []
@@ -1043,6 +1109,7 @@ class FindWizard(QWidget):
 
     def _new_game(self, game=None) -> None:
         self.manual.clear()  # addresses belong to the old game's memory
+        self.traced.clear()
         key = (game.title_id, game.version) if game is not None else None
         if key != self._game_key:
             self.pointers.clear()  # pointers last across restarts of the same version
@@ -1084,6 +1151,7 @@ class FindWizard(QWidget):
             return
         log.info("action=add_address addr=%#x type=%s", addr, vt.name)
         self.manual[addr] = vt
+        self.traced.pop(addr, None)
         self.add_addr.clear()
         self.refresh_live()
         self._select_row(next(i for i, m in enumerate(self.rows) if m.address == addr))
@@ -1175,6 +1243,9 @@ class FindWizard(QWidget):
             text = f"{hints.CHECK_REAL_STOPPED} {text}" if found else hints.CHECK_REAL_STOPPED
         self.hint.setText(text)
         self.refresh_live()
+        tip = None if stopped else self.guide.after_check(verdicts)
+        if tip is not None:
+            self._suggest(tip)
         if found:
             rows = [
                 i
@@ -1281,6 +1352,7 @@ class FindWizard(QWidget):
             self.ctl.freezer.unfreeze(f"find:{m.address}")
             self.ctl.frozen_addresses.discard(m.address)
         del self.manual[m.address]
+        self.traced.pop(m.address, None)
         self.refresh_live()
 
     def do_set(self) -> None:
@@ -1288,7 +1360,8 @@ class FindWizard(QWidget):
         if m is None:
             return
         try:
-            data = self._row_type().encode(parse_number(self.set_value.text()))
+            value = self._real_value(m.address, parse_number(self.set_value.text()))
+            data = self._row_type().encode(value)
             g = self.ctl.session.require_game()
             log.info(
                 "action=write type=%s addr=%#x bytes=%s",
@@ -1303,6 +1376,38 @@ class FindWizard(QWidget):
             self.ctl.fail(exc, "write")
             return
         self.refresh_live()
+        if m.address not in self.ctl.frozen_addresses:
+            self._watch_put_back(m.address, data)
+
+    def _real_value(self, addr: int, typed: float | int) -> float | int:
+        """A traced row's typed number is what the screen shows: turn it into the real
+        value with the row's way (87 -> 0.87). Other rows: as typed."""
+        t = self.traced.get(addr) if addr in self.manual else None
+        if t is None:
+            return typed
+        real = t.way.to_real(typed, self._read_maxes(t.way))
+        log.info("action=trace_set addr=%#x screen=%s real=%s", addr, typed, real)
+        return real
+
+    def _watch_put_back(self, addr: int, data: bytes) -> None:
+        """Set/Freeze put back by the game (spec-trace AC-T1): look again in 2 s."""
+        QTimer.singleShot(PUT_BACK_MS, self, lambda: self.check_put_back(addr, data))
+
+    def check_put_back(self, addr: int, data: bytes) -> bool:
+        """The game wrote its own value over ours: suggest tracing the real one."""
+        if not self._ready():
+            return False
+        try:
+            g = self.ctl.session.require_game()
+            now = self.ctl.session.require_client().read(g.pid, addr, len(data))
+        except Exception as exc:  # gone or lost: no suggestion
+            log.info("action=put_back_check addr=%#x reason=%s", addr, exc)
+            return False
+        if now == data:
+            return False
+        log.info("action=put_back addr=%#x wrote=%s now=%s", addr, data.hex(), now.hex())
+        self._suggest(self.guide.after_put_back())
+        return True
 
     def do_freeze(self) -> None:
         m = self.selected()
@@ -1323,6 +1428,8 @@ class FindWizard(QWidget):
                 return
             self.ctl.freezer.freeze(key, [(g.pid, m.address, raw)])
             self.ctl.frozen_addresses.add(m.address)
+            # best effort: the freezer may win the race with the game's own write
+            self._watch_put_back(m.address, raw)
         self._fill_table()
 
     def do_make(self) -> None:
@@ -1333,6 +1440,8 @@ class FindWizard(QWidget):
         try:
             kind, offset = self.ctl.session.classify(m.address)
             value = parse_number(self.set_value.text()) if self.set_value.text().strip() else None
+            if value is not None:
+                value = self._real_value(m.address, value)
             cheat = make_cheat(template, kind, offset, self._row_type(), m.raw, value)
         except Exception as exc:
             self.ctl.fail(exc, "make_cheat")
@@ -1374,6 +1483,9 @@ class FindWizard(QWidget):
             result.sure,
         )
         self.manual[result.address] = result.vtype
+        if result.way is not None:
+            check = result.verdict.short if result.verdict is not None else "not sure"
+            self.traced[result.address] = TracedRow(result.way, result.behind, check, result.sure)
         self.refresh_live()
         rows = [i for i, m in enumerate(self.rows) if m.address == result.address]
         if rows:
@@ -1381,10 +1493,31 @@ class FindWizard(QWidget):
         self.hint.setText(trace_result_text(result))
 
     def search_traced_way(self, result: TraceResult, screen: float | int | None) -> None:
-        """Search for it that way: a new search with the traced number type."""
-        if result.way is None:
+        """Search for it that way (AC-T8): Start over with Advanced filled in (the
+        traced number type, "Game stores it as" the traced factor) and the number the
+        screen shows now typed in; the player presses Search."""
+        way = result.way
+        if way is None:
             return
-        self.prefill(result.way.real, screen)
+        try:
+            scale = way.as_scale(result.max_now)
+        except ValueError as exc:
+            self.ctl.fail(exc, "trace")
+            return
+        self.do_reset()
+        self._traced_scale = scale
+        self.advanced.setChecked(True)
+        self._guide_set_advanced = True  # Start over takes Advanced back off
+        self.vtype.setCurrentIndex(self.vtype.findData(way.real))
+        at = self.scale.findData(TRACED_SCALE)
+        if at < 0:
+            self.scale.addItem(scale.label, TRACED_SCALE)
+            at = self.scale.count() - 1
+        self.scale.setItemText(at, scale.label)
+        self.scale.setCurrentIndex(at)
+        if screen is not None:
+            self.number.setText(way.shown.text(screen))
+        self._suggest(Suggestion(hints.FIND_START, Action.SEARCH))
 
     # -- Make it work (spec-cheat-builder B1) ------------------------------------------
     def _group_of(self, addr: int, vt: ValueType) -> Group | None:

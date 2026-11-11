@@ -295,3 +295,118 @@ def test_details_name_every_part_of_a_hop():
     assert "Source 0x300 worked out from the registers: rbx+10h" in lines[4]
     assert "Write test: copy" in lines[5] and "Stopped: a copy" in lines[6]
     assert "0x300" in lines[7]
+
+
+# -- traced rows (AC-T7) --------------------------------------------------------------
+def traced(win, game) -> int:
+    Harness(win, game)
+    add_row(win, game.hud, I32)
+    win.find.trace_btn.click()
+    return game.obj + 0x10
+
+
+def test_traced_row_texts(win, game):
+    real = traced(win, game)
+    f = win.find
+    t = f.traced[real]
+    assert t.sure and t.check == "checked: real" and t.behind == game.hud
+    i = next(i for i, m in enumerate(f.rows) if m.address == real)
+    assert f._row_text(i) == (
+        "0.50 (screen: 50) (added, Decimal (4 bytes)) "
+        f"(x0.01 of the screen, found behind {game.hud:#x}, checked: real)"
+    )
+    plain = next(i for i, m in enumerate(f.rows) if m.address == game.hud)
+    assert f._row_text(plain) == "50 (added, Whole number (4 bytes))"
+
+
+def test_set_on_a_traced_row_types_screen_units(win, game):
+    real = traced(win, game)
+    f = win.find
+    f.set_value.setText("87")
+    f.set_btn.click()
+    raw = game.g.fake.peek(41, real, 4)
+    assert F.decode(raw) == pytest.approx(0.87)
+    game.g.fake.read(41, game.hud, 4)  # a game frame
+    assert game.g.get(game.hud, I32) == 87, "the screen shows what was typed"
+
+
+def test_make_a_cheat_on_a_traced_row_converts(win, game):
+    real = traced(win, game)
+    f = win.find
+    f.set_value.setText("87")
+    f.make_btn.click()
+    cheat = win.ctl.cheat_file.cheats[-1]
+    [loc] = cheat.locations
+    assert loc.offset == real and F.decode(loc.on) == pytest.approx(0.87)
+    assert win.find.traced[real].way.to_screen(F.decode(loc.on)) == 87
+
+
+def test_freeze_on_a_traced_row_holds_the_raw_bytes(win, game):
+    real = traced(win, game)
+    f = win.find
+    before = game.g.fake.peek(41, real, 4)
+    f.freeze_btn.click()
+    assert real in win.ctl.frozen_addresses
+    win.ctl.freezer.tick()
+    assert game.g.fake.peek(41, real, 4) == before
+
+
+def test_remove_and_new_game_drop_the_traced_entry(win, game):
+    real = traced(win, game)
+    f = win.find
+    f.do_remove_address()
+    assert real not in f.traced and real not in f.manual
+    traced(win, game)
+    f._new_game(win.ctl.session.game)
+    assert f.traced == {}
+
+
+def test_search_for_it_that_way_fills_advanced_with_the_traced_factor(win, game):
+    f = win.find
+    way = Way(F, I32, (Step(Kind.MUL, F, const=100.0), Step(Kind.TO_WHOLE, I32, rounding="cut")))
+    result = R(tr.Outcome.SEARCH_THAT_WAY, game.hud, vtype=F, way=way)
+    f.search_traced_way(result, 87)
+    assert f.advanced.isChecked() and f.vtype.currentData() is F
+    assert f.scale.currentText() == "traced x0.01" and f.number.text() == "87"
+    assert f._scale().factor == pytest.approx(0.01) and f._scale().decimal
+    assert f.suggestion.action is Action.SEARCH
+    f.search_traced_way(result, 87)
+    assert [f.scale.itemData(i) for i in range(f.scale.count())].count("traced") == 1
+    f.search_btn.click()
+    assert win.ctl.scanner.active
+    hits = [h.address for h in win.ctl.session.require_client().scan_results(100)]
+    assert game.obj + 0x10 in hits, "0.87 found as 87 x 0.01"
+    f.new_btn.click()
+    assert not f.advanced.isChecked() and f.scale.currentIndex() == 0
+
+
+def test_set_put_back_by_the_game_suggests_tracing(win, game):
+    f = win.find
+    add_row(win, game.hud, I32)
+    f.set_value.setText("12")
+    f.set_btn.click()
+    assert f.check_put_back(game.hud, I32.encode(12))
+    assert f.suggestion.action is Action.TRACE
+    assert (
+        f.hint.text()
+        == "These look like copies the screen uses. Press Find the real one behind it."
+    )
+    add_row(win, game.obj + 0x10, F)
+    f.set_value.setText("0.5")
+    f.set_btn.click()
+    assert not f.check_put_back(game.obj + 0x10, F.encode(0.5)), "the real one keeps it"
+
+
+def test_traced_row_in_the_grouped_list_uses_the_columns(win, game):
+    from PySide6.QtWidgets import QTreeWidgetItem
+
+    from cheatmaker.ui.find_wizard import ROW
+
+    real = traced(win, game)
+    f = win.find
+    item = QTreeWidgetItem()
+    item.setData(0, ROW, next(i for i, m in enumerate(f.rows) if m.address == real))
+    f._item_text(item, None, None)
+    assert item.text(1) == "x0.01 of the screen"
+    assert item.text(2) == f"found behind {game.hud:#x}, checked: real"
+    assert item.text(0).startswith("0.50 (screen: 50)")

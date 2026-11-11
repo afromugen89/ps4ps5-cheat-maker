@@ -7,6 +7,7 @@ import struct
 import pytest
 
 from cheatmaker.core import real_check
+from cheatmaker.core.guide import TRACE_HINT, Action
 from cheatmaker.core.real_check import Verdict
 from cheatmaker.settings import Settings
 from cheatmaker.ui import hints
@@ -107,7 +108,9 @@ def test_check_all_copies(win, fake):
     )
     f.check_btn.click()
     assert {r.verdict for r in f.verdicts.values()} == {Verdict.COPY}
-    assert f.hint.text() == hints.CHECK_REAL_NONE
+    # spec-trace AC-T1: the guide's next step replaces CHECK_REAL_NONE
+    assert f.hint.text() == TRACE_HINT
+    assert f.suggestion.action is Action.TRACE and "bold" in f.trace_btn.styleSheet()
 
 
 def test_check_on_a_flat_list(win, fake):
