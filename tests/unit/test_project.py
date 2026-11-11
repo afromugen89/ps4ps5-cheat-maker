@@ -177,7 +177,7 @@ def test_format_3_combined_cheat_round_trips(tmp_path):  # AC-5
     path = tmp_path / "x.cmproj"
     pj.save(path, p)
     doc = json.loads(path.read_text())
-    assert doc["format_version"] == 3
+    assert doc["format_version"] == pj.FORMAT_VERSION
     entry = doc["cheats"][1]
     assert entry == {
         "name": "Health",
@@ -211,21 +211,27 @@ def test_format_3_combined_cheat_round_trips(tmp_path):  # AC-5
     assert back.cheats[1].parts[2].vtype is ValueType.INT8 and not back.cheats[1].parts[2].learned
 
 
-@pytest.mark.parametrize("old", [1, 2])
-def test_format_1_and_2_load_the_same_and_save_as_3(tmp_path, old):  # AC-5
+@pytest.mark.parametrize("old", [1, 2, 3])
+def test_formats_1_to_3_load_the_same_and_save_as_4(tmp_path, old):  # AC-5, AC-U10
     doc = json.loads(GOLDEN.read_text())
     doc["format_version"] = old
     path = tmp_path / "old.cmproj"
     path.write_text(json.dumps(doc))
     p = pj.load(path)
     assert p.cheats == [pj.ProjectCheat("Infinite health", "player", "Health", "freeze", 999)]
-    if old == 2:
+    if old >= 2:
         assert p == pj.load(GOLDEN), "every object and cheat as before"
+    assert p.carried_from is None and not any(o.check or o.relearn_class for o in p.objects)
+    hook = p.object("player").hook  # format 1 drops hooks
+    assert hook is None or not hook.sig_unique, "older hooks are learned again (AC-U2)"
     pj.save(path, p)
-    assert json.loads(path.read_text())["format_version"] == 3
+    saved = path.read_text()
+    assert json.loads(saved)["format_version"] == 4
+    for key in ("carried_from", '"check"', "relearn_class", "signature_unique", '"test"'):
+        assert key not in saved, "format 4 keys are written only when set"
 
 
-def test_format_4_is_from_a_newer_app(tmp_path):  # AC-5: an older app's rule, one step up
+def test_format_5_is_from_a_newer_app(tmp_path):  # AC-5: an older app's rule, one step up
     doc = json.loads(GOLDEN.read_text())
     doc["format_version"] = pj.FORMAT_VERSION + 1
     path = tmp_path / "new.cmproj"
@@ -255,4 +261,52 @@ def test_bad_parts_are_a_project_error(tmp_path, part):
     doc["cheats"][-1]["parts"] = []
     bad.write_text(json.dumps(doc))
     with pytest.raises(ProjectFileError, match="no parts"):
+        pj.load(bad)
+
+
+# -- format 4: notes brought over from another game version (spec-game-update AC-U7) ----
+def test_format_4_keys_round_trip(tmp_path):
+    p = pj.load(GOLDEN)
+    p.carried_from = "03.000.004"
+    player = p.object("player")
+    player.check = player.relearn_class = True
+    player.hook.sig_unique = True
+    combined = _combined()
+    combined.test = True
+    p.cheats.append(combined)
+    path = tmp_path / "x.cmproj"
+    pj.save(path, p)
+    doc = json.loads(path.read_text())
+    assert doc["carried_from"] == "03.000.004"
+    assert list(doc)[:5] == ["format", "format_version", "title_id", "version", "carried_from"]
+    obj = doc["objects"][0]
+    assert obj["check"] is True and obj["relearn_class"] is True
+    assert obj["anchors"][0]["signature_unique"] is True
+    assert doc["cheats"][1]["test"] is True and "test" not in doc["cheats"][0]
+    assert pj.load(path) == p
+
+
+@pytest.mark.parametrize(
+    "patch",
+    [
+        lambda d: d.update(carried_from=5),
+        lambda d: d["objects"][0].update(check="yes"),
+        lambda d: d["objects"][0].update(relearn_class=1),
+        lambda d: d["objects"][0]["anchors"][0].update(signature_unique="true"),
+        lambda d: d["cheats"].append(
+            {
+                "name": "x",
+                "action": "set",
+                "test": 1,
+                "parts": [{"name": "a", "object": "o", "field": "f", "value": 1}],
+            }
+        ),
+    ],
+)
+def test_format_4_keys_of_the_wrong_type_are_a_project_error(tmp_path, patch):
+    doc = json.loads(GOLDEN.read_text())
+    patch(doc)
+    bad = tmp_path / "bad.cmproj"
+    bad.write_text(json.dumps(doc))
+    with pytest.raises(ProjectFileError):
         pj.load(bad)

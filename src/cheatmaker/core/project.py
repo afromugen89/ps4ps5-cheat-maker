@@ -34,7 +34,10 @@ FORMAT = "cheatmaker-project"
 # Hooks saved by format 1 don't, so they are dropped on load (found again by memory
 # search until the player presses Find it next time again).
 # 3: a cheat may be combined: its "parts" are learned fields and fixed byte patches.
-FORMAT_VERSION = 3
+# 4: notes brought over from another game version ("carried_from", per object "check" and
+# "relearn_class", per hook "signature_unique", per cheat "test"). Each key is written
+# only when set, so a file that never was brought over reads the same as format 3.
+FORMAT_VERSION = 4
 CLASS_FLOAT_LIMIT = 1e9  # top of a float's plausible range when the class is checked
 EXTENSION = ".cmproj"
 
@@ -67,6 +70,14 @@ def _list(v: object, what: str) -> list:
 def _str(v: object, what: str) -> str:
     if not isinstance(v, str):
         raise ValueError(f"{what} is not text")
+    return v
+
+
+def _flag(d: dict, key: str) -> bool:
+    """An optional true/false key (format 4): missing means False."""
+    v = d.get(key, False)
+    if not isinstance(v, bool):
+        raise ValueError(f"{key} is not true or false")
     return v
 
 
@@ -185,10 +196,13 @@ class HookAnchor:
     cave: int  # module offset of the capture routine
     slot: int  # module offset of the 16-byte slot: object address, then a counter
     signature: str = ""  # updater.Signature text, for a later game update
+    # The signature was checked to match exactly once in the game's clean code. Older
+    # hooks load False and get their signature learned again (spec-game-update AC-U2).
+    sig_unique: bool = False
     kind: str = field(default="hook_slot", init=False)
 
     def to_json(self) -> dict:
-        return {
+        d: dict = {
             "kind": self.kind,
             "hook": _hex(self.hook),
             "insn": self.insn,
@@ -201,6 +215,9 @@ class HookAnchor:
             "slot": _hex(self.slot),
             "signature": self.signature,
         }
+        if self.sig_unique:
+            d["signature_unique"] = True
+        return d
 
 
 @dataclass
@@ -241,6 +258,7 @@ def anchor_from_json(d: dict) -> Anchor:
             _int(d["cave"]),
             _int(d["slot"]),
             d.get("signature", ""),
+            _flag(d, "signature_unique"),
         )
     if kind == "vtable_scan":
         return VtableAnchor()
@@ -254,6 +272,8 @@ class ObjectSpec:
     vtable: int | None  # module offset of the class's vtable, None if not a C++ object
     fields: list[Field] = field(default_factory=list)
     anchors: list[Anchor] = field(default_factory=list)
+    check: bool = False  # brought over from another version, not confirmed by the player yet
+    relearn_class: bool = False  # class cleared when brought over: learn it at the first Yes
 
     def field(self, name: str) -> Field:
         for f in self.fields:
@@ -275,13 +295,18 @@ class ObjectSpec:
         return any(c.runs_seen >= 2 for c in self.anchors_of(ChainAnchor))
 
     def to_json(self) -> dict:
-        return {
+        d: dict = {
             "id": self.id,
             "label": self.label,
             "vtable": None if self.vtable is None else _hex(self.vtable),
             "fields": [f.to_json() for f in self.fields],
             "anchors": [a.to_json() for a in self.anchors],
         }
+        if self.check:
+            d["check"] = True
+        if self.relearn_class:
+            d["relearn_class"] = True
+        return d
 
     @classmethod
     def from_json(cls, d: dict) -> ObjectSpec:
@@ -294,6 +319,8 @@ class ObjectSpec:
             None if vt is None else _int(vt),
             [Field.from_json(f) for f in _list(d.get("fields", []), "fields")],
             [anchor_from_json(a) for a in _list(d.get("anchors", []), "anchors")],
+            _flag(d, "check"),
+            _flag(d, "relearn_class"),
         )
 
 
@@ -387,6 +414,7 @@ class ProjectCheat:
     action: Literal["freeze", "set"] = "freeze"
     value: float | int = 0
     parts: list[ProjectPart] = dataclasses.field(default_factory=list)
+    test: bool = False  # fixed code parts brought over from another version, not ticked yet
 
     @property
     def anchors(self) -> list[tuple[str, str]]:
@@ -397,11 +425,14 @@ class ProjectCheat:
 
     def to_json(self) -> dict:
         if self.parts:
-            return {
+            d: dict = {
                 "name": self.name,
                 "action": self.action,
                 "parts": [p.to_json() for p in self.parts],
             }
+            if self.test:
+                d["test"] = True
+            return d
         return {
             "name": self.name,
             "object": self.object,
@@ -420,7 +451,7 @@ class ProjectCheat:
             parts = [ProjectPart.from_json(p) for p in _list(d["parts"], "parts")]
             if not parts:
                 raise ValueError("a combined cheat has no parts")
-            return cls(name, action=d["action"], parts=parts)
+            return cls(name, action=d["action"], parts=parts, test=_flag(d, "test"))
         return cls(
             name,
             _str(d["object"], "a cheat's object"),
@@ -465,6 +496,7 @@ class Project:
     # Objects whose hook came from an older file and was dropped (not saved): the
     # player is asked to press Find it next time again.
     dropped_hooks: list[str] = field(default_factory=list, compare=False)
+    carried_from: str | None = None  # the game version these notes were brought over from
 
     def object(self, obj_id: str) -> ObjectSpec:
         for o in self.objects:
@@ -487,16 +519,21 @@ class Project:
         self.history = [*self.history, entry][-MAX_HISTORY:]
 
     def to_json(self) -> dict:
-        return {
+        d: dict = {
             "format": FORMAT,
             "format_version": FORMAT_VERSION,
             "title_id": self.title_id,
             "version": self.version,
-            "process": self.process,
-            "objects": [o.to_json() for o in self.objects],
-            "cheats": [c.to_json() for c in self.cheats],
-            "history": [h.to_json() for h in self.history],
         }
+        if self.carried_from is not None:
+            d["carried_from"] = self.carried_from
+        d.update(
+            process=self.process,
+            objects=[o.to_json() for o in self.objects],
+            cheats=[c.to_json() for c in self.cheats],
+            history=[h.to_json() for h in self.history],
+        )
+        return d
 
     @classmethod
     def from_json(cls, d: dict) -> Project:
@@ -525,6 +562,7 @@ class Project:
             [ProjectCheat.from_json(c) for c in _list(d.get("cheats", []), "cheats")],
             [HistoryEntry.from_json(h) for h in _list(d.get("history", []), "history")],
             dropped,
+            None if "carried_from" not in d else _str(d["carried_from"], "carried_from"),
         )
 
 
