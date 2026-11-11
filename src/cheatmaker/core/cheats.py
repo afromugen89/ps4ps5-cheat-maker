@@ -58,6 +58,9 @@ class Cheat:
     """Where the value's bytes sit, lowest byte first, as (line, byte) pairs, when the
     value is inside game code (Player only, works with the PC off). None: every line's
     ``on`` bytes are the value."""
+    check_after_restart: bool = field(default=False, compare=False)
+    """Made by Make it work with Only me by a field: the field may differ after a
+    restart, so My cheats says "Check after restart". Not saved in cheat files."""
 
     @property
     def session_only(self) -> bool:

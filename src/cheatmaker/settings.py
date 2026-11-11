@@ -27,6 +27,7 @@ class Settings:
     scan_connections: int = 4  # connections that scan at once (1 = one, like before)
     fast_scan: bool = True  # ask PS5Debug-NG to read game memory in place (faster)
     percent_pc_limit: int = 20_000  # a Full search checks % on the PC from this many down
+    build_notice_hidden: bool = False  # Make it work's "Save your game first" notice
 
     @classmethod
     def path(cls) -> Path:
@@ -62,6 +63,8 @@ class Settings:
         if not isinstance(s.percent_pc_limit, int) or isinstance(s.percent_pc_limit, bool):
             s.percent_pc_limit = 20_000
         s.percent_pc_limit = max(1_000, min(100_000, s.percent_pc_limit))
+        if not isinstance(s.build_notice_hidden, bool):
+            s.build_notice_hidden = False
         return s
 
     def save(self) -> None:

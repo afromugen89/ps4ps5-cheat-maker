@@ -83,3 +83,13 @@ def test_crash_hook_writes_crash_entry(monkeypatch):  # AC-9.5
 
 def test_read_latest_log_missing_file():
     assert logs.read_latest_log() == ""
+
+
+def test_build_notice_hidden_setting():
+    s = Settings.load()
+    assert s.build_notice_hidden is False
+    s.build_notice_hidden = True
+    s.save()
+    assert Settings.load().build_notice_hidden is True
+    Settings.path().write_text('{"build_notice_hidden": "yes"}', encoding="utf-8")
+    assert Settings.load().build_notice_hidden is False, "not a yes/no: shown again"

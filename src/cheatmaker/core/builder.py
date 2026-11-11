@@ -483,6 +483,7 @@ class Builder:
         self.by_class = False
         self.others: list[int] = []  # other objects' value addresses (Only me)
         self.collect_tries = 0
+        self.real_results: dict[rc.Key, rc.Result] = {}  # from real_check, for the Find list
         self._lock = threading.Lock()
         self._installed: _Installed | None = None
         self._passed: _Installed | None = None
@@ -515,7 +516,7 @@ class Builder:
             return None
         game = self._game()
         checker = rc.RealChecker(self._client(), game.pid, [self.group], wait=self.sleep)
-        checker.run(cancel=cancel)
+        self.real_results = dict(checker.run(cancel=cancel))
         best = checker.best(self.group)
         if best is None or best.vtype is not self.vtype:
             log.info("action=build_real_check address=%#x real=none", self.address)
@@ -995,6 +996,7 @@ class Builder:
             self._installed = self._passed = None
         notes.clear_note()
         cheat = self._cheat(inst, saved, base, full)
+        cheat.check_after_restart = self.only_me and not self.by_class
         if self.live is not None:
             self.live.turn_on(cheat)  # the same bytes: marks it on in My cheats
         else:

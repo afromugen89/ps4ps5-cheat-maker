@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer, QUrl
@@ -28,6 +29,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from cheatmaker.core import cave as cv
 from cheatmaker.core import pointers as ptr
 from cheatmaker.core.grouping import Group, promote
 from cheatmaker.core.guide import Action, Guide, Scan, Shows, Suggestion
@@ -106,6 +108,7 @@ class FindWizard(QWidget):
         self.manual: dict[int, ValueType] = {}  # addresses the player typed in
         # Check which is real: what each checked match did with its test value
         self.verdicts: dict[tuple[int, ValueType], Result] = {}
+        self.open_build: Callable[..., None] = lambda **kw: None  # MainWindow.open_build
         self._search_gen = 0  # bumped when the search ends: a running check's results drop
         self._checking = False
         self.pointers: dict[Chain, ValueType] = {}  # chains followed on every refresh
@@ -255,6 +258,8 @@ class FindWizard(QWidget):
         for t in TEMPLATES:
             self.template.addItem(t.name, t)
         self.make_btn = QPushButton("Make a cheat")
+        self.build_btn = QPushButton(hints.BUILD_BUTTON)
+        self.build_btn.setToolTip(hints.BUILD_BUTTON_TIP)
 
         top = QHBoxLayout()
         for w in (
@@ -290,7 +295,14 @@ class FindWizard(QWidget):
         act = QHBoxLayout()
         act.addWidget(self.check_btn)
         act.addWidget(self.test_btn)
-        for w in (self.set_value, self.set_btn, self.freeze_btn, self.template, self.make_btn):
+        for w in (
+            self.set_value,
+            self.set_btn,
+            self.freeze_btn,
+            self.template,
+            self.make_btn,
+            self.build_btn,
+        ):
             act.addWidget(w)
         shows_row = QHBoxLayout()
         shows_row.addWidget(QLabel("What does the game show?"))
@@ -337,6 +349,7 @@ class FindWizard(QWidget):
         self.set_btn.clicked.connect(self.do_set)
         self.freeze_btn.clicked.connect(self.do_freeze)
         self.make_btn.clicked.connect(self.do_make)
+        self.build_btn.clicked.connect(self.do_build)
         self.add_btn.clicked.connect(self.do_add_address)
         self.add_addr.returnPressed.connect(self.do_add_address)
         self.remove_btn.clicked.connect(self.do_remove_address)
@@ -391,7 +404,7 @@ class FindWizard(QWidget):
         for b in self.shows_btns.values():
             b.setEnabled(ready)
         sel = ready and self.selected() is not None and self.selected().address != 0
-        for w in (self.set_btn, self.freeze_btn, self.make_btn):
+        for w in (self.set_btn, self.freeze_btn, self.make_btn, self.build_btn):
             w.setEnabled(sel)
         self.add_btn.setEnabled(ready)
         m = self.selected()
@@ -1306,3 +1319,41 @@ class FindWizard(QWidget):
         self.ctl.ensure_file().cheats.append(cheat)
         self.ctl.cheats_changed.emit()
         self.ctl.message.emit(f'Made "{cheat.name}". Tick it to turn it on.')
+
+    # -- Make it work (spec-cheat-builder B1) ------------------------------------------
+    def _group_of(self, addr: int, vt: ValueType) -> Group | None:
+        return next(
+            (g for g in self.groups if any((m.address, m.vtype) == (addr, vt) for m in g.members)),
+            None,
+        )
+
+    def do_build(self) -> None:
+        """Open Make it work on the picked row. A group that hasn't been checked yet is
+        checked first (one group only); its verdicts come back to this list."""
+        m = self.selected()
+        if m is None:
+            return
+        vt = self._row_type()
+        if vt not in cv.EFFECT_TYPES:
+            self.ctl.message.emit(cv.UNSUPPORTED_TYPE)
+            return
+        group = self._group_of(m.address, vt)
+        targets: list = []
+        if group is not None and not any(
+            (gm.address, gm.vtype) in self.verdicts for gm in group.members
+        ):
+            found = targets_from_groups([group], set(self.ctl.frozen_addresses))
+            targets = found[0] if found else []
+        self.open_build(
+            address=m.address,
+            vtype=vt,
+            name=self.template.currentText() or "Value",
+            group=targets,
+            on_real_check=self.merge_verdicts,
+        )
+
+    def merge_verdicts(self, results: dict[tuple[int, ValueType], Result]) -> None:
+        """Verdicts from Make it work's Check which is real, shown like our own."""
+        self.verdicts.update(results)
+        if self.ctl.session.connected:
+            self.refresh_live()

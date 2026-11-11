@@ -20,8 +20,9 @@ from PySide6.QtWidgets import (
 )
 
 from cheatmaker import formats
+from cheatmaker.core import cave as cv
 from cheatmaker.core import updater as up
-from cheatmaker.core.cheats import Cheat, combine, versions_differ
+from cheatmaker.core.cheats import Cheat, LocationKind, combine, versions_differ
 from cheatmaker.core.values import parse_number
 from cheatmaker.ui import hints
 from cheatmaker.ui.controller import Controller
@@ -32,12 +33,26 @@ log = logging.getLogger(__name__)
 
 COL_ON, COL_NAME, COL_VALUE, COL_KEEPS, COL_DETAILS = range(5)
 FOUND_AGAIN = "Found again each run"
+CHECK_AFTER_RESTART = "Check after restart"
 
 
 def keeps_text(c: Cheat) -> str:
     if c.anchor is not None:
         return FOUND_AGAIN
+    if c.check_after_restart:  # Make it work, Only me by a field (spec-cheat-builder B8)
+        return CHECK_AFTER_RESTART
     return "This session only" if c.session_only else "Yes"
+
+
+def single_value(c: Cheat | None) -> bool:
+    """One value at one address (not a code patch, not found again each run): what
+    Make it work can start from."""
+    return (
+        c is not None
+        and c.anchor is None
+        and len(c.locations) == 1
+        and c.locations[0].kind is not LocationKind.CODE_PATCH
+    )
 
 
 def details(c: Cheat) -> str:
@@ -52,6 +67,7 @@ class CheatsView(QWidget):
         super().__init__()
         self.ctl = ctl
         self.open_lock: Callable[[Cheat], None] = lambda c: None
+        self.open_build: Callable[..., None] = lambda **kw: None
         self.open_save: Callable[[], None] = lambda: None
         self.finder = FindAgain(ctl)
         self.open_learn: Callable[[Cheat], None] = lambda c: LearnDialog(
@@ -76,6 +92,7 @@ class CheatsView(QWidget):
         self.show_details = QCheckBox("Advanced: show details")
         self.delete_btn = QPushButton("Delete")
         self.lock_btn = QPushButton("Lock it")
+        self.build_btn = QPushButton(hints.BUILD_BUTTON)
         self.combine_btn = QPushButton("Combine")
         self.combine_btn.setToolTip(
             "Ctrl-click two or more cheats, then press Combine to make them one cheat"
@@ -103,6 +120,7 @@ class CheatsView(QWidget):
             self.delete_btn,
             self.combine_btn,
             self.lock_btn,
+            self.build_btn,
             self.learn_btn,
             self.again_btn,
             self.open_btn,
@@ -128,6 +146,7 @@ class CheatsView(QWidget):
         self.delete_btn.clicked.connect(self.do_delete)
         self.combine_btn.clicked.connect(self.do_combine)
         self.lock_btn.clicked.connect(lambda: self._with_selected(self.open_lock))
+        self.build_btn.clicked.connect(lambda: self._with_selected(self.do_build))
         self.learn_btn.clicked.connect(lambda: self._with_selected(self.open_learn))
         self.again_btn.clicked.connect(
             lambda: self.finder.start(use_hook=not self.skip_hook.isChecked())
@@ -210,6 +229,11 @@ class CheatsView(QWidget):
             and len(c.locations) == 1  # Lock it watches one address
             and self.ctl.session.connected
         )
+        single = single_value(c)
+        self.build_btn.setEnabled(up and single)
+        self.build_btn.setToolTip(
+            hints.BUILD_PICK_SINGLE if c is not None and not single else hints.BUILD_BUTTON_TIP
+        )
         self.learn_btn.setEnabled(up and located and c.session_only and c.value_type is not None)
         p = self.ctl.project
         self.again_btn.setEnabled(up and p is not None and bool(p.objects))
@@ -242,6 +266,23 @@ class CheatsView(QWidget):
             self.ctl.fail(exc, "toggle" if item.column() == COL_ON else "edit")
             c.enabled = c.enabled and self.ctl.session.connected
         self.fill()
+
+    def do_build(self, c: Cheat) -> None:
+        """Make it work on this cheat's value; the result replaces it."""
+        if not single_value(c):
+            self.ctl.message.emit(hints.BUILD_PICK_SINGLE)
+            return
+        if c.value_type not in cv.EFFECT_TYPES:
+            self.ctl.message.emit(cv.UNSUPPORTED_TYPE)
+            return
+        try:
+            base = self.ctl.session.require_game().module_base
+        except Exception as exc:
+            self.ctl.fail(exc, "build")
+            return
+        self.open_build(
+            address=c.locations[0].address(base), vtype=c.value_type, name=c.name, source=c
+        )
 
     def do_delete(self) -> None:
         picked = self.selected_all()

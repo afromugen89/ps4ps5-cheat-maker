@@ -215,3 +215,35 @@ CHECK_REAL_NOT_RESTORED = (
     "The connection dropped before these got their own value back: {addrs}. Reload a "
     "save or restart the game if a number looks wrong."
 )
+
+# -- Make it work (spec-cheat-builder) ---------------------------------------------------
+BUILD_BUTTON = "Make it work..."
+BUILD_BUTTON_TIP = (
+    "Let Cheat Maker find the game code that changes this value, try safe fixes one by "
+    "one, and keep the one that works"
+)
+BUILD_PICK_SINGLE = "Pick a single value."
+BUILD_READY = "Pick what the cheat should do, then press Start."
+BUILD_FILL_UP = "Fill it up, then press Start."
+BUILD_NOTICE_TITLE = "Save your game first"
+BUILD_NOTICE = "Save your game first. The game may restart if a fix doesn't work."
+BUILD_NOTICE_HIDE = "Don't show this again"
+BUILD_CHECKING = "Checking which one is the real value..."
+BUILD_WATCHING = "Play and make it change (take a hit) within 30 seconds."
+BUILD_COLLECTING = "Get hit and hit enemies for 20 seconds."
+BUILD_FINISHING = "It works! Keeping the fix..."
+BUILD_DONE = 'Done: "{name}" is in My cheats and on. Works after a restart: {after}.'
+BUILD_TRY_ONLY_ME = "If enemies stop dying, try again with Only me."
+BUILD_CANCELLED = "Stopped. Your game is unchanged."
+BUILD_FIX_FAILED = "Fix {n} didn't work ({reason}). Trying the next one."
+BUILD_NONE_WORKED = "None of the safe fixes worked for this value. Your game is unchanged."
+BUILD_FULL_LABEL = "Full:"
+BUILD_FULL_BAD = "Type the Full number first."
+BUILD_ONLY_ME = "Only me"
+BUILD_ONLY_ME_TIP = "Change only your character; enemies go through the game's own code"
+BUILD_ADVANCED = "Advanced: show details"
+BUILD_ADV_WRITER = "Writer {addr}: {text} (changed it {hits} times)"
+BUILD_ADV_SKIPPED = "Skipped {addr}: {text} - {reason}"
+BUILD_ADV_TRIED = "Fix {n}: {label} - {result}"
+BUILD_Q_TITLE = "Make it work"
+BUILD_Q_ENEMIES_HINT = "Not sure counts as No: the fix is put back."
