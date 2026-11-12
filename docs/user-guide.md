@@ -463,9 +463,38 @@ Good to know:
 - If no cheat is made, the My cheats row you started from is switched back on.
 - **Advanced: show details** lists the game code it caught, the ones it skipped and why,
   and every fix it tried.
-- Values that need two places held at once (like Returnal's health and its fraction) are
-  not done by Make it work yet: make it work on one and use Lock it or Combine for the
-  other.
+
+**Values the game keeps in more than one place.** Some games keep one value in two
+places at once (Returnal keeps health and a health fraction, in different parts of
+memory). Holding only one of them isn't enough: the bar stays full while you die. When
+you start Make it work from a row in a group (section 5.7), or from a My cheats row made
+from one, the app watches the other members of the group during each test:
+
+- If they all keep up, nothing changes: one test and Done, as for any value.
+- If one still went down while your value held, the hint says "Health held, but the game
+  also keeps it in a second place that still went down. Fixing that too." The app first
+  checks which of those are real (copies the game works out again, like a HUD number, are
+  never touched), then builds the next place the same way: "Place 2 of 2: play and make
+  it change (take a hit) within 30 seconds.", then "Testing fix 1 of 2 for place 2: keep
+  playing and take a hit." The fixes already found stay in while it does.
+- At most 3 places per value, 4 fixes per extra place and 12 tests in all.
+- When every place is fixed you get one cheat: "Done. Health is held in 2 places by one
+  cheat." It can be saved and sent like any Make it work cheat.
+- If an extra place can't be fixed with a safe code change, the app keeps the fixes it
+  found and holds that place with a freeze: "The second place couldn't be fixed with a
+  safe code change, so the app holds it while the PC is connected. Press Find it next
+  time to keep it after a restart." That cheat is combined and works **This session
+  only** until Find it next time has learned it (section 6.4).
+- With **Half damage** there is no freeze: the app keeps the fixes it found and warns
+  that the second place still goes down fully, so the cheat may not be enough on its own.
+- The **Full** of a cheat with 2 or more places can't be edited in My cheats (one number
+  can't be right for every place). Its tooltip says "Make it work again to change Full.":
+  run Make it work again with the new Full.
+- **Cancel**, closing the window or disconnecting puts every place back, not only the one
+  being tested.
+- Advanced lists every member of the group: its address, type, factor, its mark (real,
+  kept, copy), whether it kept up or fell behind, and what was done ("fixed", "held by a
+  freeze", "not needed: it kept up after place 2 was fixed", "copy: never touched").
 
 ### 6.3 Find it again
 
@@ -639,6 +668,10 @@ different place every time the game starts.
 In **My cheats** the health cheat says **This session only**: it'll be lost when you
 restart or reach a new biome. You have two ways to keep it:
 
+- **Make it work** (works with the PC off, easiest): select the health row, press
+  **Make it work...**, pick **Never goes down** and press **Start**. Because the row is
+  in a group, the app also finds and fixes the health fraction (section 6.2, "Values the
+  game keeps in more than one place"); the result is one cheat holding both places.
 - **Lock it** (works with the PC off): press **Lock it**, **Start**, take a hit within 30
   seconds. Test the options one by one. In games like Returnal, the code that lowers your
   health usually lowers enemies' health too. If enemies stop dying, use **Player only...**

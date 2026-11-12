@@ -176,18 +176,18 @@ No change. The pool is never saved. A freeze-combined cheat that the player late
 All are empty or None when there is no pool:
 
 ```python
-self.pool: list[PoolMember]            # watched members after check_start
-self.copies: list[PoolMember]          # marked copy: listed, judged if watched, never fixed
-self.pool_rows: dict[int, PoolRow]     # by address, for Advanced
-self.pool_released = 0                 # set by the dialog
+self.pool: list[PoolMember]  # watched members after check_start
+self.copies: list[PoolMember]  # marked copy: listed, judged if watched, never fixed
+self.pool_rows: dict[int, PoolRow]  # by address, for Advanced
+self.pool_released = 0  # set by the dialog
 self.place = 1
-self.place_member: PoolMember | None   # None for place 1
-self.places_total = 1                  # for "Place N of M"
-self.tests_total = 0                   # counts every try_candidate (L10 12-test limit)
-self._kept: list[_Place]               # passed places, swapped to their kept routine, not yet a cheat
+self.place_member: PoolMember | None  # None for place 1
+self.places_total = 1  # for "Place N of M"
+self.tests_total = 0  # counts every try_candidate (L10 12-test limit)
+self._kept: list[_Place]  # passed places, swapped to their kept routine, not yet a cheat
 self._kept_reserved: list[tuple[int, int]]  # module (start, end) of kept rooms + slots
-self._fixed_sites: set[int]            # writer addresses fixed by kept places
-self.linked_result = "none"            # none | fixed | freeze | partial
+self._fixed_sites: set[int]  # writer addresses fixed by kept places
+self.linked_result = "none"  # none | fixed | freeze | partial
 ```
 
 New `_Place` (dataclass) holds what a kept place needs at finalize and rollback:
