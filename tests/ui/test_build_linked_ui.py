@@ -252,3 +252,53 @@ def test_find_passes_the_pool_for_every_group_and_make_remembers_it(qtbot):
         assert made.linked is not None and {m.address for m in made.linked.members} >= {HP}
     finally:
         ctl.shutdown()
+
+
+# -- review fixes: the partial hints, reasons in Advanced, L4 verdicts back to Find ---------------
+@pytest.mark.parametrize(
+    ("freeze", "reason", "want"),
+    [
+        (False, bd.LIMIT, "more places than the app can fix on its own"),
+        (True, bd.LIMIT, hints.BUILD_LINKED_LEFT),
+        (False, "Couldn't watch it: unloaded", "couldn't fix or hold"),
+    ],
+)
+def test_partial_results_say_what_was_left(win, game, h, freeze, reason, want):
+    d = h.make(address=game.health_addr, vtype=F, name="Health")
+    cheat = Cheat(
+        "Health: Never goes down", [Location(LocationKind.CODE_PATCH, 0x100, b"\x90", b"\xc3")]
+    )
+    cheat.freeze = freeze
+    res = bd.BuildResult(cheat, "Yes", places=3, linked="partial", reason=reason)
+    text = d._done_text(res)
+    assert want in text
+    if not freeze:
+        assert "second place couldn't be fixed" not in text
+        assert text.startswith("Health is held in 3 places")
+
+
+def test_advanced_says_why_a_place_is_held(win, game, h, clock):
+    game.fake.write_hits[game.fraction_addr] = []
+    add_and_select(win, health_row(game, pool_of(game)))
+    play(clock, game)
+    try:
+        win.cheats.build_btn.click()
+        line = next(t for t in texts(h.last) if t.startswith(f"Linked {game.fraction_addr:#x}"))
+        assert line.endswith(f"held by a freeze ({bd.NOTHING_CHANGED})"), line
+    finally:
+        win.ctl.freezer.clear()
+
+
+def test_verdicts_of_the_linked_check_go_back_to_find(win, game, h, clock):
+    got: list[dict] = []
+    d = h.make(
+        address=game.health_addr,
+        vtype=F,
+        name="Health",
+        pool=pool_of(game),
+        on_real_check=got.append,
+    )
+    play(clock, game)
+    d.exec()
+    assert d.result_cheat is not None
+    assert got and got[-1][(fg.PERCENT, F)].verdict is V.COPY

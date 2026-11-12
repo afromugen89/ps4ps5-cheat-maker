@@ -210,6 +210,8 @@ class MakeItWorkDialog(QDialog):
         for row in b.pool_rows.values():
             m = row.member
             done = hints.BUILD_POOL_DONE[row.done.value].format(n=row.after_place)
+            if done and row.reason:
+                done += hints.BUILD_POOL_REASON.format(reason=row.reason)
             text = hints.BUILD_ADV_POOL.format(
                 addr=f"{m.address:#x}",
                 type=m.vtype.name,
@@ -478,6 +480,9 @@ class MakeItWorkDialog(QDialog):
         self._run(lambda b, cancel: b.next_place(cancel), self._placed)
 
     def _placed(self, np: bd.NextPlace) -> None:
+        b = self.builder
+        if b is not None and self.on_real_check is not None and b.real_results:
+            self.on_real_check(b.real_results)  # L4's verdicts show in the Find list too
         self._show_pool()
         if np.finish:
             self.hint.setText(hints.BUILD_FINISHING)
@@ -513,8 +518,14 @@ class MakeItWorkDialog(QDialog):
             return hints.BUILD_DONE_PLACES.format(name=self.name, n=res.places)
         if res.linked == "partial" and self.effect() is Effect.HALF:
             return hints.BUILD_LINKED_HALF.format(name=self.name)
-        if res.linked in ("freeze", "partial"):
+        if res.linked == "freeze":
             return hints.BUILD_LINKED_FREEZE
+        if res.linked == "partial" and res.cheat.freeze:  # held one, others still go down
+            return f"{hints.BUILD_LINKED_FREEZE} {hints.BUILD_LINKED_LEFT}"
+        if res.linked == "partial" and res.reason == bd.LIMIT:
+            return hints.BUILD_LINKED_LIMIT.format(name=self.name, n=res.places)
+        if res.linked == "partial":
+            return hints.BUILD_LINKED_PARTIAL.format(name=self.name, n=res.places)
         return hints.BUILD_DONE.format(name=res.cheat.name, after=res.after_restart)
 
     def _finished(self, res: bd.BuildResult) -> None:
