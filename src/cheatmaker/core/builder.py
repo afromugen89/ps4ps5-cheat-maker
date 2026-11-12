@@ -31,6 +31,7 @@ import iced_x86 as ix
 from cheatmaker.core import anchor_hook as ah
 from cheatmaker.core import build_notes as notes
 from cheatmaker.core import cave as cv
+from cheatmaker.core import linked as lk
 from cheatmaker.core import real_check as rc
 from cheatmaker.core.cave import Effect
 from cheatmaker.core.cheats import Cheat, Location, LocationKind, value_positions
@@ -461,6 +462,8 @@ class _Installed:
     put_back: Rollback | None = None  # how its put back went, for the other thread
     method: str = ""  # the crash note's method when not the candidate's ("collect")
     seen_count: int = 0  # the highest counter read in the test
+    pool: lk.PoolData | None = None  # what the pool watch saw in its test (linked values)
+    place: int = 1
 
 
 class Builder:
@@ -468,7 +471,9 @@ class Builder:
 
     ``release`` stops the app's own freeze on the value (else the watch only sees our
     writes). ``extra_reserved``: module-offset rooms of open cheats' code lines that
-    a build must never reuse."""
+    a build must never reuse. ``pool``: the value's Find group (spec-linked-values L2);
+    its members are watched during each test. Without one (or when no member is left
+    at Start) every request, wait and note is as without linked values."""
 
     def __init__(
         self,
@@ -486,6 +491,7 @@ class Builder:
         extra_reserved: Iterable[tuple[int, int]] = (),
         sleep: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.monotonic,
+        pool: lk.LinkedGroup | None = None,
     ) -> None:
         if vtype not in cv.EFFECT_TYPES:
             raise BuildFailed(cv.UNSUPPORTED_TYPE)
@@ -520,6 +526,14 @@ class Builder:
         self._answers: dict[Question, Answer] = {}
         self._repeat: Candidate | None = None
         self._repeated: set[int] = set()
+        # Linked values: all empty without a pool.
+        self.linked = pool  # the Find group snapshot
+        self.pool: list[lk.PoolMember] = []  # watched members after the Start check
+        self.copies: list[lk.PoolMember] = []  # marked copy: watched if room, never fixed
+        self.pool_full: dict[int, float | int] = {}  # Always full: each member's Full (L8)
+        self.pool_released = 0  # Find freezes the dialog released on the pool
+        self.place = 1
+        self.linked_result = "none"  # none | fixed | freeze | partial
 
     # -- helpers -------------------------------------------------------------------
     def _game(self):
@@ -594,6 +608,8 @@ class Builder:
             self.only_me,
             self.full,
         )
+        if self.linked is not None and self.place == 1:
+            self._prepare_pool()
         try:
             writers = find_writers(
                 self.session, self.address, self.vtype.size, WATCH_S, until=self.until(cancel)
@@ -611,6 +627,43 @@ class Builder:
         if not self.queue:
             raise BuildFailed(NOTHING_WORKED)
         return list(self.queue)
+
+    def _prepare_pool(self) -> None:
+        """L2 at Start (the dialog released the Find freezes first): place 1 and every
+        member read in one batch; members no longer k x place 1 are dropped, the rest
+        get the factor read now. Always full: each member's Full (L8)."""
+        assert self.linked is not None
+        watched, copies = lk.pool_for(self.linked, (self.address, self.vtype), self.real_results)
+        members = watched + copies
+        place1 = rc.Target(self.address, self.vtype)
+        dropped: list[tuple[lk.PoolMember, str]] = []
+        kept: list[lk.PoolMember] = []
+        if members:
+            game, client = self._game(), self._client()
+            raw: dict[rc.Key, bytes] = {}
+            for ts in rc.spans([place1, *(m.target for m in members)]):
+                raw.update(rc.read_span(client, game.pid, ts))
+            got = raw.get((self.address, self.vtype))
+            v1 = None if got is None else self.vtype.decode(got)
+            values = {m.key: m.vtype.decode(raw[m.key]) if m.key in raw else None for m in members}
+            kept, dropped = lk.check_start(place1, v1, members, values)
+        self.pool = [m for m in kept if m.mark is not rc.Verdict.COPY]
+        # Copies are only watched beside a member that may be fixed: with none left,
+        # the build is exactly one without a pool.
+        self.copies = [m for m in kept if m.mark is rc.Verdict.COPY] if self.pool else []
+        if self.effect is Effect.ALWAYS_FULL and self.full is not None:
+            self.pool_full = {
+                m.address: lk.scaled_full(self.full, m.factor, m.vtype) for m in self.pool
+            }
+        for m, why in dropped:
+            log.info("action=build_pool_drop member=%#x reason=%r", m.address, why)
+        log.info(
+            "action=build_pool members=%d dropped=%d released=%d copies=%d",
+            len(self.pool),
+            len(dropped),
+            self.pool_released,
+            len(self.copies),
+        )
 
     def _all_crashed(self, c: Candidate) -> bool:
         if len(c.parts) < 2:
@@ -801,7 +854,7 @@ class Builder:
             )
             slot = cv.find_slot(self.session)
         full = self.vtype.encode(self.full) if self.full is not None else None
-        inst = _Installed(c, n, sites, [], [], slot=slot)
+        inst = _Installed(c, n, sites, [], [], slot=slot, place=self.place)
         k = 0
         for part in c.parts:
             w = part.writer
@@ -936,11 +989,13 @@ class Builder:
         samples = [Sample(start_value)]
         others_down = False
         alive = _AliveCheck(self, inst)
+        pool = _PoolWatch(self) if self.pool else None
         t0 = self.clock()
         while self.clock() - t0 < TEST_S:
             if cancel.is_set():
                 return TestOutcome(TryResult.CANCELLED, rollback=self._end(inst, "cancelled"))
-            self.sleep(POLL_S)
+            # The pool's reads come out of the wait, so the value is read as often.
+            self.sleep(POLL_S if pool is None else max(0.0, POLL_S - pool.last_cost))
             taken = self._taken_back(inst)
             if taken is not None:
                 return TestOutcome(TryResult.CANCELLED, rollback=taken)
@@ -953,6 +1008,8 @@ class Builder:
                     except ReadFailed:
                         continue
                 ok, gone = alive.check()
+                if ok and pool is not None:
+                    pool.tick(None if sample is None else sample.value)
             except (ConnectionLost, ReadFailed):
                 ok, gone = False, self._game_gone()
             if not ok:
@@ -964,6 +1021,8 @@ class Builder:
                 samples.append(sample)
             if progress is not None:
                 progress(min(1.0, (self.clock() - t0) / TEST_S), hint)
+        if pool is not None:
+            inst.pool = pool.finish()
         data = TestData(
             self.effect,
             self.vtype,
@@ -1355,6 +1414,78 @@ class _AliveCheck:
                 log.warning("action=build_alive game_gone")
                 return False, True
         return True, False
+
+
+class _PoolWatch:
+    """L3: the pool members read during one test, about once a second each, in 4 KiB
+    spans. A span is due POOL_EVERY_S after its last read (the first reads staggered
+    over the first second); a tick reads the spans due by then (or within
+    POOL_EARLY_S), oldest first, at most MAX_SPAN_READS_PER_TICK. A member that can't
+    be read gets no value (it may be unknown at the end); after 2 such reads it isn't
+    read again in this test. Only a lost link leaves the tick (the test's Lost path)."""
+
+    def __init__(self, b: Builder) -> None:
+        self.b = b
+        members = [*b.pool, *b.copies]
+        self.spans = lk.plan_spans(b.pool, b.copies)
+        read = {(t.address, t.vtype) for s in self.spans for t in s}
+        self.data = lk.PoolData(
+            readings={k: [] for k in read},
+            not_watched=[m for m in members if m.key not in read],
+            spans=len(self.spans),
+        )
+        now, n = b.clock(), max(1, len(self.spans))
+        self.due = [now + i * lk.POOL_EVERY_S / n for i in range(len(self.spans))]
+        self.last_read: list[float | None] = [None] * len(self.spans)
+        self.fails: dict[rc.Key, int] = {}
+        self.last_cost = 0.0  # how long the last tick's reads took
+
+    def tick(self, ref: float | int | None) -> None:
+        """After the tick's sample: read the spans that are due. ``ref`` is place 1's
+        value in that sample (None when it was dropped)."""
+        b = self.b
+        start = b.clock()
+        due = sorted(
+            (d, i) for i, d in enumerate(self.due) if d <= start + lk.POOL_EARLY_S and self.spans[i]
+        )
+        for _d, i in due[: lk.MAX_SPAN_READS_PER_TICK]:
+            t = b.clock()
+            last = self.last_read[i]
+            if last is not None and t - last > lk.ONCE_A_SECOND_S:
+                self.data.late += 1
+            self._read(i, ref)
+            self.last_read[i] = t
+            self.due[i] = t + lk.POOL_EVERY_S
+        self.last_cost = b.clock() - start
+        self.data.read_s += self.last_cost
+
+    def _read(self, i: int, ref: float | int | None) -> None:
+        b = self.b
+        ts = self.spans[i]
+        t = b.clock()
+        got = rc.read_span(b._client(), b._game().pid, ts)
+        self.data.reads += 1
+        for target in ts:
+            key = (target.address, target.vtype)
+            raw = got.get(key)
+            if raw is None:
+                self.fails[key] = self.fails.get(key, 0) + 1
+            value = None if raw is None else target.vtype.decode(raw)
+            self.data.readings[key].append(lk.Reading(t, ref, value))
+        self.spans[i] = [x for x in ts if self.fails.get((x.address, x.vtype), 0) < 2]
+
+    def finish(self) -> lk.PoolData:
+        d = self.data
+        d.end_t = self.b.clock()
+        log.info(
+            "action=build_linked_reads place=%d spans=%d reads=%d avg_ms=%.0f late=%d",
+            self.b.place,
+            d.spans,
+            d.reads,
+            1000 * d.read_s / d.reads if d.reads else 0.0,
+            d.late,
+        )
+        return d
 
 
 def _method_name(c: Candidate) -> str:

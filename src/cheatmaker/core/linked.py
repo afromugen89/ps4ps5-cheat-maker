@@ -32,7 +32,11 @@ MAX_PLACES = 3  # L10
 MAX_LINKED_FIXES = 4  # L10: fixes tried per linked place
 MAX_TESTS = 12  # L10: tests per build, place 1 and repeats included
 LINK_TOL = 0.02  # L2 start check, falls behind, clusters
-POOL_EVERY_S = 0.75  # each span is read at most this long after its last read
+POOL_EVERY_S = 0.75  # each span is read again this long after its last read ...
+POOL_EARLY_S = 0.1  # ... or up to this much sooner, at the tick before (ticks don't
+# fall on due times: with 36 ms reads a tick is ~0.36 s, so a span is read every 2 ticks,
+# 0.72 s, not every 3, 1.07 s; with no latency every 3 ticks, 0.75 s)
+ONCE_A_SECOND_S = 1.0  # L3: a span read later than this after its last read is late
 MAX_SPAN_READS_PER_TICK = 5
 MAX_SPANS = 16  # spans read in one test; copy-only spans beyond this aren't watched
 BEHIND_READINGS = 2  # "at least 1 s in a row": 2 readings in a row, >= 0.75 s apart
@@ -110,7 +114,7 @@ class PoolData:
     not_watched: list[PoolMember] = field(default_factory=list)
     spans: int = 0
     reads: int = 0
-    late: int = 0
+    late: int = 0  # reads more than ONCE_A_SECOND_S after the span's last read
     read_s: float = 0.0  # time spent reading the pool
 
 
