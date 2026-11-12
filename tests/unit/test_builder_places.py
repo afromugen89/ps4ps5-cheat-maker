@@ -12,6 +12,7 @@ place 1's fix went in, with one 2 s wait for all of them on Cancel.
 
 from __future__ import annotations
 
+import itertools
 import logging
 import struct
 import threading
@@ -596,3 +597,45 @@ def test_fallback_after_cancel_puts_everything_back():
     with pytest.raises(ScanCancelled):
         bl.fallback(cancel)
     assert module(g) == before and notes.kept_notes() == []
+
+
+# -- later places' tests: the baseline and the reference read (review) -----------------------
+def test_a_hit_before_the_first_scheduled_read_still_counts_at_place_2():
+    """The pool is read once as place 2's test starts: a member that falls in the very
+    first tick, before any scheduled read, is still judged behind."""
+    g, clock, bl = setup(third=True)
+    to_place(bl, clock, g, 2)
+    before = g.value(fg.THIRD_OBJ, "third")
+    clock.events.extend([lambda: g.damage(10.0)])  # the first tick, then nothing
+    assert bl.try_candidate(bl.next_candidate()).result is TR.PASS
+    first = bl._passed.pool.readings[(g.third_addr, F)][0]
+    assert first.value == before and first.ref == 100.0, "read as the test started"
+    plan = bl.after_pass()
+    assert [m.address for m in plan.behind] == [g.third_addr]
+
+
+def test_place_2_reads_place_1_on_top_of_the_members(monkeypatch):
+    """Place 1 is more than 4 KiB from every member, so it has a read of its own: that
+    read doesn't take a member's turn, and with 36 ms reads every member is still read at
+    least once a second."""
+    monkeypatch.setattr(lk, "MAX_SPAN_READS_PER_TICK", 1)
+    g, clock, bl = setup(
+        pool=lambda g: lk.LinkedGroup(
+            (
+                lk.PoolMember(g.health_addr, F, 1.0, True, V.REAL),
+                lk.PoolMember(g.fraction_addr, F, 0.01, True, V.KEPT),
+                lk.PoolMember(fg.PERCENT, F, 1.0, False, V.KEPT),
+            )
+        )
+    )
+    g.slow_reads(lambda s: setattr(clock, "now", clock.now + s))
+    to_place(bl, clock, g, 2)
+    assert abs(fg.PERCENT - g.health_addr) > 0x1000
+    clock.events.extend(fight(g))
+    assert bl.try_candidate(bl.next_candidate()).result is TR.PASS
+    data = bl._passed.pool
+    rs = data.readings[(fg.PERCENT, F)]
+    t0 = data.end_t - b.TEST_S
+    ts = [t0, *(r.t for r in rs), data.end_t]
+    assert max(b_ - a for a, b_ in itertools.pairwise(ts)) <= lk.ONCE_A_SECOND_S
+    assert all(r.ref == 100.0 for r in rs) and data.late == 0

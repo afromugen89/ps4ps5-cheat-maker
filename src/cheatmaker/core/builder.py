@@ -1198,8 +1198,11 @@ class Builder:
             )
         nop = all(p.method is Method.NOP for p in inst.candidate.parts)
         others_start: dict[int, float | int] = {}
+        pool = _PoolWatch(self) if self._watched_pool() else None
         try:
             start_value = self._read_value()
+            if pool is not None and self.place > 1:
+                pool.baseline()  # judge_later's line: the pool as the test starts (L5)
             for o in self.others:
                 try:
                     others_start[o] = self._read_value(o)
@@ -1213,7 +1216,6 @@ class Builder:
         samples = [Sample(start_value)]
         others_down = False
         alive = _AliveCheck(self, inst)
-        pool = _PoolWatch(self) if self._watched_pool() else None
         t0 = self.clock()
         while self.clock() - t0 < TEST_S:
             if cancel.is_set():
@@ -2085,7 +2087,8 @@ class _PoolWatch:
 
     In a later place's test the sample is that place's value, so place 1 (the
     reference) is read with the pool: in a member's span when it is within 4 KiB, else
-    in the read just before."""
+    in a read of its own just before, which doesn't count against the tick's limit.
+    There every span is also read once as the test starts (``baseline``)."""
 
     def __init__(self, b: Builder) -> None:
         self.b = b
@@ -2095,6 +2098,12 @@ class _PoolWatch:
         self.ref_key = None if self.ref is None else (self.ref.address, self.ref.vtype)
         self.ref_value: float | int | None = None
         self.spans = lk.plan_spans(watched, b.copies, self.ref)
+        self.home = (  # the reference's span
+            None
+            if self.ref is None
+            else next(i for i, ts in enumerate(self.spans) if self.ref in ts)
+        )
+        self.ref_only = self.home is not None and self.spans[self.home] == [self.ref]
         read = {(t.address, t.vtype) for s in self.spans for t in s} - {self.ref_key}
         self.data = lk.PoolData(
             readings={k: [] for k in read},
@@ -2113,15 +2122,15 @@ class _PoolWatch:
         b = self.b
         start = b.clock()
         due = sorted(
-            (d, i) for i, d in enumerate(self.due) if d <= start + lk.POOL_EARLY_S and self.spans[i]
+            (d, i)
+            for i, d in enumerate(self.due)
+            if d <= start + lk.POOL_EARLY_S
+            and self.spans[i]
+            and not (self.ref_only and i == self.home)
         )
         picked = [i for _d, i in due[: lk.MAX_SPAN_READS_PER_TICK]]
-        if self.ref is not None and picked:
-            home = next(i for i, ts in enumerate(self.spans) if self.ref in ts)
-            if home not in picked:  # the reference first, then the members
-                picked = [home, *picked[: lk.MAX_SPAN_READS_PER_TICK - 1]]
-            else:
-                picked = [home, *(i for i in picked if i != home)]
+        if self.home is not None and picked:  # the reference first, then the members
+            picked = [self.home, *(i for i in picked if i != self.home)]
         for i in picked:
             t = b.clock()
             last = self.last_read[i]
@@ -2132,6 +2141,16 @@ class _PoolWatch:
             self.due[i] = t + lk.POOL_EVERY_S
         self.last_cost = b.clock() - start
         self.data.read_s += self.last_cost
+
+    def baseline(self) -> None:
+        """Every span once, the reference first, right after the test's start value:
+        what each member was against place 1 as this place's test began."""
+        order = list(range(len(self.spans)))
+        if self.home is not None:
+            order = [self.home, *(i for i in order if i != self.home)]
+        for i in order:
+            if self.spans[i]:
+                self._read(i, None)
 
     def _read(self, i: int, ref: float | int | None) -> None:
         b = self.b
