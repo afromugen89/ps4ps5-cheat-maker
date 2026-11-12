@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
 )
 
 from cheatmaker.core import cave as cv
+from cheatmaker.core import linked
 from cheatmaker.core import pointers as ptr
 from cheatmaker.core.grouping import Group, promote
 from cheatmaker.core.guide import PUT_BACK_S, Action, Guide, Scan, Shows, Suggestion
@@ -1500,6 +1501,9 @@ class FindWizard(QWidget):
         except Exception as exc:
             self.ctl.fail(exc, "make_cheat")
             return
+        group = self._group_of(m.address, self._row_type())
+        if group is not None:  # Make it work from My cheats watches the group (L2)
+            cheat.linked = linked.from_group(group, self.verdicts)
         self.ctl.ensure_file().cheats.append(cheat)
         self.ctl.cheats_changed.emit()
         self.ctl.message.emit(f'Made "{cheat.name}". Tick it to turn it on.')
@@ -1580,7 +1584,8 @@ class FindWizard(QWidget):
 
     def do_build(self) -> None:
         """Open Make it work on the picked row. A group that hasn't been checked yet is
-        checked first (one group only); its verdicts come back to this list."""
+        checked first (one group only); its verdicts come back to this list. Every group
+        goes along as the pool (spec-linked-values L2), checked or not."""
         m = self.selected()
         if m is None:
             return
@@ -1601,6 +1606,7 @@ class FindWizard(QWidget):
             name=self.template.currentText() or "Value",
             group=targets,
             on_real_check=self.merge_verdicts,
+            pool=None if group is None else linked.from_group(group, self.verdicts),
         )
 
     def merge_verdicts(self, results: dict[tuple[int, ValueType], Result]) -> None:

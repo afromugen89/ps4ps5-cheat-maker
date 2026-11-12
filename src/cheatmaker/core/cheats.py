@@ -5,9 +5,13 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import TYPE_CHECKING
 
 from cheatmaker.core.values import ValueType
 from cheatmaker.errors import CheatMakerError
+
+if TYPE_CHECKING:
+    from cheatmaker.core.linked import LinkedGroup
 
 MAIN_MODULE = "eboot.bin"
 MAX_MOVING = 4  # parts that move (session or learned) in one combined cheat
@@ -79,6 +83,12 @@ class Cheat:
     the player confirms its value, "test" until its brought-over code parts were
     ticked once, "lost" while a value it uses came over with no way to be found, ""
     otherwise. Set from the notes; never saved in cheat files."""
+    linked: LinkedGroup | None = field(default=None, compare=False)
+    """The Find group this session cheat was made from (spec-linked-values L2): Make it
+    work watches its other members. In memory only; never saved, and Combine drops it."""
+    places: int = field(default=1, compare=False)
+    """How many places a Make it work result fixes (L13). With 2 or more, Full can't be
+    edited (one number can't be typed for all of them). In memory only."""
 
     @property
     def session_only(self) -> bool:

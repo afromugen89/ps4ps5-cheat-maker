@@ -321,6 +321,7 @@ BUILD_FIX_FAILED = "Fix {n} didn't work ({reason}). Trying the next one."
 BUILD_NONE_WORKED = "None of the safe fixes worked for this value. Your game is unchanged."
 BUILD_FULL_LABEL = "Full:"
 BUILD_FULL_BAD = "Type the Full number first."
+BUILD_FULL_PLACES = "Make it work again to change Full."  # a cheat with 2 or more places
 BUILD_ONLY_ME = "Only me"
 BUILD_ONLY_ME_TIP = "Change only your character; enemies go through the game's own code"
 BUILD_ADVANCED = "Advanced: show details"
@@ -329,6 +330,51 @@ BUILD_ADV_SKIPPED = "Skipped {addr}: {text} - {reason}"
 BUILD_ADV_TRIED = "Fix {n}: {label} - {result}"
 BUILD_Q_TITLE = "Make it work"
 BUILD_Q_ENEMIES_HINT = "Not sure counts as No: the fix is put back."
+# Linked values (docs/spec-linked-values.md): a value the game keeps in more places.
+BUILD_LINKED_BEHIND = (  # L1
+    "{name} held, but the game also keeps it in a second place that still went down. "
+    "Fixing that too."
+)
+BUILD_PLACE_WATCHING = (  # L6
+    "Place {n} of {total}: play and make it change (take a hit) within 30 seconds."
+)
+BUILD_LINKED_FREEZE = (  # L11, Never goes down and Always full
+    "The second place couldn't be fixed with a safe code change, so the app holds it "
+    "while the PC is connected. Press Find it next time to keep it after a restart."
+)
+BUILD_LINKED_HALF = (  # L11, Half damage
+    "{name} takes half damage, but the game also keeps it in a second place that still "
+    "goes down fully. The cheat may not be enough on its own."
+)
+BUILD_LINKED_LEFT = "Some places the game keeps it in were left unfixed."  # freeze + more
+BUILD_LINKED_LIMIT = (  # L10: MAX_PLACES fixed and another still goes down
+    "{name} is held in {n} places, but the game keeps it in more places than the app can "
+    "fix on its own. The cheat may not be enough on its own."
+)
+BUILD_LINKED_PARTIAL = (  # L11 without a freeze (the place couldn't be read)
+    "{name} is held in {n} places, but the game also keeps it in a place the app couldn't "
+    "fix or hold. The cheat may not be enough on its own."
+)
+BUILD_DONE_PLACES = "Done. {name} is held in {n} places by one cheat."  # L13
+BUILD_ADV_PLACE_FAILED = "Place {n}: {reason}"
+BUILD_ADV_POOL = "Linked {addr} ({type}, x{k}): {mark}, {status}{done}"  # L15
+BUILD_POOL_MARK = {  # by Check which is real's verdict name; None: not checked
+    "REAL": "real",
+    "KEPT": "kept",
+    "COPY": "copy",
+    "FAILED": "couldn't be checked",
+    None: "not checked",
+}
+BUILD_POOL_DONE = {  # by core.linked.Done value
+    "nothing": "",
+    "fixed": "fixed",
+    "held by a freeze": "held by a freeze",
+    "not needed": "not needed: it kept up after place {n} was fixed",
+    "copy": "copy: never touched",
+    "couldn't be checked": "couldn't be checked",
+    "not fixed": "not fixed",
+}
+BUILD_POOL_REASON = " ({reason})"  # after "held by a freeze" / "not fixed"
 
 # -- Find the real one behind it (docs/spec-trace.md) -------------------------------------
 TRACE_TESTED = False  # C20a passed: the button leaves Advanced for the action row

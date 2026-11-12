@@ -150,6 +150,7 @@ Methods, tried in this order for each effect:
   says "Restart the game: fixes only live in memory until then."
 
 ### B7 A second address (Returnal-style values)
+**Replaced by docs/spec-linked-values.md (2026-11-12).** The text below is kept for history.
 Not in this version (see "Not in this version").
 - After a candidate passes, if the target's group has a "likely real" neighbour (within 64
   bytes, at another scale) that went down during the test while the target held: the builder
@@ -185,7 +186,8 @@ Not in this version (see "Not in this version").
 - Effects beyond these (never goes up, multiply, set on event), values over 2 addresses,
   other types, writers skipped by S1 to S4, editing the half-damage factor [OPEN: Kein,
   25/50/75%? Default: 50% only], changing Lock it / Player only.
-- B7, a second address (Returnal-style values): cut from this version, the first item
+- B7, a second address (Returnal-style values): replaced by docs/spec-linked-values.md
+  (linked values in Make it work, 2026-11-12). It was cut from this version, the first item
   in the design's cut order. A build makes one fix for one address; a value the game also
   keeps at a neighbour (health and its fraction) may need Lock it on the neighbour
   afterwards. The dialog doesn't offer that by itself.

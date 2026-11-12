@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 import pytest
 
@@ -140,3 +141,144 @@ def test_a_site_with_other_bytes_keeps_the_routines_and_says_restart():
     assert g.fake.peek(fg.PID, fg.SUB_SITE, 6) == other
     assert g.fake.peek(fg.PID, fg.BASE + 0x3000, 0x20) == b"\x55" * 0x20, "routines kept"
     assert bn.current_note() is None and not bn.is_crashed(fg.TITLE, fg.VERSION, 0x300, "hook")
+
+
+# -- linked values: places kept while the next one is built (spec-linked-values L12) ---------
+def _place2(g: fg.Game, pid: int = fg.PID) -> bn.OpenNote:
+    site_off = fg.WRITER - fg.BASE
+    return replace(
+        _note(g, pid),
+        site_off=site_off,
+        patches=(bn.Patch(site_off, fg.VMOVSS_W.hex(), JMP + "9090909090"),),
+        rooms=((0x3100, 0x20),),
+        place=2,
+    )
+
+
+def _in_game(g: fg.Game, *ns: bn.OpenNote) -> None:
+    for n in ns:
+        for p in n.patches:
+            g.fake.poke(fg.PID, fg.BASE + p.site_off, bytes.fromhex(p.new_hex))
+        for off, size in n.rooms:
+            g.fake.poke(fg.PID, fg.BASE + off, b"\x55" * size)
+
+
+def test_place_is_written_only_when_above_one():
+    g = fg.build(capture_ticks=False)
+    bn.open_note(_note(g))
+    one = bn.notes_path().read_text(encoding="utf-8")
+    assert '"place"' not in one and '"kept"' not in one, "as an older app writes it"
+    bn.open_note(_place2(g))
+    assert json.loads(bn.notes_path().read_text(encoding="utf-8"))["open"]["place"] == 2
+    assert bn.current_note().place == 2
+
+
+def test_keep_note_moves_open_to_kept_and_clear():
+    g = fg.build(capture_ticks=False)
+    bn.keep_note()  # nothing open: nothing to do
+    assert not bn.notes_path().exists()
+    first, second = _note(g), _place2(g)
+    bn.open_note(first)
+    bn.keep_note()
+    assert bn.current_note() is None and bn.kept_notes() == [first]
+    bn.open_note(second)
+    bn.keep_note()
+    assert bn.kept_notes() == [first, second]
+    bn.clear_kept([2])
+    assert bn.kept_notes() == [first]
+    bn.open_note(second)
+    bn.clear_all()
+    assert bn.current_note() is None and bn.kept_notes() == []
+    raw = json.loads(bn.notes_path().read_text(encoding="utf-8"))
+    assert raw == {"open": None, "crashed": []}, "an empty kept list isn't written"
+
+
+def test_old_file_without_kept_and_damaged_kept_load():
+    bn.notes_path().parent.mkdir(parents=True, exist_ok=True)
+    bn.notes_path().write_text(json.dumps({"open": None, "crashed": []}), "utf-8")
+    assert bn.kept_notes() == []
+    bn.notes_path().write_text(json.dumps({"open": None, "kept": 5, "crashed": []}), "utf-8")
+    assert bn.kept_notes() == []
+    bn.notes_path().write_text(
+        json.dumps({"open": None, "kept": [7, {"pid": 1}], "crashed": []}), "utf-8"
+    )
+    assert bn.kept_notes() == []
+
+
+def test_kept_places_in_the_same_game_are_put_back_newest_first_with_one_wait():
+    g = fg.build(capture_ticks=False)
+    first, second = _note(g), _place2(g)
+    _in_game(g, first, second)
+    for n in (first, second):
+        bn.open_note(n)
+        bn.keep_note()
+    waits = []
+    hint = bn.check_on_connect(g.session, sleep=waits.append)
+    assert (
+        hint
+        == bn.KEPT_PUT_BACK
+        == ("Fixes from last time were still in the game. They've been put back.")
+    )
+    assert waits == [bn.PUT_BACK_WAIT_S], "one wait for every place"
+    sites = [a for _p, a, _d in g.fake.writes if a in (fg.WRITER, fg.SUB_SITE)]
+    assert sites == [fg.WRITER, fg.SUB_SITE], "place 2 first"
+    assert g.fake.peek(fg.PID, fg.SUB_SITE, 6) == fg.SUB_W
+    assert g.fake.peek(fg.PID, fg.WRITER, 10) == fg.VMOVSS_W
+    for off in (0x3000, 0x3100):
+        assert g.fake.peek(fg.PID, fg.BASE + off, 0x20) == bytes(0x20)
+    assert bn.kept_notes() == [] and not bn.is_crashed(fg.TITLE, fg.VERSION, 0x300, "hook")
+
+
+def test_open_and_kept_together_the_open_hint_wins():
+    g = fg.build(capture_ticks=False)
+    first, second = _note(g), _place2(g)
+    _in_game(g, first, second)
+    bn.open_note(first)
+    bn.keep_note()
+    bn.open_note(second)
+    hint = bn.check_on_connect(g.session, sleep=lambda _s: None)
+    assert hint == "Fix 2 from last time was still in the game. It's been put back."
+    assert g.fake.peek(fg.PID, fg.SUB_SITE, 6) == fg.SUB_W, "the kept place is put back too"
+    assert bn.current_note() is None and bn.kept_notes() == []
+
+
+@pytest.mark.parametrize("how", ["restarted", "no game"])
+def test_kept_places_in_another_game_are_dropped_never_marked(how):
+    g = fg.build(capture_ticks=False)
+    first, second = _note(g, pid=fg.PID + 1), _place2(g, pid=fg.PID + 1)
+    if how == "no game":
+        first, second = _note(g), _place2(g)
+        g.session.game = None
+    bn.open_note(first)
+    bn.keep_note()
+    bn.open_note(second)  # the fix under test: this one is marked
+    assert bn.check_on_connect(g.session, sleep=lambda _s: None).startswith("Fix 2 crashed")
+    assert bn.kept_notes() == [] and g.fake.writes == []
+    assert bn.is_crashed(fg.TITLE, fg.VERSION, fg.WRITER - fg.BASE, "hook")
+    assert not bn.is_crashed(fg.TITLE, fg.VERSION, fg.SUB_SITE - fg.BASE, "hook"), "kept: never"
+
+
+def test_kept_place_with_a_changed_site_keeps_its_rooms_and_says_restart():
+    g = fg.build(capture_ticks=False)
+    first, second = _note(g), _place2(g)
+    _in_game(g, first, second)
+    other = b"\xe9\x10\x20\x00\x00\x90"
+    g.fake.poke(fg.PID, fg.SUB_SITE, other)
+    for n in (first, second):
+        bn.open_note(n)
+        bn.keep_note()
+    assert bn.check_on_connect(g.session, sleep=lambda _s: None) == bn.RESTART
+    assert g.fake.peek(fg.PID, fg.BASE + 0x3000, 0x20) == b"\x55" * 0x20, "place 1 kept"
+    assert g.fake.peek(fg.PID, fg.BASE + 0x3100, 0x20) == bytes(0x20), "place 2 clean"
+    assert bn.kept_notes() == []
+
+
+def test_kept_places_no_answer_says_restart_and_keeps_them():
+    g = fg.build(capture_ticks=False)
+    first = _note(g)
+    _in_game(g, first)
+    bn.open_note(first)
+    bn.keep_note()
+    g.fake.fail_writes = True
+    assert bn.check_on_connect(g.session, sleep=lambda _s: None) == bn.RESTART
+    assert bn.kept_notes() == [first], "kept for the next connect"

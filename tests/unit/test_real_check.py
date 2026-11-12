@@ -10,16 +10,19 @@ from cheatmaker.core.grouping import Group, Member
 from cheatmaker.core.real_check import (
     CHECK_LIMIT,
     LIST_LIMIT,
+    READ_SPAN,
     ROUNDS_LIMIT,
     RealChecker,
     Target,
     Verdict,
     probe_value,
+    read_span,
+    spans,
     targets_from_groups,
     targets_from_list,
 )
 from cheatmaker.core.values import ValueType
-from cheatmaker.errors import ConnectionLost
+from cheatmaker.errors import ConnectionLost, ReadFailed
 from tests.conftest import HEAP_BASE, PID, build_fake
 
 F = ValueType.FLOAT
@@ -377,3 +380,37 @@ def test_a_zero_tried_value_only_counts_zeros_that_changed():
     assert not _follows(i, enc(1234), enc(1300), 0, 7), "a moving counter isn't a copy of 0"
     assert _follows(i, enc(0), enc(700), 0, 7)
     assert not _follows(i, enc(0), enc(1), 100, 75), "a copy of 100 isn't 0"
+
+
+# -- spans / read_span (shared with Make it work's pool watch) ---------------------------
+def test_spans_cut_at_4_kib_in_address_order_without_repeats():
+    a, b = Target(HEAP_BASE + 0x2000, F), Target(HEAP_BASE, F)
+    c = Target(HEAP_BASE + READ_SPAN - 4, F)  # its last byte is the span's last
+    d = Target(HEAP_BASE + READ_SPAN - 3, F)  # one byte past: a new span
+    assert spans([a, c, b, b, d]) == [[b, c], [d], [a]]
+    assert spans([]) == []
+    assert spans([b, c, d], span=0x10) == [[b], [c, d]]
+
+
+def test_read_span_is_one_read(game):
+    reads = []
+    real = game.read
+    game.read = lambda pid, addr, size: (reads.append((addr, size)), real(pid, addr, size))[1]
+    ts = [Target(REAL, F), Target(FRAC, F)]
+    out = read_span(game, PID, ts)
+    assert reads == [(REAL, FRAC + 4 - REAL)]
+    assert out == {(REAL, F): f32(3.0), (FRAC, F): f32(1.0)}
+
+
+def test_read_span_falls_back_to_one_read_per_member(game):
+    gone = HEAP_BASE + 0x2000  # past the end of the fake heap
+    ts = [Target(HEAP_BASE + 0xFF0, F), Target(gone, F)]
+    out = read_span(game, PID, ts)
+    assert list(out) == [(HEAP_BASE + 0xFF0, F)], "the unreadable member is left out"
+
+
+def test_read_span_lets_a_lost_link_through(game):
+    game.disconnect()
+    with pytest.raises(ConnectionLost):
+        read_span(game, PID, [Target(REAL, F)])
+    assert not issubclass(ConnectionLost, ReadFailed)

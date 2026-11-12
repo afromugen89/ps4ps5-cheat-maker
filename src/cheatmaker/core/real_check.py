@@ -329,30 +329,39 @@ class RealChecker:
 
     def _read_all(self, targets: list[Target]) -> dict[Key, bytes]:
         """One read per cluster of nearby addresses."""
-        ts = sorted(set(targets), key=lambda t: t.address)
         out: dict[Key, bytes] = {}
-        i = 0
-        while i < len(ts):
-            j = i
-            end = ts[i].address + ts[i].vtype.size
-            while (
-                j + 1 < len(ts)
-                and ts[j + 1].address + ts[j + 1].vtype.size - ts[i].address <= READ_SPAN
-            ):
-                j += 1
-                end = max(end, ts[j].address + ts[j].vtype.size)
-            start = ts[i].address
-            try:
-                data = self.client.read(self.pid, start, end - start)
-            except ReadFailed:  # part of it is gone (an area unloaded): one at a time
-                for t in ts[i : j + 1]:
-                    with contextlib.suppress(ReadFailed):
-                        out[(t.address, t.vtype)] = self.client.read(
-                            self.pid, t.address, t.vtype.size
-                        )
-            else:
-                for t in ts[i : j + 1]:
-                    o = t.address - start
-                    out[(t.address, t.vtype)] = data[o : o + t.vtype.size]
-            i = j + 1
+        for ts in spans(targets):
+            out.update(read_span(self.client, self.pid, ts))
         return out
+
+
+def spans(targets: Sequence[Target], span: int = READ_SPAN) -> list[list[Target]]:
+    """``targets`` (no repeats) in address order, cut into runs that one read of at
+    most ``span`` bytes covers."""
+    ts = sorted(set(targets), key=lambda t: t.address)
+    out: list[list[Target]] = []
+    for t in ts:
+        if out and t.address + t.vtype.size - out[-1][0].address <= span:
+            out[-1].append(t)
+        else:
+            out.append([t])
+    return out
+
+
+def read_span(client: ConsoleClient, pid: int, ts: Sequence[Target]) -> dict[Key, bytes]:
+    """One read covering ``ts`` (one of ``spans``). If part of it is gone (an area
+    unloaded), each member is read on its own; members that can't be read are left out."""
+    out: dict[Key, bytes] = {}
+    start = ts[0].address
+    end = max(t.address + t.vtype.size for t in ts)
+    try:
+        data = client.read(pid, start, end - start)
+    except ReadFailed:
+        for t in ts:
+            with contextlib.suppress(ReadFailed):
+                out[(t.address, t.vtype)] = client.read(pid, t.address, t.vtype.size)
+        return out
+    for t in ts:
+        o = t.address - start
+        out[(t.address, t.vtype)] = data[o : o + t.vtype.size]
+    return out

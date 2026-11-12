@@ -20,6 +20,14 @@ whole number written by ``sub [rax+2B0h],ecx ; jle``, an 8-byte whole number) on
 tests/minicpu.py, instruction by instruction, starting at the game's own code. If a
 hook's ``jmp`` is there, our routine runs as the PS5 would run it. ``Game.play`` queues
 hits that happen one per console read, like a fight going on while the app polls.
+
+``build(linked=True)`` adds what Make it work's linked values need (spec-linked-values,
+Returnal-shaped): a second object holding the health fraction (health / 100) with its own
+writer (``vmovss [rbx+40h],xmm1``), a percent the game works out from the fraction and
+two HUD copies it works out from health, both on every console read. ``Game.damage``
+takes a hit in both places; ``Game.slow_reads`` makes every read cost console time.
+``build(linked=True, third=True)`` adds a third place: a value twice health in a third
+object, with its own writer (``vmovss [rsi+40h],xmm1``), hit by ``Game.damage`` too.
 """
 
 from __future__ import annotations
@@ -63,6 +71,19 @@ JLE_DEAD = bytes.fromhex("7E02")  # jle +2: to the "dead" code
 MOV64_SITE = BASE + 0x400  # mov [rbx+2B8h],rcx
 MOV64_W = bytes.fromhex("48898BB8020000")
 STATIC_VALUE = 4321  # "Obolites": a whole number at a fixed place in the module's data
+# Linked values (build(linked=True)): the fraction's own object, writer and copies.
+FRAC_OBJ = HEAP + 0xA000
+FRAC = 0x40  # the fraction (a decimal, health / MAX_HP) in its object
+FRAC_SITE = BASE + 0x900  # vmovss [rbx+40h],xmm1
+VMOVSS_FRAC = bytes.fromhex("C5FA118B40000000")
+PERCENT = HEAP + 0xD000  # 0-100, worked out from the fraction on every read
+HUD_COPIES = (HEAP + 0xE000, HEAP + 0xE010)  # health, worked out from it on every read
+THIRD_OBJ = HEAP + 0xB000  # build(third=True): a third place, twice health
+THIRD = 0x40
+THIRD_SITE = BASE + 0xA00  # vmovss [rsi+40h],xmm1
+VMOVSS_THIRD = bytes.fromhex("C5FA118E40000000")
+MAX_HP = 100.0
+READ_LATENCY_S = 0.036  # one console request on a real PS5 (console tests)
 STACK = 0x7FFF_0000
 STACK_SIZE = 0x4000
 RSP = STACK + 0x3000
@@ -91,6 +112,8 @@ FORMS = {
     "int32": Form(SUB_SITE, SUB_W, "rax", "ecx", ValueType.INT32, HP32, "sub"),
     "int64": Form(MOV64_SITE, MOV64_W, "rbx", "rcx", ValueType.INT64, HP64),
 }
+FRACTION_FORM = Form(FRAC_SITE, VMOVSS_FRAC, "rbx", "xmm1", ValueType.FLOAT, FRAC)  # linked
+THIRD_FORM = Form(THIRD_SITE, VMOVSS_THIRD, "rsi", "xmm1", ValueType.FLOAT, THIRD)
 GAME_REGS = {  # what the game's other registers hold when it writes (any values work)
     "rdx": 0x1111_2222_3333_4444,
     "rsi": 0x5555,
@@ -215,6 +238,7 @@ class Game:
     script: deque[tuple[int, float | int, str]] = field(default_factory=deque)
     last_cpu: Cpu | None = None  # the CPU after the last hit (registers, flags)
     layout: Layout = V1
+    third: bool = False  # build(third=True): damage hits the third place too
 
     @property
     def health_addr(self) -> int:
@@ -226,19 +250,27 @@ class Game:
     def set_health(self, v: float, obj: int | None = None) -> None:
         self.fake.poke(PID, (obj or self.player) + self.layout.hp, struct.pack("<f", v))
 
+    def form(self, name: str) -> Form:
+        """One of the layout's forms, "fraction" or "third" (build(linked=True))."""
+        if name == "fraction":
+            return FRACTION_FORM
+        if name == "third":
+            return THIRD_FORM
+        return self.layout.forms[name]
+
     def value(self, obj: int, form: str = "float") -> float | int:
-        f = self.layout.forms[form]
+        f = self.form(form)
         return f.vtype.decode(self.fake.peek(PID, obj + f.offset, f.vtype.size))
 
     def set_value(self, obj: int, v: float | int, form: str = "float") -> None:
-        f = self.layout.forms[form]
+        f = self.form(form)
         self.fake.poke(PID, obj + f.offset, f.vtype.encode(v))
 
     def hit(self, obj: int, new: float | int, form: str = "float", rflags: int = 0x202) -> Cpu:
         """The game writes ``new`` into ``obj`` with the ``form`` writer, starting at its
         own code (so through our hook if one is there). Returns the CPU just after
         the writer: its registers and flags are what the game's next code sees."""
-        f = self.layout.forms[form]
+        f = self.form(form)
         cpu = Cpu(_GameMemory(self.fake), rflags=rflags)
         for name, v in GAME_REGS.items():
             cpu[name] = v
@@ -289,6 +321,38 @@ class Game:
 
         return sleep
 
+    # -- linked values (build(linked=True)) ---------------------------------------
+    @property
+    def fraction_addr(self) -> int:
+        return FRAC_OBJ + FRAC
+
+    def fraction(self) -> float:
+        return float(self.value(FRAC_OBJ, "fraction"))
+
+    @property
+    def third_addr(self) -> int:
+        return THIRD_OBJ + THIRD
+
+    def damage(self, amount: float) -> None:
+        """A hit as the game takes it: health and its fraction each lose ``amount``
+        through their own writer (so through a hook at either); the third place, when
+        there is one, twice that."""
+        self.hit(self.player, self.health() - amount)
+        self.hit(FRAC_OBJ, self.fraction() - amount / MAX_HP, "fraction")
+        if self.third:
+            self.hit(THIRD_OBJ, float(self.value(THIRD_OBJ, "third")) - 2 * amount, "third")
+
+    def recalc(self) -> None:
+        """What the game works out every frame: the percent from the fraction, the HUD
+        copies from health."""
+        self.fake.poke(PID, PERCENT, struct.pack("<f", self.fraction() * 100.0))
+        for addr in HUD_COPIES:
+            self.fake.poke(PID, addr, struct.pack("<f", self.health()))
+
+    def slow_reads(self, advance: Callable[[float], None], seconds: float = READ_LATENCY_S) -> None:
+        """Every console read from now on takes ``seconds`` of the fake clock."""
+        self.fake.game_ticks.append(lambda: advance(seconds))
+
     def move_player(self, new: int) -> None:
         """A new biome: the player object is rebuilt elsewhere, the old one freed."""
         old = self.player
@@ -335,10 +399,14 @@ def build(
     connect: bool = True,
     capture_ticks: bool = True,
     layout: Layout = V1,
+    linked: bool = False,
+    third: bool = False,
 ) -> Game:
     """``capture_ticks=False``: only ``hit``/``play`` run hooked code (for routines
     ``run_routines`` doesn't understand, like the builder's). ``static``: Obolites
-    (STATIC_VALUE) at ``layout.static_off``. ``layout``: which game version runs."""
+    (STATIC_VALUE) at ``layout.static_off``. ``layout``: which game version runs.
+    ``linked``: the fraction object, its writer, the percent and the HUD copies;
+    ``third`` (with ``linked``): the third place and its writer."""
     fake = FakeConsole()
     fake.add_process(PID, "eboot.bin", TITLE, "Returnal", layout.version)
     code = bytearray(b"\xcc" * 0x1000) + bytearray(CODE_SIZE - 0x1000)
@@ -348,6 +416,8 @@ def build(
         (lay.reader, lay.vmovss_r),
         (lay.sub_site, lay.sub_w + JLE_DEAD + b"\xc3\x90\xc3"),  # alive: ret; dead: ret
         (lay.mov64_site, lay.mov64_w),
+        *([(FRAC_SITE, VMOVSS_FRAC)] if linked else []),
+        *([(THIRD_SITE, VMOVSS_THIRD)] if third else []),
     ):
         code[site - BASE : site - BASE + len(insn)] = insn
     fake.add_region(PID, "executable", BASE, bytes(code), PROT_R | PROT_X)
@@ -378,6 +448,7 @@ def build(
         [*enemies, player],
         capture_ticks=capture_ticks,
         layout=lay,
+        third=third,
     )
     after_reader = lay.reader + len(lay.vmovss_r)
     reg = "r14" if lay.changed else "r12"
@@ -388,6 +459,22 @@ def build(
     fake.write_hits[game.health_addr] = [WatchHit(lay.writer + 10, {"r12": player})]
     fake.game_ticks.append(lambda: game.capture_ticks and run_routines(game))
     fake.game_ticks.append(game._play_tick)
+    if linked:
+        frac = bytearray(0x100)
+        frac[FRAC : FRAC + 4] = struct.pack("<f", game.health() / MAX_HP)
+        fake.poke(PID, FRAC_OBJ, bytes(frac))
+        game.recalc()
+        fake.write_hits[game.fraction_addr] = [
+            WatchHit(FRAC_SITE + len(VMOVSS_FRAC), {"rbx": FRAC_OBJ})
+        ] * 3
+        fake.game_ticks.append(game.recalc)
+    if third:
+        obj = bytearray(0x100)
+        obj[THIRD : THIRD + 4] = struct.pack("<f", 2 * game.health())
+        fake.poke(PID, THIRD_OBJ, bytes(obj))
+        fake.write_hits[game.third_addr] = [
+            WatchHit(THIRD_SITE + len(VMOVSS_THIRD), {"rsi": THIRD_OBJ})
+        ] * 3
     return game
 
 

@@ -262,3 +262,25 @@ kept as `.carried`.
 | C21e | Cancel | Dry run as C21b, press **Cancel** during "Checking the spare memory". | Stops within 2 s. No hook was put in yet at this step, so no `action=hook_install` line after the press; the game's code is as before; no new notes file; offer shows again on the next connect. | The hint and log lines. |
 | C21f | Cheat file with the hook | After C21b, open your saved file that has the find-it-again hook (made for the old version), press **Update for this version**, Save, Send to PS5, restart, turn the hook on in CheatRunner, Connect. | Hook lines rebuilt (not "can't follow"); log `action=hook_install ... already in the game`. | Those log lines and the summary. |
 | C21g | Combined cheat with a fixed part | A combined cheat with a learned part and a Make it work part (C18 + C19). Dry run. | Comes back as one row: "Brought over: test it"; one question; both parts work. | `action=carry_part` lines. |
+
+## C22 Linked values in Make it work (added 2026-11-12)
+
+Spec: docs/spec-linked-values.md, design: docs/architecture-linked-values.md. Save your
+game first. Start from a Find row that is in a group (search until groups show), or from a
+My cheats row made from one. After each test, send the log lines starting `action=build_`
+(including `build_pool`, `build_linked_check`, `build_linked_pick`, `build_linked_reads`,
+`build_linked_result` and `build_result`) and the **Advanced** list.
+
+| # | Test | Steps | Pass when | Send back |
+|---|---|---|---|---|
+| C22a | Returnal health, Never goes down | Returnal health, Never goes down, no Only me. | Two places fixed, the percent value and the copies not touched; 10 hits, no death; restart, load the file in CheatRunner, health still holds. | `action=build_` lines, the Advanced list. |
+| C22b | Returnal health, Only me | Returnal health, Never goes down + Only me. | As C22a, and enemies still die. | `action=build_` lines, the Advanced list. Say whether Collect ran twice. |
+| C22c | Returnal, Always full | Returnal, Always full. | Health jumps back to full after each hit; the fraction's Full is 1.0 (within 0.5%). | `action=build_` lines, the Advanced list. |
+| C22d | A simple game | A simple game (money, one place). | One test, Done within 60 s, `linked=none`. | `action=build_` lines, time from Start to Done. |
+| C22e | A HUD copy only | A value with a HUD copy only (any game). | No linked step; the copy is marked copy or kept up. | `action=build_` lines, the Advanced list. |
+| C22f | Cancel during place 2 | Cancel during place 2's test. | Within 2 s both fixes are put back; health goes down again on the next hit. | `action=build_rollback` lines, the hint. |
+| C22g | Returnal, Half damage | Returnal, Half damage. | Both places lose about half per hit. | `action=build_` lines, two health readings before and two after. |
+| C22h | A PS4 game | A PS4 game with a decimal health and a fraction, any of the above. | As the test you ran. | `action=build_` lines, the Advanced list, which test you ran. |
+
+The `action=build_linked_reads` line of each test says how fast the console reads the
+group (`avg_ms`, `late`): if `late` is above 0, say so (design risk 1).

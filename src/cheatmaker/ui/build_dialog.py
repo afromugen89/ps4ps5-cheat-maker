@@ -7,6 +7,10 @@ Whatever happens (Cancel, closing, Disconnect), the Builder puts the game back:
 Cancel and closing only stop the running job, whose worker puts back (no 2 s wait on
 the UI thread); Disconnect waits for it, as the link must still work. The player is
 never told "unchanged" after a put back the PS5 didn't take.
+
+With a pool (the value's Find group, spec-linked-values) a passed test is judged for
+members that fell behind; then the next place is built the same way while the passed
+places stay in, and a place that can't be fixed in code ends in the fallback (L11).
 """
 
 from __future__ import annotations
@@ -25,6 +29,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QListWidget,
+    QListWidgetItem,
     QMessageBox,
     QProgressBar,
     QPushButton,
@@ -34,6 +39,7 @@ from PySide6.QtWidgets import (
 
 from cheatmaker.core import builder as bd
 from cheatmaker.core import cave as cv
+from cheatmaker.core import linked as lk
 from cheatmaker.core import real_check as rc
 from cheatmaker.core.cave import Effect
 from cheatmaker.core.cheats import Cheat, LocationKind
@@ -55,7 +61,8 @@ class _Signals(QObject):
 class MakeItWorkDialog(QDialog):
     """``source``: the My cheats row being replaced (None from Find: the result is
     added). ``group``: the row's group, checked first when it has no verdicts yet;
-    ``on_real_check`` gets those verdicts for the Find list. ``sleep``/``clock`` are
+    ``on_real_check`` gets those verdicts for the Find list. ``pool``: the row's Find
+    group with factors and marks, watched for linked places. ``sleep``/``clock`` are
     for tests."""
 
     def __init__(
@@ -68,6 +75,7 @@ class MakeItWorkDialog(QDialog):
         source: Cheat | None = None,
         group: Sequence[rc.Target] = (),
         on_real_check: RealCheckDone | None = None,
+        pool: lk.LinkedGroup | None = None,
         parent=None,
         sleep: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.monotonic,
@@ -76,6 +84,7 @@ class MakeItWorkDialog(QDialog):
         self.setWindowTitle(f"Make it work: {name}")
         self.ctl, self.address, self.vtype, self.name = ctl, address, vtype, name
         self.source, self.group, self.on_real_check = source, list(group), on_real_check
+        self.pool = pool
         self.sleep, self.clock = sleep, clock
         self.builder: bd.Builder | None = None
         self.result_cheat: Cheat | None = None
@@ -87,6 +96,8 @@ class MakeItWorkDialog(QDialog):
         self._full_edited = False  # Full typed by the player; else read at Start
         self._released = False  # the source cheat was switched off for the watch
         self._skipped_shown = 0
+        self._linked_said = False  # the L1 hint was shown
+        self._pool_items: list[QListWidgetItem] = []  # the Advanced pool lines (L15)
         # Questions and the one-time notice; tests replace these.
         self.ask: Callable[[bd.Question], bd.Answer] = self._ask
         self.notice: Callable[[], bool] = self._notice
@@ -188,6 +199,31 @@ class MakeItWorkDialog(QDialog):
     def _add(self, text: str) -> None:
         self.advanced.addItem(text)
 
+    def _show_pool(self) -> None:
+        """L15: one Advanced line per pool member, replaced after every judge."""
+        b = self.builder
+        if b is None or not b.pool_rows:
+            return
+        for item in self._pool_items:
+            self.advanced.takeItem(self.advanced.row(item))
+        self._pool_items = []
+        for row in b.pool_rows.values():
+            m = row.member
+            done = hints.BUILD_POOL_DONE[row.done.value].format(n=row.after_place)
+            if done and row.reason:
+                done += hints.BUILD_POOL_REASON.format(reason=row.reason)
+            text = hints.BUILD_ADV_POOL.format(
+                addr=f"{m.address:#x}",
+                type=m.vtype.name,
+                k=f"{m.factor:.6g}",
+                mark=hints.BUILD_POOL_MARK[m.mark.name if m.mark else None],
+                status=row.status.value,
+                done=f" - {done}" if done else "",
+            )
+            item = QListWidgetItem(text)
+            self.advanced.addItem(item)
+            self._pool_items.append(item)
+
     # -- the one-time notice and the questions ------------------------------------------
     def _notice(self) -> bool:
         """Show "Save your game first". Returns True when the player ticked "Don't show
@@ -261,6 +297,7 @@ class MakeItWorkDialog(QDialog):
                 name=self.name,
                 full=full,
                 group=self.group,
+                pool=self.pool,
                 live=self.ctl.live,
                 extra_reserved=self._open_rooms(),
                 sleep=self.sleep,
@@ -271,6 +308,8 @@ class MakeItWorkDialog(QDialog):
             return
         self.ctl.before_disconnect.append(self._close_builder)
         self.advanced.clear()
+        self._pool_items = []
+        self._linked_said = False
         self._skipped_shown = 0
         self._set_busy(True)
         if len(self.group) > 1:
@@ -319,9 +358,17 @@ class MakeItWorkDialog(QDialog):
             self.ctl.live.turn_off(self.source, restore=False)
             self._released = True
             self.ctl.cheats_changed.emit()
-        if self.address in self.ctl.frozen_addresses:
-            self.ctl.freezer.unfreeze(f"find:{self.address}")
-            self.ctl.frozen_addresses.discard(self.address)
+        addrs = [self.address]
+        if self.pool is not None:  # L2: the pool's own Find freezes too
+            addrs += [m.address for m in self.pool.members if m.address != self.address]
+        released = 0
+        for addr in addrs:
+            if addr in self.ctl.frozen_addresses:
+                self.ctl.freezer.unfreeze(f"find:{addr}")
+                self.ctl.frozen_addresses.discard(addr)
+                released += 1
+        if self.builder is not None:
+            self.builder.pool_released = released
 
     def _watch(self) -> None:
         if self._stopping():
@@ -334,15 +381,15 @@ class MakeItWorkDialog(QDialog):
     def _watched(self, _cands) -> None:
         b = self.builder
         assert b is not None
-        if b.full is not None and not self._full_edited:
+        if b.place == 1 and b.full is not None and not self._full_edited:
             self.full.setText(self.vtype.text(b.full))  # what Start read
         for w in b.writers:
             self._add(
                 hints.BUILD_ADV_WRITER.format(addr=f"{w.address:#x}", text=w.text, hits=w.hits)
             )
         self._show_skipped()
-        if self.only_me.isChecked():
-            self._collect()
+        if self.only_me.isChecked() and not (b.place > 1 and b.reuse_filter()):
+            self._collect()  # L7: once per place, unless it writes through place 1's object
         else:
             self._next()
 
@@ -377,6 +424,9 @@ class MakeItWorkDialog(QDialog):
         b = self.builder
         assert b is not None
         c = b.next_candidate()
+        if c is None and b.place > 1:
+            self._fallback()  # L11: no fix worked for this place, or a limit
+            return
         if c is None:
             self._end(hints.BUILD_NONE_WORKED)
             return
@@ -389,7 +439,7 @@ class MakeItWorkDialog(QDialog):
         assert b is not None
         c = self._current
         assert c is not None
-        n = len({id(t) for t, _o in b.tried})
+        n = len({id(t) for t, _o in b.place_tried})
         R = bd.TryResult
         if outcome.result is not R.NEEDS_ANSWER:
             result = outcome.result.value + (f": {outcome.hint}" if outcome.hint else "")
@@ -397,8 +447,7 @@ class MakeItWorkDialog(QDialog):
         if outcome.rollback is bd.Rollback.NOT_RESTORED or b.not_restored:
             self._end(bd.RESTART)  # the fix may still be in: try nothing more
         elif outcome.result is R.PASS:
-            self.hint.setText(hints.BUILD_FINISHING)
-            self._run(lambda b, cancel: b.finalize(cancel), self._finished)
+            self._passed()
         elif outcome.result is R.NEEDS_ANSWER:
             assert outcome.question is not None
             q = outcome.question
@@ -415,7 +464,72 @@ class MakeItWorkDialog(QDialog):
             self.hint.setText(hints.BUILD_FIX_FAILED.format(n=n, reason=outcome.hint))
             self._next()
 
+    def _passed(self) -> None:
+        """B8, or with a pool L1: judge the pool, then done or the next place."""
+        b = self.builder
+        assert b is not None
+        plan = b.after_pass() if b.pool or b.has_kept else bd.LinkedPlan(True)
+        self._show_pool()
+        if plan.done:
+            self.hint.setText(hints.BUILD_FINISHING)
+            self._run(lambda b, cancel: b.finalize(cancel), self._finished)
+            return
+        if not self._linked_said:
+            self._linked_said = True
+            self.hint.setText(hints.BUILD_LINKED_BEHIND.format(name=self.name))
+        self._run(lambda b, cancel: b.next_place(cancel), self._placed)
+
+    def _placed(self, np: bd.NextPlace) -> None:
+        b = self.builder
+        if b is not None and self.on_real_check is not None and b.real_results:
+            self.on_real_check(b.real_results)  # L4's verdicts show in the Find list too
+        self._show_pool()
+        if np.finish:
+            self.hint.setText(hints.BUILD_FINISHING)
+            self._run(lambda b, cancel: b.finalize(cancel), self._finished)
+        elif np.fallback_reason is not None:
+            self._fallback(np.fallback_reason)
+        else:
+            self._watch_place(np)
+
+    def _watch_place(self, np: bd.NextPlace) -> None:
+        if self._stopping():
+            return
+        assert np.place is not None
+        self._skipped_shown = 0
+        self.hint.setText(hints.BUILD_PLACE_WATCHING.format(n=np.place, total=np.total))
+        self.progress.setValue(0)
+        self._run(lambda b, cancel: b.watch(cancel), self._watched)
+
+    def _fallback(self, reason: str = "") -> None:
+        """L11: keep the passed places and hold this one by a freeze (Half damage:
+        keep the passed places only)."""
+        if self._stopping():
+            return
+        b = self.builder
+        assert b is not None
+        if reason:
+            self._add(hints.BUILD_ADV_PLACE_FAILED.format(n=b.place, reason=reason))
+        self.hint.setText(hints.BUILD_FINISHING)
+        self._run(lambda b, cancel: b.fallback(cancel, reason), self._finished)
+
+    def _done_text(self, res: bd.BuildResult) -> str:
+        if res.linked == "fixed":
+            return hints.BUILD_DONE_PLACES.format(name=self.name, n=res.places)
+        if res.linked == "partial" and self.effect() is Effect.HALF:
+            return hints.BUILD_LINKED_HALF.format(name=self.name)
+        if res.linked == "freeze":
+            return hints.BUILD_LINKED_FREEZE
+        if res.linked == "partial" and res.cheat.freeze:  # held one, others still go down
+            return f"{hints.BUILD_LINKED_FREEZE} {hints.BUILD_LINKED_LEFT}"
+        if res.linked == "partial" and res.reason == bd.LIMIT:
+            return hints.BUILD_LINKED_LIMIT.format(name=self.name, n=res.places)
+        if res.linked == "partial":
+            return hints.BUILD_LINKED_PARTIAL.format(name=self.name, n=res.places)
+        return hints.BUILD_DONE.format(name=res.cheat.name, after=res.after_restart)
+
     def _finished(self, res: bd.BuildResult) -> None:
+        self._show_pool()
         cheat = res.cheat
         cheats = self.ctl.ensure_file().cheats
         if self.source is not None and self.source in cheats:
@@ -424,8 +538,8 @@ class MakeItWorkDialog(QDialog):
         else:
             cheats.append(cheat)
         self.result_cheat = cheat
-        text = hints.BUILD_DONE.format(name=cheat.name, after=res.after_restart)
-        if not self.only_me.isChecked():
+        text = self._done_text(res)
+        if res.linked in ("none", "fixed") and not self.only_me.isChecked():
             text += " " + hints.BUILD_TRY_ONLY_ME
         self._end(text)
         self.progress.setValue(100)
@@ -434,6 +548,9 @@ class MakeItWorkDialog(QDialog):
         self.ctl.message.emit(text)
 
     def _failed(self, exc: BaseException) -> None:
+        if isinstance(exc, bd.PlaceFailed):  # a linked place: the passed ones stay (L11)
+            self._fallback(str(exc))
+            return
         if self.builder is not None:
             self.builder.close()  # nothing left in after a step fails; said by _end
         if isinstance(exc, ScanCancelled):
@@ -455,6 +572,8 @@ class MakeItWorkDialog(QDialog):
     def _end(self, text: str) -> None:
         b = self.builder
         if b is not None and self.result_cheat is None:
+            if b.has_kept:  # between two steps of a linked place: put every place back
+                self._close_builder()
             if b.not_restored:
                 text = bd.RESTART
             b.log_end(text)
