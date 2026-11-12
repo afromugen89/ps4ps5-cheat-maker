@@ -136,7 +136,7 @@ def test_never_goes_down_fixes_two_places_and_leaves_copies_alone(caplog):
     for _ in range(10):  # C22a: 10 hits, nothing lost
         g.damage(10.0)
     assert g.health() == 100.0 and g.fraction() == pytest.approx(0.7)
-    hud = {addr for addr, *_ in g.fake.writes} & set(fg.HUD_COPIES)
+    hud = {addr for _pid, addr, _data in g.fake.writes} & set(fg.HUD_COPIES)
     assert not hud, "the copies are never written"
     rows = bl.pool_rows
     assert rows[g.fraction_addr].done is lk.Done.FIXED
