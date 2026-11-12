@@ -333,7 +333,11 @@ class CheatsView(QWidget):
             self.ctl.fail(exc, "build")
             return
         self.open_build(
-            address=c.locations[0].address(base), vtype=c.value_type, name=c.name, source=c
+            address=c.locations[0].address(base),
+            vtype=c.value_type,
+            name=c.name,
+            source=c,
+            pool=c.linked,  # only a session cheat made from a grouped Find row has one
         )
 
     def do_delete(self) -> None:

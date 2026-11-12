@@ -20,6 +20,7 @@ from cheatmaker.core import real_check as rc
 from cheatmaker.core.cave import Effect
 from cheatmaker.core.values import ValueType
 from cheatmaker.errors import ReadFailed
+from cheatmaker.ui import hints
 from tests import fakegame as fg
 from tests.unit.test_builder_flow import Clock
 
@@ -276,7 +277,7 @@ def test_the_fraction_falls_behind_in_every_effect(effect, caplog):
     plan = bl.after_pass()
     frac = bl.pool[0]
     assert not plan.done and [m.address for m in plan.behind] == [g.fraction_addr, fg.PERCENT]
-    assert plan.hint == (
+    assert hints.BUILD_LINKED_BEHIND.format(name=bl.name) == (
         "Health held, but the game also keeps it in a second place that still went down. "
         "Fixing that too."
     )

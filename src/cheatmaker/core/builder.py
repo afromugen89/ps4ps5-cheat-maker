@@ -406,10 +406,6 @@ NOT_TAKEN = "the PS5 didn't take the change"
 RESTART = notes.RESTART
 SLOT_IN_USE = "the game uses the place kept for the test counter"
 CLOSED_WHILE_KEEPING = "Stopped before the fix was kept. Your game is unchanged."
-LINKED_BEHIND = (
-    "{name} held, but the game also keeps it in a second place that still went down. "
-    "Fixing that too."
-)
 LIMIT = "This value is kept in more places than the app can fix on its own."
 SESSION_ONLY = "This session only"
 NO_PASSED_FIX = "There's no passed fix to keep."
@@ -459,11 +455,11 @@ class BuildResult:
 
 @dataclass(frozen=True)
 class LinkedPlan:
-    """What follows a passed test (L1): done, or the members that fell behind."""
+    """What follows a passed test (L1): done, or the members that fell behind (the
+    dialog then says so: hints.BUILD_LINKED_BEHIND)."""
 
     done: bool
     behind: tuple[lk.PoolMember, ...] = ()
-    hint: str = ""
 
 
 @dataclass(frozen=True)
@@ -1572,7 +1568,7 @@ class Builder:
             self._judged(m, j.status, inst.place)
         if not self._behind:
             return LinkedPlan(True)
-        return LinkedPlan(False, tuple(self._behind), LINKED_BEHIND.format(name=self.name))
+        return LinkedPlan(False, tuple(self._behind))
 
     def _judged(self, m: lk.PoolMember, status: lk.Status, place: int) -> None:
         """Update ``m``'s Advanced row and the fell-behind lists."""

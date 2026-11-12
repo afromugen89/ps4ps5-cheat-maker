@@ -330,6 +330,41 @@ BUILD_ADV_SKIPPED = "Skipped {addr}: {text} - {reason}"
 BUILD_ADV_TRIED = "Fix {n}: {label} - {result}"
 BUILD_Q_TITLE = "Make it work"
 BUILD_Q_ENEMIES_HINT = "Not sure counts as No: the fix is put back."
+# Linked values (docs/spec-linked-values.md): a value the game keeps in more places.
+BUILD_LINKED_BEHIND = (  # L1
+    "{name} held, but the game also keeps it in a second place that still went down. "
+    "Fixing that too."
+)
+BUILD_PLACE_WATCHING = (  # L6
+    "Place {n} of {total}: play and make it change (take a hit) within 30 seconds."
+)
+BUILD_LINKED_FREEZE = (  # L11, Never goes down and Always full
+    "The second place couldn't be fixed with a safe code change, so the app holds it "
+    "while the PC is connected. Press Find it next time to keep it after a restart."
+)
+BUILD_LINKED_HALF = (  # L11, Half damage
+    "{name} takes half damage, but the game also keeps it in a second place that still "
+    "goes down fully. The cheat may not be enough on its own."
+)
+BUILD_DONE_PLACES = "Done. {name} is held in {n} places by one cheat."  # L13
+BUILD_ADV_PLACE_FAILED = "Place {n}: {reason}"
+BUILD_ADV_POOL = "Linked {addr} ({type}, x{k}): {mark}, {status}{done}"  # L15
+BUILD_POOL_MARK = {  # by Check which is real's verdict name; None: not checked
+    "REAL": "real",
+    "KEPT": "kept",
+    "COPY": "copy",
+    "FAILED": "couldn't be checked",
+    None: "not checked",
+}
+BUILD_POOL_DONE = {  # by core.linked.Done value
+    "nothing": "",
+    "fixed": "fixed",
+    "held by a freeze": "held by a freeze",
+    "not needed": "not needed: it kept up after place {n} was fixed",
+    "copy": "copy: never touched",
+    "couldn't be checked": "couldn't be checked",
+    "not fixed": "not fixed",
+}
 
 # -- Find the real one behind it (docs/spec-trace.md) -------------------------------------
 TRACE_TESTED = False  # C20a passed: the button leaves Advanced for the action row
