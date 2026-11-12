@@ -25,13 +25,13 @@ The core works. Make it work fixes health and its fraction as one cheat, never w
 
 Bugs: **0 Critical, 0 High, 2 Medium, 5 Low.**
 
-- BUG-01 (Medium): once the 3-place limit is hit, the fallback adds a 4th place as a freeze, so the cheat has more places than L10 allows.
-- BUG-02 (Medium): with a full pool (16 members far apart) and 36 ms per console read, which is the latency the fake uses for a real PS5, each member is read only every ~1.36 s. L3 says at least once a second.
-- BUG-03 (Low): a member that couldn't be read in place 2's test is listed in Advanced as "not needed: it kept up after place 2 was fixed".
-- BUG-04 (Low): a hit that lands between two members' last readings splits one value and its copy into two clusters.
-- BUG-05 (Low): a member that is behind for only 0.65 s counts as "fell behind". The spec's rule is "for at least 1 s in a row".
-- BUG-06 (Low): after a cheat file is reloaded, the multi-place cheat's Full cell loses its tooltip "Make it work again to change Full." It stays read-only.
-- BUG-07 (Low): the Collect step at place 2 writes its crash note and rollback log as place 1.
+- BUG-01 (Medium): once the 3-place limit is hit, the fallback adds a 4th place as a freeze, so the cheat has more places than L10 allows. Fixed in 1509fba.
+- BUG-02 (Medium): with a full pool (16 members far apart) and 36 ms per console read, which is the latency the fake uses for a real PS5, each member is read only every ~1.36 s. L3 says at least once a second. Fixed in 0246482.
+- BUG-03 (Low): a member that couldn't be read in place 2's test is listed in Advanced as "not needed: it kept up after place 2 was fixed". Fixed in e920505.
+- BUG-04 (Low): a hit that lands between two members' last readings splits one value and its copy into two clusters. Fixed in f5d685a.
+- BUG-05 (Low): a member that is behind for only 0.65 s counts as "fell behind". The spec's rule is "for at least 1 s in a row". Fixed in cee297a.
+- BUG-06 (Low): after a cheat file is reloaded, the multi-place cheat's Full cell loses its tooltip "Make it work again to change Full." It stays read-only. Fixed in 01e5c68.
+- BUG-07 (Low): the Collect step at place 2 writes its crash note and rollback log as place 1. Fixed in 1509fba.
 
 Release recommendation: **Ready with known issues.** Nothing here gives a wrong fix, leaves bytes in the game or blames the wrong code.
 - BUG-01 only shows on games that keep one value in 4 or more places.
@@ -59,20 +59,20 @@ Run C22a with the `build_linked_reads` log to see BUG-02's real-console numbers.
 | TC-05 | Find freezes on pool members released at Start, counted | L2 | Medium | Pass | UI |
 | TC-06 | Judge edges: 2.0% vs 2.1%, zero, negative, int gap 1/2, int truncation, NaN, unreadable, unreadable at end, one reading, recovers, run broken by unreadable, single blip, above | L3 | High | Pass | 17 cases |
 | TC-07 | Half damage small hits: one 2% hit within rule, two hits behind; whole numbers | L3 | High | Pass | see Observation O-1 |
-| TC-08 | "1 s in a row": two behind readings 0.65 s apart mid-test | L3 | Low | **Fail** | BUG-05 |
+| TC-08 | "1 s in a row": two behind readings 0.65 s apart mid-test | L3 | Low | **Fail** | BUG-05; fixed in cee297a |
 | TC-09a | 16 spans, no latency: every member at least once a second | L3 | High | Pass | worst gap 1.0 s |
-| TC-09b | 16 spans, 36 ms per read: every member at least once a second | L3 | High | **Fail** | BUG-02 (254 late reads, gap 1.36 s) |
+| TC-09b | 16 spans, 36 ms per read: every member at least once a second | L3 | High | **Fail** | BUG-02 (254 late reads, gap 1.36 s); fixed in 0246482 |
 | TC-10 | 16 spans at 36 ms: target samples at least 90% of no pool | L3 | High | Pass | 55 vs 56 |
 | TC-11 | Copies never written over 2 places + 3 more hits (writes checked as (pid, addr, data)) | L4 | Critical-risk | Pass | only the L4 check writes the unmarked percent |
 | TC-11b | Fallback writes only the failing place's member | L4, L11 | High | Pass | |
-| TC-12 | Clusters: last readings straddle a hit | L5 | Medium | **Fail** | BUG-04 |
+| TC-12 | Clusters: last readings straddle a hit | L5 | Medium | **Fail** | BUG-04; fixed in f5d685a |
 | TC-13 | Clusters: readings 0.4 s apart, hits mid-test, still one cluster | L5 | Medium | Pass | |
 | TC-14 | Pick order: real, likely, size, address; copies/unchecked never picked | L5 | Medium | Pass | |
 | TC-15 | 3 places: own rooms and counters, no overlap with each other or an open cheat | L6 | High | Pass | |
-| TC-16 | Collect at place 2 noted as place 2 | L6, L12 | Low | **Fail** | BUG-07 |
+| TC-16 | Collect at place 2 noted as place 2 | L6, L12 | Low | **Fail** | BUG-07; fixed in 1509fba |
 | TC-17 | Only me per place: reuse on the same object, Collect once on another, can't-tell-apart = fallback | L7 | High | Pass | existing `tests/unit/test_builder_places.py` (re-run) |
 | TC-18 | Whole-number place 2 for Always full (Full 100 exact), Never goes down, Half damage | L8, L6 | High | Pass | |
-| TC-19 | Place limit: result never more than MAX_PLACES places | L10 | Medium | **Fail** | BUG-01 |
+| TC-19 | Place limit: result never more than MAX_PLACES places | L10 | Medium | **Fail** | BUG-01; fixed in 1509fba |
 | TC-19b | 12-test limit never fires without a pool | L10, L17 | Medium | Pass | |
 | TC-20 | 4 fixes per linked place, 12 tests | L10 | Medium | Pass | existing tests (re-run) |
 | TC-21 | Freeze result: combined, session-only, not saveable, Save off, Find it next time on, Full read-only, notes clear | L11, L13, L14 | High | Pass | UI |
@@ -90,8 +90,8 @@ Run C22a with the `build_linked_reads` log to see BUG-02's real-console numbers.
 | TC-23d | Old notes file without `kept`; damaged kept entries | L12 | Medium | Pass | |
 | TC-24 | 2-place cheat round-trips GoldHEN JSON and CheatRunner .shn | L13 | High | Pass | |
 | TC-25a | Full read-only with tooltip on a 2-place cheat | L8 | Low | Pass | |
-| TC-25b | Same after reloading the cheat file | L8 | Low | **Fail** | BUG-06 |
-| TC-26 | Advanced: unreadable member not called "kept up" | L15 | Low | **Fail** | BUG-03 |
+| TC-25b | Same after reloading the cheat file | L8 | Low | **Fail** | BUG-06; fixed in 01e5c68 |
+| TC-26 | Advanced: unreadable member not called "kept up" | L15 | Low | **Fail** | BUG-03; fixed in e920505 |
 | TC-27 | Log lines L16 in a 2-place build | L16 | Medium | Pass | |
 | TC-28 | Hints name the place; L1 hint once; Done text | L1, L6, L13 | Medium | Pass | existing UI tests (re-run) |
 | TC-29 | Combine drops the pool; the pool doesn't affect equality; only grouped rows have one | L2 | Medium | Pass | plus existing UI test |
@@ -99,6 +99,7 @@ Run C22a with the `build_linked_reads` log to see BUG-02's real-console numbers.
 ## Bugs
 
 ### BUG-01: The 3-place limit is exceeded by the fallback freeze
+- Status: Fixed in 1509fba
 - Severity: Medium
 - Priority: P2
 - Related test case: TC-19 | Automated test: `tests/qa/test_linked_values_qa.py::test_tc19_bug01_place_limit_counts_the_freeze`
@@ -118,6 +119,7 @@ Run C22a with the `build_linked_reads` log to see BUG-02's real-console numbers.
 - Impact for the product owner: on a game that keeps one value in 4 or more places, the player gets a cheat that holds 4 places, one by a freeze, beyond the stated limit of 3.
 
 ### BUG-02: With a full pool, members are read less than once a second at 36 ms per read
+- Status: Fixed in 0246482
 - Severity: Medium
 - Priority: P2
 - Related test case: TC-09b | Automated test: `tests/qa/test_linked_values_qa.py::test_tc09b_bug02_sixteen_spans_at_36ms_are_read_once_a_second`
@@ -137,6 +139,7 @@ Run C22a with the `build_linked_reads` log to see BUG-02's real-console numbers.
 - Impact for the product owner: on a game where the value has many linked copies spread through memory, the app checks each one less often than promised. The verdict stays correct because it uses timestamps, but a short fall could be missed.
 
 ### BUG-03: An unreadable member is listed as "not needed: it kept up after place N was fixed"
+- Status: Fixed in e920505
 - Severity: Low
 - Priority: P3
 - Related test case: TC-26 | Automated test: `tests/qa/test_linked_values_qa.py::test_tc26_bug03_unreadable_member_is_not_called_kept_up`
@@ -153,6 +156,7 @@ Run C22a with the `build_linked_reads` log to see BUG-02's real-console numbers.
 - Impact for the product owner: the Advanced list (sent back from console test C22a) claims a value was checked and fine when the app could not read it.
 
 ### BUG-04: One value and its copy are split into two clusters when a hit falls between their last readings
+- Status: Fixed in f5d685a
 - Severity: Low
 - Priority: P3
 - Related test case: TC-12 | Automated test: `tests/qa/test_linked_values_qa.py::test_tc12_bug04_last_readings_straddling_a_hit_still_cluster`
@@ -171,6 +175,7 @@ Run C22a with the `build_linked_reads` log to see BUG-02's real-console numbers.
 - Impact for the product owner: usually harmless, because the extra cluster is checked and found to be a copy, or it keeps up after place 2. But the hint can say "Place 2 of 3" when there are only 2 places, and an extra Check which is real may run.
 
 ### BUG-05: "Fell behind for at least 1 s in a row" accepts 0.65 s
+- Status: Fixed in cee297a
 - Severity: Low
 - Priority: P3
 - Related test case: TC-08 | Automated test: `tests/qa/test_linked_values_qa.py::test_tc08_bug05_behind_for_less_than_a_second_is_kept_up`
@@ -184,6 +189,7 @@ Run C22a with the `build_linked_reads` log to see BUG-02's real-console numbers.
 - Impact for the product owner: a copy that lags for just over half a second, for example a slow HUD update, can start an extra linked step that ends in "copy: never touched" or "not needed". This costs time but never causes a wrong fix.
 
 ### BUG-06: After reloading, a multi-place cheat's Full cell has no tooltip
+- Status: Fixed in 01e5c68
 - Severity: Low
 - Priority: P3
 - Related test case: TC-25b | Automated test: `tests/qa/test_linked_values_qa.py::test_tc25b_bug06_full_tooltip_after_reload`
@@ -198,6 +204,7 @@ Run C22a with the `build_linked_reads` log to see BUG-02's real-console numbers.
 - Impact for the product owner: after a restart, the player sees an empty Full cell they can't edit and no reason why.
 
 ### BUG-07: Collect at place 2 is noted and logged as place 1
+- Status: Fixed in 1509fba
 - Severity: Low
 - Priority: P3
 - Related test case: TC-16 | Automated test: `tests/qa/test_linked_values_qa.py::test_tc16_bug07_collect_at_place_2_is_noted_as_place_2`
@@ -226,7 +233,7 @@ Run C22a with the `build_linked_reads` log to see BUG-02's real-console numbers.
 
 ## Automated tests added
 
-`tests/qa/test_linked_values_qa.py` has 42 test functions, 61 cases with the parameters: 54 pass and 7 are strict xfail (BUG-01 to BUG-07, named `test_tcNN_bugNN_*`). By area:
+`tests/qa/test_linked_values_qa.py` has 42 test functions, 61 cases with the parameters: 54 pass and 7 are strict xfail (BUG-01 to BUG-07, named `test_tcNN_bugNN_*`). All seven bugs are fixed since and their xfail marks are removed. By area:
 - L1/L17: TC-01, TC-02.
 - L2: TC-03, TC-03b, TC-04, TC-05 (UI), TC-29.
 - L3: TC-06 (17 parametrized judge edges), TC-06b, TC-07, TC-07b, TC-08, TC-09a, TC-09b, TC-10.
