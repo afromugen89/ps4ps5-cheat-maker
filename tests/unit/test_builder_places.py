@@ -29,7 +29,7 @@ from cheatmaker.core.cave import Effect
 from cheatmaker.core.cheats import LocationKind
 from cheatmaker.core.freezer import Freezer, LiveCheats
 from cheatmaker.core.values import ValueType
-from cheatmaker.errors import BuildFailed, ScanCancelled
+from cheatmaker.errors import BuildFailed, ReadFailed, ScanCancelled
 from tests import fakegame as fg
 from tests.unit.test_builder_flow import Clock, module
 from tests.unit.test_builder_linked import fight
@@ -236,18 +236,48 @@ def test_an_unsupported_type_goes_to_the_fallback():
     assert np.fallback_reason == cv.UNSUPPORTED_TYPE and bl.place == 2
 
 
-def test_limit_places(monkeypatch, caplog):
+FOURTH = fg.HEAP + 0xC800  # a fourth place: three times health, lowered by each hit
+
+
+def test_limit_places_never_adds_a_place(caplog):
+    """MAX_PLACES (3) are fixed and a fourth value still falls: it isn't held by a
+    freeze (that would be a fourth place); the result is the three code fixes,
+    linked=partial, and the member is listed as not fixed with the reason."""
     caplog.set_level(logging.INFO)
-    monkeypatch.setattr(lk, "MAX_PLACES", 2)
     g, clock, bl = setup(third=True)
-    to_place(bl, clock, g, 2)
-    clock.events.extend(fight(g))
-    assert bl.try_candidate(bl.next_candidate()).result is TR.PASS
-    assert not bl.after_pass().done, "the third place still falls"
+    g.fake.poke(fg.PID, FOURTH, struct.pack("<f", 300.0))
+    four = lk.PoolMember(FOURTH, F, 3.0, False, V.KEPT)
+    bl.linked = lk.LinkedGroup((*bl.linked.members, four))
+
+    def hit() -> None:
+        g.damage(10.0)
+        g.fake.poke(
+            fg.PID, FOURTH, struct.pack("<f", F.decode(g.fake.peek(fg.PID, FOURTH, 4)) - 30)
+        )
+
+    def place() -> b.LinkedPlan:
+        bl.watch()
+        clock.events.extend(([None] * 19 + [hit]) * 3)
+        assert bl.try_candidate(bl.next_candidate()).result is TR.PASS
+        return bl.after_pass()
+
+    for n in (2, 3):
+        assert not place().done
+        assert bl.next_place().place == n
+    assert [m.address for m in place().behind] == [FOURTH], "the fourth still falls"
     np = bl.next_place()
-    assert np.fallback_reason == b.LIMIT and np.place is None
-    assert bl._hold is not None and bl._hold.address == g.third_addr
-    assert "action=build_linked_result place=3 result=limit" in caplog.text
+    assert np.fallback_reason == b.LIMIT
+    res = bl.fallback(reason=np.fallback_reason)
+    assert res.places == 3 <= lk.MAX_PLACES and res.linked == "partial" and res.reason == b.LIMIT
+    assert not res.cheat.freeze and not res.cheat.combined and len(res.cheat.locations) == 6
+    row = bl.pool_rows[FOURTH]
+    assert (row.done, row.reason) == (lk.Done.NOT_FIXED, b.LIMIT)
+    lines = [
+        r.getMessage() for r in caplog.records if "action=build_linked_result" in r.getMessage()
+    ]
+    assert [ln.split()[1] for ln in lines] == ["place=2", "place=3", "place=4"], lines
+    assert "place=4 result=limit" in lines[-1]
+    assert "places=3 linked=partial" in caplog.text
 
 
 def test_limit_tests(monkeypatch):
@@ -257,6 +287,8 @@ def test_limit_tests(monkeypatch):
     out = bl.try_candidate(bl.next_candidate())  # nobody hits: test 2
     assert out.result is TR.NO_HIT and bl.tests_total == 2
     assert bl.next_candidate() is None and bl.limit_hit, "test 3 is refused"
+    res = bl.fallback()  # within MAX_PLACES: the place is held
+    assert (res.linked, res.places, res.reason) == ("freeze", 2, b.LIMIT) and res.cheat.freeze
 
 
 def test_limit_fixes_per_linked_place(monkeypatch):
@@ -521,7 +553,10 @@ def test_only_me_on_another_object_collects_once_for_that_place():
     clock.events.extend(
         [lambda o=o: g.hit(o, g.value(o, "fraction"), "fraction") for _ in range(3) for o in objs]
     )
+    seen: list[int] = []
+    clock.events.appendleft(lambda: seen.append(notes.current_note().place))
     assert bl.collect() is None
+    assert seen == [2], "Collect's note names its place"
     assert bl.filter == cv.Filter("vtable", vtable=fg.PLAYER_VT) and bl.by_class
     assert bl.others and set(bl.others) <= {e + fg.FRAC for e in ENEMY_FRACS}
 
@@ -639,3 +674,24 @@ def test_place_2_reads_place_1_on_top_of_the_members(monkeypatch):
     ts = [t0, *(r.t for r in rs), data.end_t]
     assert max(b_ - a for a, b_ in itertools.pairwise(ts)) <= lk.ONCE_A_SECOND_S
     assert all(r.ref == 100.0 for r in rs) and data.late == 0
+
+
+# -- a linked place that can't be read (review) -------------------------------------------------
+def test_a_place_that_cant_be_read_at_its_watch_is_place_failed(monkeypatch):
+    g, clock, bl = setup()
+    pass_place(bl, clock, g)
+    bl.next_place()
+    real = g.fake.read
+
+    def read(pid, addr, size):
+        if addr == g.fraction_addr:
+            raise ReadFailed("area unloaded")
+        return real(pid, addr, size)
+
+    monkeypatch.setattr(g.fake, "read", read)
+    with pytest.raises(b.PlaceFailed, match="Couldn't watch it"):
+        bl.watch()
+    assert bl.has_kept and not bl.closed, "the fallback runs, not close()"
+    res = bl.fallback()  # the hold can't be read either: the code fixes only
+    assert (res.linked, res.places) == ("partial", 1) and not res.cheat.freeze
+    assert bl.pool_rows[g.fraction_addr].done is lk.Done.NOT_FIXED

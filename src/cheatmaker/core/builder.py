@@ -451,6 +451,7 @@ class BuildResult:
     skipped: tuple[Skipped, ...] = ()
     places: int = 1
     linked: str = "none"  # none | fixed | freeze | partial (L16)
+    reason: str = ""  # the fallback's: why the last place wasn't fixed in code (L11)
 
 
 @dataclass(frozen=True)
@@ -614,6 +615,7 @@ class Builder:
         self._behind: list[lk.PoolMember] = []  # fell behind, may be fixed (or unmarked)
         self._behind_copies: list[lk.PoolMember] = []
         self._hold: lk.PoolMember | None = None  # what L11 holds
+        self._hold_ok = True  # False once MAX_PLACES are fixed: nothing more is added
         self._more_behind = False  # other clusters still behind at the fallback
 
     # -- helpers -------------------------------------------------------------------
@@ -668,6 +670,10 @@ class Builder:
             if not fail_place or self.not_restored or str(exc) == RESTART:
                 raise
             raise PlaceFailed(str(exc)) from exc
+        except (ReadFailed, LockFailed) as exc:  # this place only: the kept ones stay
+            if not fail_place:
+                raise
+            raise PlaceFailed(f"Couldn't watch it: {exc}") from exc
 
     def _crashed(self, w: Writer, m: Method) -> bool:
         game = self._game()
@@ -965,6 +971,7 @@ class Builder:
             rooms=[(room, cv.CAVE_ROOM), (table, cv.TABLE_SIZE)],
             routines=[(room, code)],
             method="collect",
+            place=self.place,
         )
         failed = self._install(inst, cancel)
         if failed is not None:
@@ -1626,9 +1633,11 @@ class Builder:
                 len(cluster),
                 _pick_reason(rep, cluster),
             )
-            if self.place >= lk.MAX_PLACES or self.tests_total >= lk.MAX_TESTS:
-                log.info("action=build_linked_result place=%d result=limit", n)
+            if self.place >= lk.MAX_PLACES:
+                self._hold_ok = False  # holding it would be a place more than MAX_PLACES
                 return NextPlace(fallback_reason=LIMIT)
+            if self.tests_total >= lk.MAX_TESTS:
+                return NextPlace(fallback_reason=LIMIT)  # held: still within MAX_PLACES
             self.places_total = min(lk.MAX_PLACES, self.place + len(picks))
             try:
                 self._begin_place(rep)
@@ -1791,12 +1800,12 @@ class Builder:
     def fallback(self, cancel: threading.Event | None = None, reason: str = "") -> BuildResult:
         """L11: the current linked place can't be fixed in code. Never goes down and
         Always full keep the passed places and hold the member by a freeze (one combined
-        cheat, this session only); Half damage keeps the passed places only."""
+        cheat, this session only). Half damage, a member past MAX_PLACES (L10) or one
+        that can't be read keep the passed places only (``linked=partial``)."""
         cancel = self._start_step(cancel)
         if self.not_restored:
             raise BuildFailed(RESTART)
         m = self._hold or self.place_member
-        n = len(self._kept) + 1
         reason = reason or (LIMIT if self.limit_hit else NOTHING_WORKED)
         with self._op:
             if cancel.is_set() or self.closed:
@@ -1806,50 +1815,62 @@ class Builder:
             places = list(self._kept)
             if not places:
                 raise BuildFailed(NO_PASSED_FIX)
-            log.info(
-                "action=build_linked_result place=%d result=%s reason=%r",
-                n,
-                "limit" if reason == LIMIT else "fail",
-                reason,
-            )
+            n = len(places) + 1
             code = self._places_cheat(places)
-            held = not (self.effect is Effect.HALF or m is None)
-            if not held:
-                cheat, after = (
-                    code,
-                    ("Check after restart" if any(p.by_field for p in places) else "Yes"),
-                )
-                if self.live is not None:
-                    self.live.mark_on(cheat)
-                else:
-                    cheat.enabled = True
-                self.linked_result = "partial"
-                if m is not None and m.address in self.pool_rows:
-                    self.pool_rows[m.address].done = lk.Done.NOT_FIXED
-            else:
-                assert m is not None
-                cheat = self._hold_cheat(code, m, n)
+            value = None
+            if (
+                m is not None
+                and self._hold_ok
+                and self.effect is not Effect.HALF
+                and n <= lk.MAX_PLACES
+            ):
+                value = self._hold_value(m)
+            if m is not None and value is not None:
+                cheat = self._hold_cheat(code, m, n, value)
                 after = SESSION_ONLY
                 if self.live is not None:
                     self.live.turn_on(cheat)  # the code lines as they are, and the freeze
                 else:
                     cheat.enabled = True
                 self.linked_result = "partial" if self._more_behind else "freeze"
-                if m.address in self.pool_rows:
-                    self.pool_rows[m.address].done = lk.Done.FROZEN
-                log.info("action=build_linked_result place=%d result=fallback_freeze", n)
+                self._row_done(m, lk.Done.FROZEN, reason)
+                result = "fallback_freeze"
+            else:
+                cheat = code
+                after = "Check after restart" if any(p.by_field for p in places) else "Yes"
+                if self.live is not None:
+                    self.live.mark_on(cheat)
+                else:
+                    cheat.enabled = True
+                self.linked_result = "partial"
+                if m is not None:
+                    self._row_done(m, lk.Done.NOT_FIXED, reason)
+                result = "limit" if reason == LIMIT else "fail"
+            log.info("action=build_linked_result place=%d result=%s reason=%r", n, result, reason)
             self._done_places()
-        return self._result(cheat, after, places, held=held)
+        return self._result(cheat, after, places, held=value is not None, reason=reason)
 
-    def _hold_cheat(self, code: Cheat, m: lk.PoolMember, n: int) -> Cheat:
-        """The kept places' code lines plus a freeze on ``m`` (L13 with a freeze)."""
+    def _row_done(self, m: lk.PoolMember, done: lk.Done, reason: str) -> None:
+        row = self.pool_rows.get(m.address)
+        if row is not None:
+            row.done, row.reason = done, reason
+
+    def _hold_value(self, m: lk.PoolMember) -> float | int | None:
+        """What the freeze holds (L11): Always full its Full; Never goes down its value
+        when its last test (or watch) started, else now. None when it can't be read."""
         if self.effect is Effect.ALWAYS_FULL and m.address in self.pool_full:
-            value = self.pool_full[m.address]
-        elif m is self.place_member and self._place_start is not None:
-            value = self._place_start  # its value when its last test (or watch) started
-        else:
-            game = self._game()
-            value = m.vtype.decode(self._client().read(game.pid, m.address, m.vtype.size))
+            return self.pool_full[m.address]
+        if m is self.place_member and self._place_start is not None:
+            return self._place_start
+        game = self._game()
+        try:
+            return m.vtype.decode(self._client().read(game.pid, m.address, m.vtype.size))
+        except ReadFailed as exc:
+            log.warning("action=build_linked_hold member=%#x unreadable=%s", m.address, exc)
+            return None
+
+    def _hold_cheat(self, code: Cheat, m: lk.PoolMember, n: int, value: float | int) -> Cheat:
+        """The kept places' code lines plus a freeze on ``m`` (L13 with a freeze)."""
         data = m.vtype.encode(value)
         for loc in code.locations:
             loc.part = self.name
@@ -1876,7 +1897,12 @@ class Builder:
         notes.clear_all()
 
     def _result(
-        self, cheat: Cheat, after: str, places: list[_Place], held: bool = False
+        self,
+        cheat: Cheat,
+        after: str,
+        places: list[_Place],
+        held: bool = False,
+        reason: str = "",
     ) -> BuildResult:
         skipped = [s for p in places for s in p.skipped]
         if places[-1].n != self.place:  # the current place failed (L11): its skips too
@@ -1891,7 +1917,7 @@ class Builder:
             total,
             self.linked_result,
         )
-        return BuildResult(cheat, after, tuple(skipped), total, self.linked_result)
+        return BuildResult(cheat, after, tuple(skipped), total, self.linked_result, reason)
 
     def _places_cheat(self, places: list[_Place]) -> Cheat:
         """One code cheat for the kept places: exactly ``_cheat`` for one place."""

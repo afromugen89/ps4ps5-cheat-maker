@@ -116,6 +116,7 @@ class PoolRow:
     status: Status
     done: Done = Done.NOTHING
     after_place: int = 0  # NOT_NEEDED: the place whose fix made it keep up
+    reason: str = ""  # NOT_FIXED / FROZEN: why it wasn't fixed in code (L11)
 
 
 @dataclass
