@@ -1592,7 +1592,11 @@ class Builder:
             row.done = lk.Done.NOT_CHECKED
         elif behind:
             self._behind.append(m)
-        elif old is not None and (old.status is lk.Status.BEHIND or old.after_place):
+        elif (
+            status is lk.Status.KEPT_UP  # unread isn't kept up (an unknown says so as it is)
+            and old is not None
+            and (old.status is lk.Status.BEHIND or old.after_place)
+        ):
             # It fell behind before; a later place's fix made it keep up.
             row.done, row.after_place = lk.Done.NOT_NEEDED, old.after_place or place
         self.pool_rows[m.address] = row

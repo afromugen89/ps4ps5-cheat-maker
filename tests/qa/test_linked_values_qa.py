@@ -731,11 +731,6 @@ def test_tc25b_bug06_full_tooltip_after_reload(win, game, h, clock):  # noqa: F8
 
 
 # == TC-26: L15 - Advanced list ===================================================================
-@pytest.mark.xfail(
-    reason="BUG-03: a member that couldn't be read in place 2's test is listed as "
-    "'not needed: it kept up after place 2 was fixed'",
-    strict=True,
-)
 def test_tc26_bug03_unreadable_member_is_not_called_kept_up(monkeypatch):
     g, clk, bl = setup(pool=lambda g: pool_of(g, percent=V.KEPT))
     pass_place(bl, clk, g)
