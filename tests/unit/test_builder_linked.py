@@ -284,7 +284,7 @@ def test_the_fraction_falls_behind_in_every_effect(effect, caplog):
     assert rows[frac.address].status is lk.Status.BEHIND
     assert rows[fg.PERCENT].status is lk.Status.BEHIND, "the percent follows the fraction"
     for addr in fg.HUD_COPIES:  # copies of place 1: they keep up and are never fixed
-        assert rows[addr].status is lk.Status.KEPT_UP and rows[addr].done == ""
+        assert rows[addr].status is lk.Status.KEPT_UP and rows[addr].done is lk.Done.NOTHING
     assert f"action=build_linked_check n=1 member={frac.address:#x} k=0.01 result=behind" in (
         caplog.text
     )
@@ -298,7 +298,7 @@ def test_a_copy_that_fell_behind_is_listed_never_fixed():
     plan = bl.after_pass()
     assert [m.address for m in plan.behind] == [g.fraction_addr]
     row = bl.pool_rows[fg.PERCENT]
-    assert row.status is lk.Status.BEHIND and row.done == b.COPY_NEVER_TOUCHED
+    assert row.status is lk.Status.BEHIND and row.done is lk.Done.COPY
 
 
 def test_a_member_that_couldnt_be_read_is_unknown_and_not_fixed(monkeypatch):
