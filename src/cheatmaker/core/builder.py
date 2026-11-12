@@ -2249,6 +2249,29 @@ class _PoolWatch:
         return d
 
 
+def full_fixed_in_places(cheat: Cheat) -> bool:
+    """A Make it work result that fixes two or more places, so its Full can't be typed
+    in My cheats (L8). ``Cheat.places`` isn't saved, so after a reload it is told from
+    what is saved: no value, a Make it work name or hint, and two or more routines (a
+    routine line is a code line that stays the same when off). Cheat files keep only
+    the name, so a renamed result isn't told; one place with two hooked writers and no
+    Full looks the same, and Make it work again is right for it too."""
+    if cheat.places > 1:
+        return True
+    if cheat.value is not None or not _made_by_build(cheat):
+        return False
+    routines = [
+        loc for loc in cheat.locations if loc.kind is LocationKind.CODE_PATCH and loc.on == loc.off
+    ]
+    return len(routines) > 1
+
+
+def _made_by_build(cheat: Cheat) -> bool:
+    """Named (``_result_name``) or hinted (``_result_hint``) as a Make it work result."""
+    hint = cheat.hint or ""
+    return any(f": {e.value}" in cheat.name or hint.startswith(e.value) for e in Effect)
+
+
 def _pick_reason(rep: lk.PoolMember, cluster: Sequence[lk.PoolMember]) -> str:
     why = "marked real" if rep.mark is rc.Verdict.REAL else "kept the test value"
     if rep.likely:
@@ -2291,5 +2314,6 @@ __all__ = [
     "TryResult",
     "candidates",
     "classify",
+    "full_fixed_in_places",
     "judge",
 ]

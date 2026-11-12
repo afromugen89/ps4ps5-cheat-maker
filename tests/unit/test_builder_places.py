@@ -16,6 +16,7 @@ import itertools
 import logging
 import struct
 import threading
+from dataclasses import replace
 
 import pytest
 
@@ -26,7 +27,7 @@ from cheatmaker.core import cave as cv
 from cheatmaker.core import linked as lk
 from cheatmaker.core import real_check as rc
 from cheatmaker.core.cave import Effect
-from cheatmaker.core.cheats import LocationKind
+from cheatmaker.core.cheats import Cheat, Location, LocationKind
 from cheatmaker.core.freezer import Freezer, LiveCheats
 from cheatmaker.core.values import ValueType
 from cheatmaker.errors import BuildFailed, ReadFailed, ScanCancelled
@@ -126,6 +127,7 @@ def test_never_goes_down_fixes_two_places_and_leaves_copies_alone(caplog):
     cheat = res.cheat
     assert cheat.name == "Health: Never goes down" and cheat.places == 2 and cheat.enabled
     assert cheat.saveable and not cheat.combined and cheat.value is None
+    assert b.full_fixed_in_places(replace(cheat, places=1)), "told from the lines on reload"
     offs = [loc.offset for loc in cheat.locations]
     assert offs[1] == fg.WRITER - fg.BASE and offs[3] == fg.FRAC_SITE - fg.BASE, "places in order"
     for loc in cheat.locations:
@@ -168,6 +170,26 @@ def test_always_full_scales_full_for_the_second_place():
     g.damage(30.0)
     assert g.health() == 100.0 and g.fraction() == pytest.approx(1.0, rel=0.005)
     assert res.cheat.value is None and res.cheat.places == 2
+    assert b.full_fixed_in_places(res.cheat)
+    reloaded = replace(res.cheat, places=1)  # places isn't saved in cheat files
+    assert b.full_fixed_in_places(reloaded), "told from the lines"
+
+
+def test_full_fixed_in_places_is_a_make_it_work_result_with_two_routines():
+    code = bytes([0x90] * 5)
+    routine = Location(LocationKind.CODE_PATCH, 0x100, code, code)
+    jump = Location(LocationKind.CODE_PATCH, 0x200, code, bytes(5))
+    two = Cheat("Health: Always full", [routine, jump, replace(routine, offset=0x300), jump])
+    assert b.full_fixed_in_places(two), "a loaded file keeps only the name"
+    assert b.full_fixed_in_places(replace(two, name="Ammo: Half damage (only me)"))
+    assert b.full_fixed_in_places(replace(two, name="Mine", hint="Never goes down.")), "hint"
+    assert not b.full_fixed_in_places(replace(two, locations=[routine, jump])), "one place"
+    assert not b.full_fixed_in_places(replace(two, name="Mine")), "not Make it work"
+    assert not b.full_fixed_in_places(replace(two, name="Mine", hint="Found again each run."))
+    held = replace(two, value_type=ValueType.INT32, value_at=[(0, 0), (0, 1), (0, 2), (0, 3)])
+    assert held.value is not None
+    assert not b.full_fixed_in_places(held), "Full can be typed"
+    assert b.full_fixed_in_places(replace(two, name="Mine", places=2)), "in memory: places"
 
 
 def test_half_damage_halves_both_places():

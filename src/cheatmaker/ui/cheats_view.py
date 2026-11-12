@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 
 from cheatmaker import formats
 from cheatmaker.core import anchor_hook as ah
+from cheatmaker.core import builder as bd
 from cheatmaker.core import carry as cr
 from cheatmaker.core import cave as cv
 from cheatmaker.core import project as pj
@@ -214,9 +215,10 @@ class CheatsView(QWidget):
                 self.table.setItem(i, COL_ON, on)
                 self.table.setItem(i, COL_NAME, QTableWidgetItem(c.name))
                 val = QTableWidgetItem("" if c.value is None else fmt_value(c.value))
-                if c.value is None or c.places > 1:
+                places = bd.full_fixed_in_places(c)
+                if c.value is None or places:
                     val.setFlags(val.flags() & ~Qt.ItemFlag.ItemIsEditable)
-                if c.places > 1:  # one Full can't be typed for every place (L8)
+                if places:  # one Full can't be typed for every place (L8)
                     val.setToolTip(hints.BUILD_FULL_PLACES)
                 self.table.setItem(i, COL_VALUE, val)
                 keeps = QTableWidgetItem(keeps_text(c))

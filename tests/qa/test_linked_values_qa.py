@@ -713,9 +713,6 @@ def test_tc25a_full_is_read_only_with_its_tooltip(win, game, h, clock):  # noqa:
     assert item.toolTip() == hints.BUILD_FULL_PLACES
 
 
-@pytest.mark.xfail(
-    reason="BUG-06: after a reload the multi-place cheat's Full tooltip is gone", strict=True
-)
 def test_tc25b_bug06_full_tooltip_after_reload(win, game, h, clock):  # noqa: F811
     _two_place_result(win, game, h, clock)
     back = goldhen_json.loads(goldhen_json.dumps(win.ctl.cheat_file))
