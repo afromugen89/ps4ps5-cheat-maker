@@ -147,3 +147,23 @@ def test_missing_file_raises_cheatfileerror(tmp_path):
 def test_unknown_format_dumps():
     with pytest.raises(ValueError):
         formats.dumps(_sample(), "mc4")
+
+
+def test_linked_pool_and_places_are_never_written_or_compared():  # spec-linked-values L2
+    from dataclasses import replace
+
+    from cheatmaker.core.cheats import combine
+    from cheatmaker.core.linked import LinkedGroup, PoolMember
+    from cheatmaker.core.values import ValueType
+
+    pool = LinkedGroup((PoolMember(0x2000_0000, ValueType.FLOAT, 1.0),))
+    plain = _sample()
+    marked = _sample()
+    marked.cheats = [replace(c, linked=pool, places=2) for c in marked.cheats]
+    assert marked.cheats == plain.cheats, "in-memory fields don't count for equality"
+    assert goldhen_json.dumps(marked) == goldhen_json.dumps(plain)
+    assert shn.dumps(marked) == shn.dumps(plain)
+    again = goldhen_json.loads(goldhen_json.dumps(marked))
+    assert all(c.linked is None and c.places == 1 for c in again.cheats)
+    both = combine(marked.cheats[:2])
+    assert both.linked is None and both.places == 1, "Combine makes a cheat with no pool"

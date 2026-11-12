@@ -214,8 +214,10 @@ class CheatsView(QWidget):
                 self.table.setItem(i, COL_ON, on)
                 self.table.setItem(i, COL_NAME, QTableWidgetItem(c.name))
                 val = QTableWidgetItem("" if c.value is None else fmt_value(c.value))
-                if c.value is None:
+                if c.value is None or c.places > 1:
                     val.setFlags(val.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                if c.places > 1:  # one Full can't be typed for every place (L8)
+                    val.setToolTip(hints.BUILD_FULL_PLACES)
                 self.table.setItem(i, COL_VALUE, val)
                 keeps = QTableWidgetItem(keeps_text(c))
                 keeps.setFlags(keeps.flags() & ~Qt.ItemFlag.ItemIsEditable)

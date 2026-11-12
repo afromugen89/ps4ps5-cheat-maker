@@ -321,6 +321,7 @@ BUILD_FIX_FAILED = "Fix {n} didn't work ({reason}). Trying the next one."
 BUILD_NONE_WORKED = "None of the safe fixes worked for this value. Your game is unchanged."
 BUILD_FULL_LABEL = "Full:"
 BUILD_FULL_BAD = "Type the Full number first."
+BUILD_FULL_PLACES = "Make it work again to change Full."  # a cheat with 2 or more places
 BUILD_ONLY_ME = "Only me"
 BUILD_ONLY_ME_TIP = "Change only your character; enemies go through the game's own code"
 BUILD_ADVANCED = "Advanced: show details"
