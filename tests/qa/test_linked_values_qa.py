@@ -245,10 +245,6 @@ def test_tc07b_half_damage_whole_numbers():
     assert lk.judge_member(m, rs, 20.0).status is lk.Status.BEHIND
 
 
-@pytest.mark.xfail(
-    reason="BUG-05: two readings 0.65 s apart count as 'behind for at least 1 s in a row'",
-    strict=True,
-)
 def test_tc08_bug05_behind_for_less_than_a_second_is_kept_up():
     """Spec Words: 'at the end of the test or for at least 1 s in a row'. The pool watch
     reads a span again after 0.65 s (POOL_EVERY_S - POOL_EARLY_S), and judge_member
@@ -407,9 +403,6 @@ def test_tc15_three_places_get_their_own_rooms_and_slots():
     assert all(y <= x2 or y2 <= x for x, s in a for x2, s2 in b_ for y, y2 in [(x + s, x2 + s2)])
 
 
-@pytest.mark.xfail(
-    reason="BUG-07: the Collect sampler of place 2 is noted and logged as place 1", strict=True
-)
 def test_tc16_bug07_collect_at_place_2_is_noted_as_place_2(monkeypatch):
     g, clk, bl = _frac_only_me()
     seen: list[notes.OpenNote] = []
@@ -462,10 +455,6 @@ def test_tc18_whole_number_second_place_every_effect(effect):
 
 
 # == TC-19: L10 - limits ==========================================================
-@pytest.mark.xfail(
-    reason="BUG-01: after the place limit, the fallback adds one more place (a freeze)",
-    strict=True,
-)
 def test_tc19_bug01_place_limit_counts_the_freeze(monkeypatch):
     """With MAX_PLACES = 2 (the same code path as 3 places + a 4th value): two places
     pass, the third value still falls. L10: at most MAX_PLACES places per build; the
@@ -583,11 +572,18 @@ def test_tc22d_fallback_that_cant_read_the_member_then_close(monkeypatch):
         return real(pid, addr, size)
 
     monkeypatch.setattr(g.fake, "read", read)
-    with pytest.raises(ReadFailed):
-        bl.fallback(reason=b.LIMIT)
+    live = bl.live = LiveCheats(g.session, Freezer(g.session))
+    try:
+        res = bl.fallback(reason=b.LIMIT)  # nothing more is held: the code fixes only
+    finally:
+        live.freezer.stop()
     monkeypatch.setattr(g.fake, "read", real)
-    assert bl.close() is b.Rollback.RESTORED
-    assert module(g) == original_module(third=True) and notes.kept_notes() == []
+    assert (res.linked, res.places, res.cheat.freeze) == ("partial", 2, False)
+    assert notes.kept_notes() == [] and bl.close() is b.Rollback.NOTHING, "the result stays"
+    live.turn_off(res.cheat)  # switched off: the game's code is its own again
+    assert g.fake.peek(fg.PID, fg.WRITER, len(fg.VMOVSS_W)) == fg.VMOVSS_W
+    assert g.fake.peek(fg.PID, fg.FRAC_SITE, len(fg.VMOVSS_FRAC)) == fg.VMOVSS_FRAC
+    assert module(g)[1:] == original_module(third=True)[1:], "module data untouched"
 
 
 def test_tc22e_ps_button_during_place_3_keeps_places_then_close_puts_all_back():
