@@ -26,7 +26,7 @@ The core works. Make it work fixes health and its fraction as one cheat, never w
 Bugs: **0 Critical, 0 High, 2 Medium, 5 Low.**
 
 - BUG-01 (Medium): once the 3-place limit is hit, the fallback adds a 4th place as a freeze, so the cheat has more places than L10 allows. Fixed in 1509fba.
-- BUG-02 (Medium): with a full pool (16 members far apart) and 36 ms per console read, which is the latency the fake uses for a real PS5, each member is read only every ~1.36 s. L3 says at least once a second. Fixed in 0246482.
+- BUG-02 (Medium): with a full pool (16 members far apart) and 36 ms per console read, which is the latency the fake uses for a real PS5, each member is read only every ~1.36 s. L3 says at least once a second. Fixed in 0246482, reworked in d20e156.
 - BUG-03 (Low): a member that couldn't be read in place 2's test is listed in Advanced as "not needed: it kept up after place 2 was fixed". Fixed in e920505.
 - BUG-04 (Low): a hit that lands between two members' last readings splits one value and its copy into two clusters. Fixed in f5d685a.
 - BUG-05 (Low): a member that is behind for only 0.65 s counts as "fell behind". The spec's rule is "for at least 1 s in a row". Fixed in cee297a.
@@ -61,7 +61,7 @@ Run C22a with the `build_linked_reads` log to see BUG-02's real-console numbers.
 | TC-07 | Half damage small hits: one 2% hit within rule, two hits behind; whole numbers | L3 | High | Pass | see Observation O-1 |
 | TC-08 | "1 s in a row": two behind readings 0.65 s apart mid-test | L3 | Low | **Fail** | BUG-05; fixed in cee297a |
 | TC-09a | 16 spans, no latency: every member at least once a second | L3 | High | Pass | worst gap 1.0 s |
-| TC-09b | 16 spans, 36 ms per read: every member at least once a second | L3 | High | **Fail** | BUG-02 (254 late reads, gap 1.36 s); fixed in 0246482 |
+| TC-09b | 16 spans, 36 ms per read: every member at least once a second | L3 | High | **Fail** | BUG-02 (254 late reads, gap 1.36 s); fixed in 0246482, reworked in d20e156 |
 | TC-10 | 16 spans at 36 ms: target samples at least 90% of no pool | L3 | High | Pass | 55 vs 56 |
 | TC-11 | Copies never written over 2 places + 3 more hits (writes checked as (pid, addr, data)) | L4 | Critical-risk | Pass | only the L4 check writes the unmarked percent |
 | TC-11b | Fallback writes only the failing place's member | L4, L11 | High | Pass | |
@@ -119,7 +119,7 @@ Run C22a with the `build_linked_reads` log to see BUG-02's real-console numbers.
 - Impact for the product owner: on a game that keeps one value in 4 or more places, the player gets a cheat that holds 4 places, one by a freeze, beyond the stated limit of 3.
 
 ### BUG-02: With a full pool, members are read less than once a second at 36 ms per read
-- Status: Fixed in 0246482
+- Status: Fixed in 0246482, reworked in d20e156
 - Severity: Medium
 - Priority: P2
 - Related test case: TC-09b | Automated test: `tests/qa/test_linked_values_qa.py::test_tc09b_bug02_sixteen_spans_at_36ms_are_read_once_a_second`
