@@ -96,13 +96,26 @@ class Judged:
     worst: float | int | None = None  # the member's value where it was furthest behind
 
 
+class Done(Enum):
+    """What the build did with a pool member (L15); the words are in ui/hints."""
+
+    NOTHING = "nothing"
+    FIXED = "fixed"
+    FROZEN = "held by a freeze"
+    NOT_NEEDED = "not needed"  # it kept up after a later place was fixed
+    COPY = "copy"  # never touched
+    NOT_CHECKED = "couldn't be checked"
+    NOT_FIXED = "not fixed"  # still behind when the build ended (L11)
+
+
 @dataclass
 class PoolRow:
     """One Advanced line (L15), updated after every judge."""
 
     member: PoolMember
     status: Status
-    done: str = ""
+    done: Done = Done.NOTHING
+    after_place: int = 0  # NOT_NEEDED: the place whose fix made it keep up
 
 
 @dataclass
@@ -273,6 +286,25 @@ def judge_member(m: PoolMember, readings: Sequence[Reading], end_t: float) -> Ju
     return Judged(m, Status.KEPT_UP, worst)
 
 
+def judge_later(m: PoolMember, readings: Sequence[Reading], end_t: float) -> Judged:
+    """``judge_member`` for the test of a later place (L5: judged again with every fix
+    in). A member that fell behind in an earlier test starts this one already lower
+    than factor x place 1, so only what it loses against place 1 during this test
+    counts: its readings are shifted so the first readable one is on the line. ``worst``
+    is the member's own value."""
+    first = next((r for r in readings if _usable(r)), None)
+    if first is None:
+        return judge_member(m, readings, end_t)
+    assert first.value is not None
+    shift = _expected(m, first) - first.value
+    moved = [
+        Reading(r.t, r.ref, None if not _finite(r.value) else r.value + shift)  # type: ignore[operator]
+        for r in readings
+    ]
+    j = judge_member(m, moved, end_t)
+    return Judged(m, j.status, None if j.worst is None else j.worst - shift)
+
+
 # -- which place next (L5) -------------------------------------------------------------
 def _settled(rs: Sequence[Reading]) -> list[Reading]:
     """Readings not taken mid-change: the readable ones whose neighbours agree."""
@@ -362,6 +394,7 @@ __all__ = [
     "MAX_PLACES",
     "MAX_TESTS",
     "POOL_MAX",
+    "Done",
     "Judged",
     "LinkedGroup",
     "PoolData",
@@ -372,6 +405,7 @@ __all__ = [
     "check_start",
     "clusters",
     "from_group",
+    "judge_later",
     "judge_member",
     "pick",
     "plan_spans",

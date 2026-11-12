@@ -236,6 +236,36 @@ def test_whole_numbers_behind_only_by_more_than_one():
     assert lk.judge_member(m, series([100] * 4, [98] * 4), 3).status is lk.Status.BEHIND
 
 
+# -- judge_later: the test of a later place ---------------------------------------------------
+def test_later_place_a_member_already_behind_that_holds_keeps_up():
+    """Place 2 fixed: the percent started this test at 70 (it fell in place 1's test) and
+    stays there. Judged with the Start factor it would look behind for ever."""
+    pct = member(PERCENT, 100 / 3)
+    rs = series([3.0] * 27, [70.0] * 27)
+    assert lk.judge_member(pct, rs, 26 * STEP).status is lk.Status.BEHIND
+    j = lk.judge_later(pct, rs, 26 * STEP)
+    assert j.status is lk.Status.KEPT_UP and j.worst == 70.0
+
+
+def test_later_place_a_member_that_still_falls_is_behind():
+    third = member(0x50, 2 / 3)
+    vals = [1.6] * 10 + [1.4] * 17  # it started behind and lost more in this test
+    j = lk.judge_later(third, series([3.0] * 27, vals), 26 * STEP)
+    assert j.status is lk.Status.BEHIND and j.worst == pytest.approx(1.4)
+
+
+def test_later_place_half_damage_both_lose_half_keeps_up():
+    p1 = [2.55] * 9 + [2.4] * 9 + [2.25] * 9  # place 1 halved (0.15 a hit)
+    pct = [70.0] * 9 + [65.0] * 9 + [60.0] * 9  # the percent halved too (5 a hit)
+    j = lk.judge_later(member(PERCENT, 100 / 3), series(p1, pct), 26 * STEP)
+    assert j.status is lk.Status.KEPT_UP
+
+
+def test_later_place_with_nothing_readable_is_unknown():
+    rs = [lk.Reading(t, 3.0, None) for t in (18.0, 19.0, 20.0)]
+    assert lk.judge_later(FRAC_M, rs, 20.0).status is lk.Status.UNKNOWN
+
+
 # -- clusters --------------------------------------------------------------------------------
 def test_fraction_and_percent_are_one_cluster_a_far_copy_apart():
     p1, frac, pct, _ = returnal("never")
