@@ -404,6 +404,16 @@ NOT_TAKEN = "the PS5 didn't take the change"
 RESTART = notes.RESTART
 SLOT_IN_USE = "the game uses the place kept for the test counter"
 CLOSED_WHILE_KEEPING = "Stopped before the fix was kept. Your game is unchanged."
+LINKED_BEHIND = (
+    "{name} held, but the game also keeps it in a second place that still went down. "
+    "Fixing that too."
+)
+COPY_NEVER_TOUCHED = "copy: never touched"
+_STATUS_LOG = {
+    lk.Status.KEPT_UP: "kept_up",
+    lk.Status.BEHIND: "behind",
+    lk.Status.UNKNOWN: "unknown",
+}
 
 
 class TryResult(Enum):
@@ -434,6 +444,15 @@ class BuildResult:
     cheat: Cheat
     after_restart: str  # "Yes" or "Check after restart" (B8)
     skipped: tuple[Skipped, ...] = ()
+
+
+@dataclass(frozen=True)
+class LinkedPlan:
+    """What follows a passed test (L1): done, or the members that fell behind."""
+
+    done: bool
+    behind: tuple[lk.PoolMember, ...] = ()
+    hint: str = ""
 
 
 @dataclass
@@ -532,6 +551,7 @@ class Builder:
         self.copies: list[lk.PoolMember] = []  # marked copy: watched if room, never fixed
         self.pool_full: dict[int, float | int] = {}  # Always full: each member's Full (L8)
         self.pool_released = 0  # Find freezes the dialog released on the pool
+        self.pool_rows: dict[int, lk.PoolRow] = {}  # by address, for Advanced (L15)
         self.place = 1
         self.linked_result = "none"  # none | fixed | freeze | partial
 
@@ -1211,11 +1231,14 @@ class Builder:
     def log_end(self, hint: str) -> None:
         """B9: the result line for a build that ends without a cheat."""
         log.info(
-            "action=build_result name=%r result=none tried=%d not_restored=%s hint=%r",
+            "action=build_result name=%r result=none tried=%d not_restored=%s hint=%r "
+            "places=%d linked=%s",
             self.name,
             len(self.tried),
             self.not_restored,
             hint,
+            self.place,
+            self.linked_result,
         )
 
     def close(self, wait: float = CLOSE_WAIT_S) -> Rollback:
@@ -1231,6 +1254,42 @@ class Builder:
         if rb is Rollback.NOTHING and inst is not None and inst.put_back is not None:
             rb = inst.put_back  # the worker saw the cancel and put it back first
         return Rollback.NOT_RESTORED if self.not_restored else rb
+
+    # -- L1/L3: after a passed test ------------------------------------------------------
+    def after_pass(self) -> LinkedPlan:
+        """Judge every watched pool member over the passed test (no console). Done when
+        no member that may be fixed fell behind; copies are judged for Advanced only
+        (L4) and members that couldn't be read are never fixed."""
+        inst = self._passed
+        if inst is None:
+            raise BuildFailed("There's no passed fix to keep.")
+        data = inst.pool
+        if data is None:
+            return LinkedPlan(True)
+        for m in data.not_watched:
+            self.pool_rows[m.address] = lk.PoolRow(m, lk.Status.NOT_WATCHED)
+        behind: list[lk.PoolMember] = []
+        for m in (*self.pool, *self.copies):
+            rs = data.readings.get(m.key)
+            if rs is None:
+                continue
+            j = lk.judge_member(m, rs, data.end_t)
+            log.info(
+                "action=build_linked_check n=%d member=%#x k=%.6g result=%s worst=%s",
+                inst.place,
+                m.address,
+                m.factor,
+                _STATUS_LOG[j.status],
+                "none" if j.worst is None else f"{j.worst:.6g}",
+            )
+            copy = m.mark is rc.Verdict.COPY
+            done = COPY_NEVER_TOUCHED if copy and j.status is lk.Status.BEHIND else ""
+            self.pool_rows[m.address] = lk.PoolRow(m, j.status, done)
+            if j.status is lk.Status.BEHIND and not copy:
+                behind.append(m)
+        if not behind:
+            return LinkedPlan(True)
+        return LinkedPlan(False, tuple(behind), LINKED_BEHIND.format(name=self.name))
 
     # -- B8: the result -------------------------------------------------------------------
     def finalize(self, cancel: threading.Event | None = None) -> BuildResult:
@@ -1261,14 +1320,16 @@ class Builder:
             cheat.enabled = True
         after = "Check after restart" if self.only_me and not self.by_class else "Yes"
         log.info(
-            "action=build_result name=%r method=%s lines=%d after_restart=%r",
+            "action=build_result name=%r method=%s lines=%d after_restart=%r places=%d linked=%s",
             cheat.name,
             _method_name(inst.candidate),
             len(cheat.locations),
             after,
+            self.place,
+            self.linked_result,
         )
-        # B7 (a second address that went down while this one held) isn't built in this
-        # version; see "Not in this version" in docs/spec-cheat-builder.md.
+        # A second place the game keeps (spec-linked-values, replacing B7) is found by
+        # after_pass before this runs.
         return BuildResult(cheat, after, tuple(self.skipped))
 
     def _keep(self, inst: _Installed) -> list[tuple[_Room, bytes, bytes]]:
@@ -1500,6 +1561,7 @@ __all__ = [
     "Candidate",
     "Eligible",
     "Judgement",
+    "LinkedPlan",
     "Method",
     "Outcome",
     "Part",

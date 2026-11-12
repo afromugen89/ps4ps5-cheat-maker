@@ -203,3 +203,124 @@ def test_no_member_left_reads_exactly_as_without_a_pool(monkeypatch):
         return seen
 
     assert requests("returnal") == requests(None)
+
+
+# -- after a pass (L1, L3, L16): judge the pool, done or a second place -----------------------
+def _hud_only(g: fg.Game) -> lk.LinkedGroup:
+    """C22e: health and two HUD copies (not checked yet), no second place."""
+    return lk.LinkedGroup(
+        (
+            lk.PoolMember(g.health_addr, F, 1.0, False, None),
+            lk.PoolMember(fg.HUD_COPIES[0], F, 1.0, False, None),
+            lk.PoolMember(fg.HUD_COPIES[1], F, 1.0, False, None),
+        )
+    )
+
+
+def _whole_build(pool) -> tuple[b.Builder, b.BuildResult | None, b.LinkedPlan]:
+    g = fg.build(capture_ticks=False, linked=True)
+    g.fake.write_hits[g.health_addr] = [WatchHit(fg.WRITER + 10)] * 3
+    clock = Clock()
+    bl = b.Builder(
+        g.session,
+        g.health_addr,
+        F,
+        Effect.NEVER_DOWN,
+        name="Health",
+        sleep=clock.sleep,
+        clock=clock,
+        pool=pool(g) if pool else None,
+    )
+    assert _run_test(bl, clock, g).result is TR.PASS
+    plan = bl.after_pass()
+    return bl, bl.finalize() if plan.done else None, plan
+
+
+def test_everyone_kept_up_is_one_test_and_the_same_cheat_as_without_a_pool(caplog):
+    caplog.set_level(logging.INFO)
+    _plain, plain_res, plain_plan = _whole_build(None)
+    bl, res, plan = _whole_build(_hud_only)
+    assert plain_plan == plan == b.LinkedPlan(True)
+    assert res is not None and plain_res is not None
+    assert len(bl.tried) == 1, "one test, no extra step"
+    assert res.cheat == plain_res.cheat and res.after_restart == plain_res.after_restart == "Yes"
+    assert [(loc.offset, loc.on, loc.off) for loc in res.cheat.locations] == [
+        (loc.offset, loc.on, loc.off) for loc in plain_res.cheat.locations
+    ]
+    assert bl.linked_result == "none" and bl.place == 1
+    results = [r.getMessage() for r in caplog.records if "action=build_result" in r.getMessage()]
+    assert len(results) == 2 and all(r.endswith(" places=1 linked=none") for r in results)
+    assert {r.status for r in bl.pool_rows.values()} == {lk.Status.KEPT_UP}
+    for addr in fg.HUD_COPIES:
+        assert f"member={addr:#x} k=1 result=kept_up worst=100" in caplog.text
+
+
+def test_no_pool_after_pass_is_done_without_judging(caplog):
+    caplog.set_level(logging.INFO)
+    bl, res, plan = _whole_build(None)
+    assert plan.done and res is not None and bl.pool_rows == {}
+    assert "action=build_linked" not in caplog.text and "action=build_pool" not in caplog.text
+
+
+@pytest.mark.parametrize("effect", [Effect.NEVER_DOWN, Effect.ALWAYS_FULL, Effect.HALF])
+def test_the_fraction_falls_behind_in_every_effect(effect, caplog):
+    caplog.set_level(logging.INFO)
+    g, clock, bl = setup(effect)
+    out = _run_test(bl, clock, g)
+    assert out.result is TR.PASS, out
+    if effect is Effect.HALF:
+        assert g.health() == 85.0, "place 1 lost half of each hit"
+    else:
+        assert g.health() == 100.0
+    assert g.fraction() == pytest.approx(0.7), "the second place lost the game's full amount"
+    plan = bl.after_pass()
+    frac = bl.pool[0]
+    assert not plan.done and [m.address for m in plan.behind] == [g.fraction_addr, fg.PERCENT]
+    assert plan.hint == (
+        "Health held, but the game also keeps it in a second place that still went down. "
+        "Fixing that too."
+    )
+    rows = bl.pool_rows
+    assert rows[frac.address].status is lk.Status.BEHIND
+    assert rows[fg.PERCENT].status is lk.Status.BEHIND, "the percent follows the fraction"
+    for addr in fg.HUD_COPIES:  # copies of place 1: they keep up and are never fixed
+        assert rows[addr].status is lk.Status.KEPT_UP and rows[addr].done == ""
+    assert f"action=build_linked_check n=1 member={frac.address:#x} k=0.01 result=behind" in (
+        caplog.text
+    )
+    assert "worst=0.7" in caplog.text
+
+
+def test_a_copy_that_fell_behind_is_listed_never_fixed():
+    g, clock, bl = setup(pool=None)
+    bl.linked = returnal_pool(g, percent=V.COPY)  # Check which is real said: copy
+    assert _run_test(bl, clock, g).result is TR.PASS
+    plan = bl.after_pass()
+    assert [m.address for m in plan.behind] == [g.fraction_addr]
+    row = bl.pool_rows[fg.PERCENT]
+    assert row.status is lk.Status.BEHIND and row.done == b.COPY_NEVER_TOUCHED
+
+
+def test_a_member_that_couldnt_be_read_is_unknown_and_not_fixed(monkeypatch):
+    g, clock, bl = setup()
+    bl.watch()
+    real_read = g.fake.read
+    gone_at = clock.now + 2.0
+
+    def read(pid, addr, size):
+        if addr <= g.fraction_addr < addr + size and clock.now >= gone_at:
+            raise ReadFailed("area unloaded")
+        return real_read(pid, addr, size)
+
+    monkeypatch.setattr(g.fake, "read", read)
+    clock.events.extend(fight(g))
+    assert bl.try_candidate(bl.next_candidate()).result is TR.PASS
+    plan = bl.after_pass()
+    assert bl.pool_rows[g.fraction_addr].status is lk.Status.UNKNOWN
+    assert [m.address for m in plan.behind] == [fg.PERCENT], "only what was seen falling"
+
+
+def test_after_pass_needs_a_passed_test():
+    _g, _clock, bl = setup()
+    with pytest.raises(b.BuildFailed):
+        bl.after_pass()
