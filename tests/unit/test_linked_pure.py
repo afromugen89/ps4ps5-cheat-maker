@@ -300,6 +300,26 @@ def test_readings_taken_mid_hit_are_not_compared():
     assert lk.clusters([FRAC_M, PCT_M], {FRAC_M.key: rf, PCT_M.key: rp}) == [[FRAC_M, PCT_M]]
 
 
+def test_a_hit_between_the_last_two_readings_doesnt_split_a_cluster():
+    """The fraction's last reading is just before a hit, the percent's just after: that
+    pair can't be compared (the fraction may have changed after its last reading)."""
+    t = [0.75 * i for i in range(8)]
+    frac = [1.0, 1.0, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9]
+    pct = [100.0, 100.0, 90.0, 90.0, 90.0, 90.0, 90.0, 80.0]  # the hit lands at 5.4 s
+    rf = [lk.Reading(x, 3.0, v) for x, v in zip(t, frac, strict=True)]
+    rp = [lk.Reading(x + 0.4, 3.0, v) for x, v in zip(t, pct, strict=True)]
+    assert lk.clusters([FRAC_M, PCT_M], {FRAC_M.key: rf, PCT_M.key: rp}) == [[FRAC_M, PCT_M]]
+
+
+def test_a_value_and_one_that_isnt_its_copy_stay_apart():
+    t = [0.75 * i for i in range(8)]
+    frac = [1.0, 1.0, 0.9, 0.9, 0.8, 0.8, 0.7, 0.7]
+    other = [50.0] * 8  # never moves: not the same ratio
+    rf = [lk.Reading(x, 3.0, v) for x, v in zip(t, frac, strict=True)]
+    ro = [lk.Reading(x, 3.0, v) for x, v in zip(t, other, strict=True)]
+    assert lk.clusters([FRAC_M, PCT_M], {FRAC_M.key: rf, PCT_M.key: ro}) == [[FRAC_M], [PCT_M]]
+
+
 def test_zero_on_one_side_breaks_the_link_both_zero_is_skipped():
     a, b = member(0x10, 1.0), member(0x20, 1.0)
     ra = series([1] * 3, [0.0, 0.0, 0.5])

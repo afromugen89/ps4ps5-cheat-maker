@@ -19,6 +19,7 @@ Works the same for every game: nothing here knows a game, a name or an offset.
 from __future__ import annotations
 
 import math
+import statistics
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from enum import Enum
@@ -313,25 +314,33 @@ def judge_later(m: PoolMember, readings: Sequence[Reading], end_t: float) -> Jud
 
 
 # -- which place next (L5) -------------------------------------------------------------
-def _settled(rs: Sequence[Reading]) -> list[Reading]:
-    """Readings not taken mid-change: the readable ones whose neighbours agree."""
-    out = []
-    for i, r in enumerate(rs):
-        if not _finite(r.value):
-            continue
-        if 0 < i < len(rs) - 1 and rs[i - 1].value != rs[i + 1].value:
-            continue
-        out.append(r)
-    return out
+def _steady(rs: Sequence[Reading], t1: float, t2: float) -> bool:
+    """The member's value can't have changed from ``t1`` to ``t2``: a reading at or
+    before ``t1`` and one at or after ``t2`` hold the same value, as does every reading
+    between them. A reading taken across a hit fails this, as does the test's last
+    reading when its pair is later (nothing after it says it didn't change)."""
+    ok = [r for r in rs if _finite(r.value)]
+    lo = next((r for r in reversed(ok) if r.t <= t1), None)
+    hi = next((r for r in ok if r.t >= t2), None)
+    if lo is None or hi is None:
+        return False
+    return all(r.value == lo.value for r in ok if lo.t <= r.t <= hi.t)
 
 
 def _same_ratio(a: Sequence[Reading], b: Sequence[Reading]) -> bool:
-    """a / b stays the same (within 2%) over readings taken at about the same time."""
-    sb = _settled(b)
+    """a / b stays the same (within 2% of the median ratio) over readings taken at
+    about the same time. A pair is compared only when neither member can have changed
+    between its two readings (members in other spans are read up to 0.5 s apart)."""
+    rb_ok = [r for r in b if _finite(r.value)]
     ratios: list[float] = []
-    for ra in _settled(a):
-        near = min(sb, key=lambda rb: abs(rb.t - ra.t), default=None)
+    for ra in a:
+        if not _finite(ra.value):
+            continue
+        near = min(rb_ok, key=lambda rb: abs(rb.t - ra.t), default=None)
         if near is None or abs(near.t - ra.t) > PAIR_S:
+            continue
+        t1, t2 = sorted((ra.t, near.t))
+        if not (_steady(a, t1, t2) and _steady(b, t1, t2)):
             continue
         x, y = ra.value, near.value
         assert x is not None and y is not None
@@ -342,8 +351,8 @@ def _same_ratio(a: Sequence[Reading], b: Sequence[Reading]) -> bool:
         ratios.append(x / y)
     if not ratios:
         return False
-    end = ratios[-1]
-    return all(abs(r - end) <= LINK_TOL * abs(end) for r in ratios)
+    mid = statistics.median(ratios)
+    return all(abs(r - mid) <= LINK_TOL * abs(mid) for r in ratios)
 
 
 def clusters(

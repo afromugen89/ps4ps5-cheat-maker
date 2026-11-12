@@ -357,10 +357,6 @@ def test_tc13_readings_at_different_times_still_cluster():
     assert [[m.address for m in c] for c in cs] == [[0x1000, 0x9000]]
 
 
-@pytest.mark.xfail(
-    reason="BUG-04: a hit between two members' last readings splits one cluster in two",
-    strict=True,
-)
 def test_tc12_bug04_last_readings_straddling_a_hit_still_cluster():
     """The fraction's last reading is at 19.5 s, the percent's at 19.9 s; a hit lands at
     19.7 s. Every other pair has the same ratio, but _same_ratio compares each pair with
