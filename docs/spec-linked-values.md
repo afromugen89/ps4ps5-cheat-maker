@@ -59,7 +59,8 @@ lock the second one by hand.
 ### L3 Watching the pool during a test
 - During every live test (B5) of the build, every pool member is read at least once a
   second, in reads batched per 4 KiB. The target's own samples per 20 s test drop by no
-  more than 10% compared with a build without a pool.
+  more than 10% compared with a build without a pool. When the console is too slow for
+  both, the value's own readings come first; late pool reads are logged.
 - Given a passing test, Then every member is judged: **kept up** or **fell behind**
   (Words). A member that wasn't readable is **unknown** and is not fixed.
 - The judging is the same for every effect: Never goes down, Always full and Half damage

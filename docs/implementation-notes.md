@@ -495,8 +495,19 @@ Spec: docs/spec-linked-values.md, design: docs/architecture-linked-values.md.
   don't fall on due times: with 36 ms reads a tick is about 0.36 s, so a span is read
   every 2 ticks (0.72 s), not every 3 (1.07 s, late).
 - **Place 1 as the reference at later places** is read in a member's span when it is
-  within 4 KiB, else in a read of its own just before, which doesn't count against
-  `MAX_SPAN_READS_PER_TICK`.
+  within 4 KiB, else in a read of its own just before, which doesn't take a member's
+  turn.
+- **The value's own readings come first (L3, B5).** A tick's pool reads stop when one
+  more wouldn't fit in its wait (`POLL_S`) plus `POOL_SAMPLE_SHARE` (5%) of a tick, at
+  the read cost measured so far, but at least one member is read. Spans that would pass
+  their once-a-second mark before the next tick go first, most overdue first, then the
+  due ones (this replaces the fixed `MAX_SPAN_READS_PER_TICK`). When the console is too
+  slow for both, pool reads go late: they are counted in `late=` of
+  `build_linked_reads`. As the test ends, every span not read in the last second is read
+  once more, after the sampling, so a member isn't left unknown. With 16 far spans
+  (FakeConsole) the value keeps 98-100% of its samples at 0, 36, 50, 60 and 80 ms per
+  read; every member is read once a second up to 36 ms at place 1 (at place 2, place 1's
+  own read each tick takes a share, so 36 ms with 16 spans already reads some late).
 - **Limits and the hold (L10, L11).** Once `MAX_PLACES` are fixed and a member still
   falls, it is not held by a freeze (that would be one place too many): the result is the
   code cheat of the kept places, `linked=partial`, the member listed "not fixed" with the
