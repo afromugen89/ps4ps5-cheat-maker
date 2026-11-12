@@ -39,7 +39,7 @@ POOL_EARLY_S = 0.1  # ... or up to this much sooner, at the tick before (ticks d
 ONCE_A_SECOND_S = 1.0  # L3: a span read later than this after its last read is late
 MAX_SPAN_READS_PER_TICK = 5
 MAX_SPANS = 16  # spans read in one test; copy-only spans beyond this aren't watched
-BEHIND_READINGS = 2  # "at least 1 s in a row": 2 readings in a row, >= 0.75 s apart
+BEHIND_S = 0.75  # "at least 1 s in a row": behind readings in a row spanning this long
 UNKNOWN_END_S = 2.0  # no readable reading in the last 2 s of the test: unknown
 PAIR_S = 0.5  # clusters: readings of two members this close in time are compared
 INT_START_SLACK = 1  # L2: a whole number may be off by 1 (rounding) at Start
@@ -269,7 +269,8 @@ def _behind_at(m: PoolMember, r: Reading) -> bool:
 
 def judge_member(m: PoolMember, readings: Sequence[Reading], end_t: float) -> Judged:
     """Kept up or fell behind over one test, or unknown (too few readings, or none in
-    its last 2 s). Behind: the last readable reading is behind, or 2 in a row are (an
+    its last 2 s). Behind: the last readable reading is behind, or readings in a row
+    are, from the first to the last at least BEHIND_S apart by their times (an
     unreadable reading breaks the run). Expected = factor x place 1's value then; behind
     means lower than that by more than 2% (decimals) or more than 1 (whole numbers)."""
     usable = [r for r in readings if _usable(r)]
@@ -278,10 +279,13 @@ def judge_member(m: PoolMember, readings: Sequence[Reading], end_t: float) -> Ju
         return Judged(m, Status.UNKNOWN, worst)
     if _behind_at(m, usable[-1]):
         return Judged(m, Status.BEHIND, worst)
-    run = 0
+    since: float | None = None  # when the current run of behind readings began
     for r in readings:
-        run = run + 1 if _usable(r) and _behind_at(m, r) else 0
-        if run >= BEHIND_READINGS:
+        if not (_usable(r) and _behind_at(m, r)):
+            since = None
+            continue
+        since = r.t if since is None else since
+        if r.t - since >= BEHIND_S:
             return Judged(m, Status.BEHIND, worst)
     return Judged(m, Status.KEPT_UP, worst)
 

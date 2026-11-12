@@ -219,6 +219,15 @@ def test_two_readings_in_a_row_behind_then_back_up():
     assert j.status is lk.Status.BEHIND
 
 
+def test_behind_readings_in_a_row_must_span_the_time_not_just_count_two():
+    """Readings closer than BEHIND_S (a span read twice in quick ticks) aren't "1 s in a
+    row"; three that span 0.8 s are."""
+    quick = series([3.0] * 6, [1.0, 0.9, 0.9, 1.0, 1.0, 1.0], step=0.3)
+    assert lk.judge_member(FRAC_M, quick, 1.5).status is lk.Status.KEPT_UP
+    slow = series([3.0] * 7, [1.0, 0.9, 0.9, 0.9, 1.0, 1.0, 1.0], step=0.4)
+    assert lk.judge_member(FRAC_M, slow, 2.4).status is lk.Status.BEHIND
+
+
 def test_an_unreadable_reading_breaks_the_run():
     vals = [1.0, 0.9, None, 0.9, 1.0, 1.0]
     j = lk.judge_member(FRAC_M, series([3.0] * 6, vals), 5 * STEP)
