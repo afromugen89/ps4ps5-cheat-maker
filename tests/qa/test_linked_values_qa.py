@@ -256,13 +256,14 @@ def test_tc08_bug05_behind_for_less_than_a_second_is_kept_up():
 
 
 # == TC-09 / TC-10: L3 - pool reads during a test =============================================
-def _sixteen(slow: bool, pool: bool = True):
-    """16 members, each in its own 4 KiB span; every console read costs 36 ms."""
+def _sixteen(slow: bool, pool: bool = True, latency: float = fg.READ_LATENCY_S):
+    """16 members, each in its own 4 KiB span; with ``slow`` every console read costs
+    ``latency`` (36 ms, a real PS5, by default)."""
     g = fg.build(capture_ticks=False, linked=True)
     g.fake.write_hits[g.health_addr] = [WatchHit(fg.WRITER + 10)] * 3
     clk = Clock()
     if slow:
-        g.slow_reads(lambda s: setattr(clk, "now", clk.now + s))
+        g.slow_reads(lambda s: setattr(clk, "now", clk.now + s), latency)
     members = [lk.PoolMember(g.health_addr, F, 1.0, True, V.REAL)]
     for i in range(16):
         addr = fg.HEAP + i * 0x1000 + 0xF00  # free bytes in every heap page
@@ -294,14 +295,30 @@ def test_tc09a_sixteen_spans_without_latency_are_read_once_a_second():
 
 
 def test_tc09b_bug02_sixteen_spans_at_36ms_are_read_once_a_second():
+    """36 ms (a real PS5) is the slowest latency where 16 spans still fit in the time
+    the value's sampling leaves (L3)."""
     data = _sixteen(slow=True)._passed.pool
     assert data.late == 0, f"{data.late} late reads"
     assert _worst_gap(data) <= lk.ONCE_A_SECOND_S, _worst_gap(data)
 
 
-def test_tc10_sixteen_spans_keep_the_target_sample_budget():
-    with_pool = len(_sixteen(slow=True)._pending[1].samples)
-    without = len(_sixteen(slow=True, pool=False)._pending[1].samples)
+@pytest.mark.parametrize("latency", [0.05, 0.08])
+def test_tc09c_a_console_too_slow_for_both_reads_the_pool_late(caplog, latency):
+    """Beyond 36 ms 16 spans don't fit: the value's own readings come first (B5), late
+    pool reads are logged, and every member is read again as the test ends."""
+    caplog.set_level(logging.INFO)
+    bl = _sixteen(slow=True, latency=latency)
+    data = bl._passed.pool
+    assert data.late > 0
+    assert f"late={data.late}" in caplog.text
+    for rs in data.readings.values():
+        assert data.end_t - rs[-1].t <= lk.ONCE_A_SECOND_S + latency * data.spans
+
+
+@pytest.mark.parametrize("latency", [0.036, 0.05, 0.06, 0.08])
+def test_tc10_sixteen_spans_keep_the_target_sample_budget(latency):
+    with_pool = len(_sixteen(slow=True, latency=latency)._pending[1].samples)
+    without = len(_sixteen(slow=True, pool=False, latency=latency)._pending[1].samples)
     assert with_pool >= 0.9 * without, (with_pool, without)
 
 

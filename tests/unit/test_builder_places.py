@@ -30,7 +30,7 @@ from cheatmaker.core.cave import Effect
 from cheatmaker.core.cheats import Cheat, Location, LocationKind
 from cheatmaker.core.freezer import Freezer, LiveCheats
 from cheatmaker.core.values import ValueType
-from cheatmaker.errors import BuildFailed, ReadFailed, ScanCancelled
+from cheatmaker.errors import BuildFailed, ConnectionLost, ReadFailed, ScanCancelled
 from tests import fakegame as fg
 from tests.unit.test_builder_flow import Clock, module
 from tests.unit.test_builder_linked import fight
@@ -671,11 +671,72 @@ def test_a_hit_before_the_first_scheduled_read_still_counts_at_place_2():
     assert [m.address for m in plan.behind] == [g.third_addr]
 
 
+def _far_pool(g: fg.Game) -> lk.LinkedGroup:
+    """Health, its fraction and 15 more members 4 KiB apart: 16 spans plus place 1's
+    read of its own at place 2."""
+    members = [
+        lk.PoolMember(g.health_addr, F, 1.0, True, V.REAL),
+        lk.PoolMember(g.fraction_addr, F, 0.01, True, V.KEPT),
+    ]
+    for i in range(1, 16):  # page 0 holds the player: place 1 gets a read of its own
+        addr = fg.HEAP + i * 0x1000 + 0xF00  # free bytes in every heap page
+        g.fake.poke(fg.PID, addr, struct.pack("<f", 100.0 * i))
+        members.append(lk.PoolMember(addr, F, float(i), False, V.KEPT))
+    return lk.LinkedGroup(tuple(members))
+
+
+def _samples_without_pool(latency: float) -> int:
+    g, clock, bl = setup(pool=lambda g: None)
+    g.slow_reads(lambda s: setattr(clock, "now", clock.now + s), latency)
+    bl.watch()
+    clock.events.extend(fight(g))
+    assert bl.try_candidate(bl.next_candidate()).result is TR.PASS
+    return len(bl._pending[1].samples)
+
+
+@pytest.mark.parametrize("latency", [0.036, 0.05, 0.06, 0.08])
+def test_a_slow_console_keeps_the_value_sampled_at_place_2(latency):
+    """B5 comes first (L3): with 16 spans, the baseline and place 1's own read, the
+    place's value is read at least 90% as often as in a build without a pool; at 80 ms
+    the build still fixes both places."""
+    g, clock, bl = setup(pool=_far_pool)
+    g.slow_reads(lambda s: setattr(clock, "now", clock.now + s), latency)
+    to_place(bl, clock, g, 2)
+    clock.events.extend(fight(g))
+    assert bl.try_candidate(bl.next_candidate()).result is TR.PASS
+    data = bl._passed.pool
+    assert data.spans == 16 and (g.health_addr, F) not in data.readings, "place 1 alone"
+    with_pool = len(bl._pending[1].samples)
+    without = _samples_without_pool(latency)
+    assert with_pool >= 0.9 * without, (with_pool, without)
+    assert bl.after_pass().done
+    res = bl.finalize()
+    assert (res.places, res.linked) == (2, "fixed")
+
+
+def test_a_link_lost_in_the_closing_pool_reads_is_the_lost_path(monkeypatch):
+    """The slow console's last pool reads come after the value's sampling: a lost link
+    there ends the test as Lost, with the fix put back."""
+    g, clock, bl = setup(pool=_far_pool)
+    g.slow_reads(lambda s: setattr(clock, "now", clock.now + s), 0.08)
+    before = module(g)
+
+    def lost(self, ref):
+        raise ConnectionLost("no answer")
+
+    monkeypatch.setattr(b._PoolWatch, "stale", lost)
+    bl.watch()
+    clock.events.extend(fight(g))
+    out = bl.try_candidate(bl.next_candidate())
+    assert out.result is TR.LOST and out.rollback is b.Rollback.RESTORED, out
+    assert module(g) == before
+
+
 def test_place_2_reads_place_1_on_top_of_the_members(monkeypatch):
     """Place 1 is more than 4 KiB from every member, so it has a read of its own: that
-    read doesn't take a member's turn, and with 36 ms reads every member is still read at
-    least once a second."""
-    monkeypatch.setattr(lk, "MAX_SPAN_READS_PER_TICK", 1)
+    read doesn't take a member's turn. With no time for pool reads at all (only the
+    one-member floor) and 36 ms reads, every member is still read at least once a second."""
+    monkeypatch.setattr(lk, "POOL_SAMPLE_SHARE", -1.0)  # nothing fits: the floor only
     g, clock, bl = setup(
         pool=lambda g: lk.LinkedGroup(
             (

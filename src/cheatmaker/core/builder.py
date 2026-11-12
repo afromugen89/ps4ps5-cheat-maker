@@ -1257,6 +1257,13 @@ class Builder:
             if progress is not None:
                 progress(min(1.0, (self.clock() - t0) / TEST_S), hint)
         if pool is not None:
+            try:  # a slow console left spans unread for a while: read them as it ends
+                pool.stale(None if self.place > 1 else samples[-1].value)
+            except (ConnectionLost, ReadFailed):
+                taken = self._taken_back(inst)
+                if taken is not None:
+                    return TestOutcome(TryResult.CANCELLED, rollback=taken)
+                return self._lost(inst, game_gone=self._game_gone())
             inst.pool = pool.finish()
         data = TestData(
             self.effect,
@@ -2111,16 +2118,18 @@ class _PoolWatch:
     """L3: the pool members read during one test, about once a second each, in 4 KiB
     spans. A span is due POOL_EVERY_S after its last read (the first reads staggered
     over the first second); a tick reads the spans due by then (or within
-    POOL_EARLY_S), oldest first, at most MAX_SPAN_READS_PER_TICK. Ticks don't fall on
-    due times, so a span that would be read more than ONCE_A_SECOND_S after its last
-    read if left to the next tick is read now instead, past the limit (a large pool
-    at real latency). A member that can't
-    be read gets no value (it may be unknown at the end); after 2 such reads it isn't
-    read again in this test. Only a lost link leaves the tick (the test's Lost path).
+    POOL_EARLY_S), oldest first. Ticks don't fall on due times, so a span that would
+    be read more than ONCE_A_SECOND_S after its last read if left to the next tick
+    goes first, most overdue first. The value's own sampling (B5) comes first: a tick
+    reads only what fits in its wait plus POOL_SAMPLE_SHARE of a tick at the measured
+    read cost, but at least one member; when the console is too slow for all, spans
+    are read late and counted (``late``). A member that can't be read gets no value
+    (it may be unknown at the end); after 2 such reads it isn't read again in this
+    test. Only a lost link leaves the tick (the test's Lost path).
 
     In a later place's test the sample is that place's value, so place 1 (the
     reference) is read with the pool: in a member's span when it is within 4 KiB, else
-    in a read of its own just before, which doesn't count against the tick's limit.
+    in a read of its own just before, which doesn't take a member's turn.
     There every span is also read once as the test starts (``baseline``)."""
 
     def __init__(self, b: Builder) -> None:
@@ -2165,12 +2174,14 @@ class _PoolWatch:
             for i in range(len(self.spans))
             if self.spans[i] and not (self.ref_only and i == self.home)
         ]
-        # A span that would pass its once-a-second mark before the next tick must be read
-        # now (ticks don't fall on due times), even past the limit; the limit is filled
-        # up with the spans that are due, oldest first.
-        per_read = self.data.read_s / self.data.reads if self.data.reads else 0.0
-        reads = max(POLL_S, lk.MAX_SPAN_READS_PER_TICK * per_read)
-        nxt = start + reads + self.sample_s + lk.NEXT_TICK_SLACK_S  # the next tick's reads
+        # B5 comes first: the reads stop when one more wouldn't fit in the tick's wait
+        # plus a share of L3's 10% sample budget, at the cost measured so far (at least
+        # one member is read). A span the console is too slow for is read late, counted.
+        budget = POLL_S + lk.POOL_SAMPLE_SHARE * (POLL_S + self.sample_s)
+        # First the spans that would pass their once-a-second mark before the next
+        # tick's reads (ticks don't fall on due times), most overdue first; then the
+        # spans that are due, oldest first.
+        nxt = start + budget + self.sample_s + lk.NEXT_TICK_SLACK_S
         must = [
             i
             for _l, i in sorted((self._last(i), i) for i in members)
@@ -2181,19 +2192,50 @@ class _PoolWatch:
             for i in members
             if i not in must and self.due[i] <= start + lk.POOL_EARLY_S
         )
-        picked = must or [i for _d, i in due[: lk.MAX_SPAN_READS_PER_TICK]]
+        picked = [*must, *(i for _d, i in due)]
+        least = 1
         if self.home is not None and picked:  # the reference first, then the members
+            least = 1 if self.home in picked else 2  # its own read doesn't take a turn
             picked = [self.home, *(i for i in picked if i != self.home)]
-        for i in picked:
-            t = b.clock()
-            last = self.last_read[i]
-            if last is not None and t - last > lk.ONCE_A_SECOND_S:
-                self.data.late += 1
-            self._read(i, ref)
-            self.last_read[i] = t
-            self.due[i] = t + lk.POOL_EVERY_S
+        for n, i in enumerate(picked):
+            if n >= least and b.clock() - start + self._per_read(b.clock() - start) > budget:
+                break
+            self._timed_read(i, ref)
         self.last_cost = b.clock() - start
         self.data.read_s += self.last_cost
+
+    def stale(self, ref: float | int | None) -> None:
+        """As the test ends (the value's sampling is over): every span not read in the
+        last second, once, so a slow console doesn't leave members unknown at the end."""
+        start = self.b.clock()
+        old = [
+            i
+            for i in range(len(self.spans))
+            if self.spans[i]
+            and not (self.ref_only and i == self.home)
+            and self._last(i) + lk.ONCE_A_SECOND_S < start
+        ]
+        if self.home is not None and old:
+            old = [self.home, *(i for i in old if i != self.home)]
+        for i in old:
+            self._timed_read(i, ref)
+        self.data.read_s += self.b.clock() - start
+
+    def _timed_read(self, i: int, ref: float | int | None) -> None:
+        """A scheduled read of span ``i``: counted late past its once-a-second mark."""
+        t = self.b.clock()
+        last = self.last_read[i]
+        if last is not None and t - last > lk.ONCE_A_SECOND_S:
+            self.data.late += 1
+        self._read(i, ref)
+        self.last_read[i] = t
+        self.due[i] = t + lk.POOL_EVERY_S
+
+    def _per_read(self, this_tick: float) -> float:
+        """What a span read costs, measured so far (``this_tick``: this tick's reads,
+        not in ``read_s`` yet)."""
+        d = self.data
+        return (d.read_s + this_tick) / d.reads if d.reads else 0.0
 
     def _last(self, i: int) -> float:
         last = self.last_read[i]
@@ -2205,9 +2247,11 @@ class _PoolWatch:
         order = list(range(len(self.spans)))
         if self.home is not None:
             order = [self.home, *(i for i in order if i != self.home)]
+        start = self.b.clock()
         for i in order:
             if self.spans[i]:
                 self._read(i, None)
+        self.data.read_s += self.b.clock() - start  # the per-read cost counts these too
 
     def _read(self, i: int, ref: float | int | None) -> None:
         b = self.b
