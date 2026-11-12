@@ -477,3 +477,46 @@ tests/qa/test_game_update_qa.py was removed as its bug was fixed.
 - **Update for this version**: a name used by several cheats is numbered in the summary
   ("No death #2"), so a moved one and a failed one read apart.
 
+
+## Linked values in Make it work, steps 9-14 and review fixes (2026-11-12)
+
+Spec: docs/spec-linked-values.md, design: docs/architecture-linked-values.md.
+
+- **Later places are judged from a baseline** (`linked.judge_later`). A member that fell
+  behind in place 1's test starts place 2's test lower than factor x place 1 and would
+  look behind for ever. At place 2 and later every pool span (place 1 included) is read
+  once right after the test's start value (`_PoolWatch.baseline`); each member's readings
+  are shifted so that first reading is on the line, so only what it loses against place
+  1 during this test counts. This also works for Half damage. Place 1's tests are judged
+  with the Start factor, as designed.
+- **"Behind for 1 s in a row"** is behind readings in a row whose first and last are at
+  least `BEHIND_S` (0.75 s) apart by their times, not two readings.
+- **`POOL_EARLY_S` (0.1 s)**: a span due within 0.1 s is read on the tick before. Ticks
+  don't fall on due times: with 36 ms reads a tick is about 0.36 s, so a span is read
+  every 2 ticks (0.72 s), not every 3 (1.07 s, late).
+- **Place 1 as the reference at later places** is read in a member's span when it is
+  within 4 KiB, else in a read of its own just before, which doesn't count against
+  `MAX_SPAN_READS_PER_TICK`.
+- **Limits and the hold (L10, L11).** Once `MAX_PLACES` are fixed and a member still
+  falls, it is not held by a freeze (that would be one place too many): the result is the
+  code cheat of the kept places, `linked=partial`, the member listed "not fixed" with the
+  limit reason. Within `MAX_PLACES`, the 12-test limit, a place with no working fix, an
+  unsupported type or Only me that can't tell the player apart hold the member by a
+  freeze. Half damage never holds. A member that can't be read for the hold gives the
+  code-only partial result. A read or lock error in a linked place's watch or Collect
+  goes to the fallback, not to closing the build.
+- **`linked=`**: `none` for one place (also when every member that fell behind turned
+  out to be a copy); `fixed` for 2 or more places all in code; `freeze` when the failed
+  place is held and nothing else still falls; `partial` for Half damage, the place limit,
+  an unreadable hold, or a freeze while other clusters still fall (then the Done hint
+  adds "Some places the game keeps it in were left unfixed.").
+- **Counting tests**: `tried` keeps every try of the build (logs, `tried=` in
+  `build_result`); `place_tried` is the current place's, so the hint counts "Fix N of M
+  for place P" from 1 at each place. `tests_total` counts every test, repeats included,
+  for the 12-test limit.
+- **Words in hints only**: the L1 hint and the Advanced "done" words live in
+  `ui/hints.py`; core gives `LinkedPlan` (no text) and `PoolRow.done` (`linked.Done`).
+- **L4 verdicts** found while building a later place go back to the Find list
+  (`on_real_check`), as B1's do.
+- One `action=build_linked_result` line per place: `pass` from `after_pass`, and the
+  fallback's `fallback_freeze`, `limit` or `fail` for the place that wasn't fixed in code.
