@@ -293,9 +293,6 @@ def test_tc09a_sixteen_spans_without_latency_are_read_once_a_second():
     assert _worst_gap(data) <= lk.ONCE_A_SECOND_S + 1e-9
 
 
-@pytest.mark.xfail(
-    reason="BUG-02: 16 pool spans at 36 ms per read are read only every ~1.36 s", strict=True
-)
 def test_tc09b_bug02_sixteen_spans_at_36ms_are_read_once_a_second():
     data = _sixteen(slow=True)._passed.pool
     assert data.late == 0, f"{data.late} late reads"

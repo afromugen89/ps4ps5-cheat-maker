@@ -37,7 +37,9 @@ POOL_EARLY_S = 0.1  # ... or up to this much sooner, at the tick before (ticks d
 # fall on due times: with 36 ms reads a tick is ~0.36 s, so a span is read every 2 ticks,
 # 0.72 s, not every 3, 1.07 s; with no latency every 3 ticks, 0.75 s)
 ONCE_A_SECOND_S = 1.0  # L3: a span read later than this after its last read is late
-MAX_SPAN_READS_PER_TICK = 5
+MAX_SPAN_READS_PER_TICK = 5  # due spans read per tick, oldest first; but ...
+NEXT_TICK_SLACK_S = 0.1  # ... a span that would pass its once-a-second mark before the
+# next tick's reads (expected this much after its start) is read now, past the limit
 MAX_SPANS = 16  # spans read in one test; copy-only spans beyond this aren't watched
 BEHIND_S = 0.75  # "at least 1 s in a row": behind readings in a row spanning this long
 UNKNOWN_END_S = 2.0  # no readable reading in the last 2 s of the test: unknown

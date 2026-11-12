@@ -2107,7 +2107,10 @@ class _PoolWatch:
     """L3: the pool members read during one test, about once a second each, in 4 KiB
     spans. A span is due POOL_EVERY_S after its last read (the first reads staggered
     over the first second); a tick reads the spans due by then (or within
-    POOL_EARLY_S), oldest first, at most MAX_SPAN_READS_PER_TICK. A member that can't
+    POOL_EARLY_S), oldest first, at most MAX_SPAN_READS_PER_TICK. Ticks don't fall on
+    due times, so a span that would be read more than ONCE_A_SECOND_S after its last
+    read if left to the next tick is read now instead, past the limit (a large pool
+    at real latency). A member that can't
     be read gets no value (it may be unknown at the end); after 2 such reads it isn't
     read again in this test. Only a lost link leaves the tick (the test's Lost path).
 
@@ -2141,20 +2144,40 @@ class _PoolWatch:
         self.last_read: list[float | None] = [None] * len(self.spans)
         self.fails: dict[rc.Key, int] = {}
         self.last_cost = 0.0  # how long the last tick's reads took
+        self.t0 = now
+        self.last_tick: float | None = None
+        self.sample_s = 0.0  # what the tick's own reads (sample, alive) took, as last seen
 
     def tick(self, ref: float | int | None) -> None:
         """After the tick's sample: read the spans that are due. ``ref`` is place 1's
         value in that sample (None when it was dropped)."""
         b = self.b
         start = b.clock()
+        if self.last_tick is not None:  # a tick is: reads, sleep(POLL_S - reads), sample
+            self.sample_s = max(0.0, start - self.last_tick - max(POLL_S, self.last_cost))
+        self.last_tick = start
+        members = [
+            i
+            for i in range(len(self.spans))
+            if self.spans[i] and not (self.ref_only and i == self.home)
+        ]
+        # A span that would pass its once-a-second mark before the next tick must be read
+        # now (ticks don't fall on due times), even past the limit; the limit is filled
+        # up with the spans that are due, oldest first.
+        per_read = self.data.read_s / self.data.reads if self.data.reads else 0.0
+        reads = max(POLL_S, lk.MAX_SPAN_READS_PER_TICK * per_read)
+        nxt = start + reads + self.sample_s + lk.NEXT_TICK_SLACK_S  # the next tick's reads
+        must = [
+            i
+            for _l, i in sorted((self._last(i), i) for i in members)
+            if _l + lk.ONCE_A_SECOND_S <= nxt
+        ]
         due = sorted(
-            (d, i)
-            for i, d in enumerate(self.due)
-            if d <= start + lk.POOL_EARLY_S
-            and self.spans[i]
-            and not (self.ref_only and i == self.home)
+            (self.due[i], i)
+            for i in members
+            if i not in must and self.due[i] <= start + lk.POOL_EARLY_S
         )
-        picked = [i for _d, i in due[: lk.MAX_SPAN_READS_PER_TICK]]
+        picked = must or [i for _d, i in due[: lk.MAX_SPAN_READS_PER_TICK]]
         if self.home is not None and picked:  # the reference first, then the members
             picked = [self.home, *(i for i in picked if i != self.home)]
         for i in picked:
@@ -2167,6 +2190,10 @@ class _PoolWatch:
             self.due[i] = t + lk.POOL_EVERY_S
         self.last_cost = b.clock() - start
         self.data.read_s += self.last_cost
+
+    def _last(self, i: int) -> float:
+        last = self.last_read[i]
+        return self.t0 if last is None else last
 
     def baseline(self) -> None:
         """Every span once, the reference first, right after the test's start value:
