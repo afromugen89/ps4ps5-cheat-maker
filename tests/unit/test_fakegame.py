@@ -8,6 +8,7 @@ import pytest
 
 from cheatmaker.core.cheats import Cheat, Location, LocationKind
 from cheatmaker.core.locker import patch_landed
+from cheatmaker.core.values import ValueType
 from tests import fakegame as fg
 
 
@@ -57,3 +58,45 @@ def test_drop_code_writes_is_noticed_by_patch_landed():
     g.fake.drop_code_writes = False
     g.fake.write(fg.PID, fg.SUB_SITE, b"\x90" * 6)
     assert patch_landed(g.session, cheat)
+
+
+# -- linked values (spec-linked-values): a second place, its copies, slow reads --------------
+def test_linked_game_keeps_health_in_two_places_with_copies():
+    g = fg.build(capture_ticks=False, linked=True)
+    assert g.fraction() == 1.0 and g.fraction_addr == fg.FRAC_OBJ + fg.FRAC
+    assert g.fake.peek(fg.PID, fg.FRAC_SITE, len(fg.VMOVSS_FRAC)) == fg.VMOVSS_FRAC
+    g.damage(30.0)
+    assert g.health() == 70.0 and g.fraction() == pytest.approx(0.7)
+    g.fake.read(fg.PID, g.health_addr, 4)  # the game runs: copies worked out again
+    pct = ValueType.FLOAT.decode(g.fake.peek(fg.PID, fg.PERCENT, 4))
+    assert pct == pytest.approx(70.0)
+    for addr in fg.HUD_COPIES:
+        assert ValueType.FLOAT.decode(g.fake.peek(fg.PID, addr, 4)) == 70.0
+
+
+def test_fraction_writer_is_one_the_builder_can_hook():
+    from cheatmaker.core import builder as b
+    from cheatmaker.core.cave import Effect
+    from cheatmaker.core.locker import find_writers
+
+    g = fg.build(capture_ticks=False, linked=True)
+    writers = find_writers(g.session, g.fraction_addr, 4, 1.0)
+    assert [w.address for w in writers] == [fg.FRAC_SITE]
+    eligible, skipped = b.classify(writers, ValueType.FLOAT, Effect.NEVER_DOWN, False)
+    assert skipped == [] and eligible[0].methods == (b.Method.HOOK,)
+
+
+def test_without_linked_nothing_of_it_is_there():
+    g = fg.build(capture_ticks=False)
+    assert g.fake.peek(fg.PID, fg.FRAC_SITE, 8) == b"\xcc" * 8, "filler, no writer"
+    assert g.fake.peek(fg.PID, fg.PERCENT, 4) == bytes(4)
+    assert g.fraction_addr not in g.fake.write_hits
+
+
+def test_slow_reads_advance_the_clock_per_read():
+    g = fg.build(capture_ticks=False)
+    now = [0.0]
+    g.slow_reads(lambda s: now.__setitem__(0, now[0] + s))
+    g.fake.read(fg.PID, g.health_addr, 4)
+    g.fake.read(fg.PID, g.health_addr, 4)
+    assert now[0] == pytest.approx(2 * fg.READ_LATENCY_S)
