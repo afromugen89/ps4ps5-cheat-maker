@@ -102,6 +102,36 @@ def test_cheat_without_value_still_refuses_edit():
         c.set_value(1)
 
 
+def _locked() -> Cheat:
+    c = Cheat("Lock", [Location(LocationKind.CODE_PATCH, 0x100, b"\x90\x90", b"\x89\x08")])
+    val = struct.pack("<i", 99)
+    c.locked = Location(LocationKind.SESSION_ADDRESS, 0x2000, val, val, vtype=ValueType.INT32)
+    return c
+
+
+def test_lock_it_value_is_the_locked_number_and_edits_only_it():
+    c = _locked()
+    assert c.value == 99
+    c.set_value(300)
+    assert c.locked is not None and c.locked.on == c.locked.off == struct.pack("<i", 300)
+    assert c.locations[0].on == b"\x90\x90", "the code patch is untouched"
+    assert c.value == 300 and c.saveable
+
+
+def test_combine_drops_a_lock_it_value():
+    from cheatmaker.core.cheats import combine
+
+    both = combine([_locked(), _plain()])
+    assert both.locked is None and both.value is None
+
+
+@pytest.mark.parametrize("fmt", ["json", "shn"])
+def test_lock_it_value_is_never_saved(fmt):
+    (again,) = formats.FORMATS[fmt].loads(formats.dumps(_file(_locked()), fmt)).cheats
+    assert again.value is None and again.locked is None
+    assert again.locations[0].on == b"\x90\x90"
+
+
 # -- Save then Open --------------------------------------------------------------------
 def _plain() -> Cheat:
     loc = Location(LocationKind.MODULE_VALUE, 0x1234, struct.pack("<i", 99), bytes(4))

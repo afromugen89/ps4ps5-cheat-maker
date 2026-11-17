@@ -89,6 +89,11 @@ class Cheat:
     places: int = field(default=1, compare=False)
     """How many places a Make it work result fixes (L13). With 2 or more, Full can't be
     edited (one number can't be typed for all of them). In memory only."""
+    locked: Location | None = field(default=None, compare=False)
+    """A Lock it result's value (spec D8): where it was found this session and the
+    number it holds, as a SESSION_ADDRESS line with ``vtype`` set. Turning the cheat on
+    writes it once after the code patch, so the value stays at the number the player
+    typed. In memory only (the address moves every run); never saved, Combine drops it."""
 
     @property
     def session_only(self) -> bool:
@@ -128,6 +133,8 @@ class Cheat:
 
     @property
     def value(self) -> float | int | None:
+        if self.locked is not None and self.locked.vtype is not None:
+            return self.locked.vtype.decode(self.locked.on)
         if self.value_type is None or not self.locations:
             return None
         if self.value_at is None:
@@ -144,6 +151,10 @@ class Cheat:
         """Change the number the cheat writes (AC-5.2). Raises ValueError if it can't."""
         if self.value is None:
             raise ValueError("this cheat doesn't hold a number")
+        if self.locked is not None and self.locked.vtype is not None:
+            self.locked.on = self.locked.vtype.encode(value)
+            self.locked.off = self.locked.on  # never written back; kept the same length
+            return
         vt = self.value_type
         assert vt is not None  # self.value is None without one
         data = vt.encode(value)

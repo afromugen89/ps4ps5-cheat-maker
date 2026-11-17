@@ -533,7 +533,12 @@ def update_file(
             report.failed_at[c.name] = first_bad[0].offset
             continue
         cheats.append(
-            replace(c, locations=[lines[loc.offset] for loc in c.locations], enabled=False)
+            replace(
+                c,
+                locations=[lines[loc.offset] for loc in c.locations],
+                enabled=False,
+                locked=None,  # a Lock it value's address is the old run's only
+            )
         )
         report.moved.append(c.name)
         if any(loc.offset in guessed for loc in c.locations):

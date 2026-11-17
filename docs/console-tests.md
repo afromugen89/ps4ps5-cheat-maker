@@ -284,3 +284,15 @@ My cheats row made from one. After each test, send the log lines starting `actio
 
 The `action=build_linked_reads` line of each test says how fast the console reads the
 group (`avg_ms`, `late`): if `late` is above 0, say so (design risk 1).
+
+## C23 Lock it keeps the value (added 2026-11-17)
+
+Bug fix: after Lock it > Keep it, the cheat's value was empty and couldn't be typed. Use
+any game; Returnal health or Obolites is fine.
+
+| # | Test | Steps | Pass when | Send back |
+|---|---|---|---|---|
+| C23a | Value shows after Keep it | Find a value, press **Make a cheat**, type a number in its Value (e.g. 300), then **Lock it**: Start, change the value in the game, pick an option, **Test it**, take a hit, **Keep it**. | My cheats shows the number you typed in Value, and the game's value goes back to it straight away. Taking hits doesn't change it. | The `action=lock_test` and `action=write` log lines. |
+| C23b | Edit the locked value | Type a new number (e.g. 500) in that cheat's Value. | The game shows 500 and keeps it. | The `action=write` lines. |
+| C23c | Off and on again | Untick the cheat, take a hit (value goes down), tick it again. | Off: the game changes the value again. On: it goes back to the number in Value and stays. | The `action=write` lines. |
+| C23d | After a game restart | Restart the game, Connect again. | The lock cheat is still there, Value is empty with a tooltip saying to find the value again and press **Set**; ticking it still stops the value from changing. | Nothing, unless it fails. |

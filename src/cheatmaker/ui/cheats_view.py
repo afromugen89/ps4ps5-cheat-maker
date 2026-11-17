@@ -27,6 +27,7 @@ from cheatmaker.core import cave as cv
 from cheatmaker.core import project as pj
 from cheatmaker.core import updater as up
 from cheatmaker.core.cheats import Cheat, Location, LocationKind, combine, versions_differ
+from cheatmaker.core.locker import NOP
 from cheatmaker.core.values import parse_number
 from cheatmaker.errors import CheatMakerError, ProjectFileError
 from cheatmaker.ui import hints
@@ -62,6 +63,14 @@ def single_value(c: Cheat | None) -> bool:
         and c.anchor is None
         and len(c.locations) == 1
         and c.locations[0].kind is not LocationKind.CODE_PATCH
+    )
+
+
+def switches_off_code(c: Cheat) -> bool:
+    """Only NOPs in the game's code, like a Lock it cheat (also once opened from a file)."""
+    return bool(c.locations) and all(
+        loc.kind is LocationKind.CODE_PATCH and loc.on == bytes([NOP]) * len(loc.on)
+        for loc in c.locations
     )
 
 
@@ -220,6 +229,9 @@ class CheatsView(QWidget):
                     val.setFlags(val.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 if places:  # one Full can't be typed for every place (L8)
                     val.setToolTip(hints.BUILD_FULL_PLACES)
+                elif c.value is None and switches_off_code(c):
+                    # e.g. a Lock it cheat opened from a file: its value's place isn't known
+                    val.setToolTip(hints.LOCK_NO_VALUE)
                 self.table.setItem(i, COL_VALUE, val)
                 keeps = QTableWidgetItem(keeps_text(c))
                 keeps.setFlags(keeps.flags() & ~Qt.ItemFlag.ItemIsEditable)
