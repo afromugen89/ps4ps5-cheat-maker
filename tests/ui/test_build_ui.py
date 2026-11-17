@@ -484,6 +484,6 @@ def test_full_of_a_cheat_with_two_places_is_read_only_with_a_tooltip(win):
     win.ctl.ensure_file().cheats.extend([one, two])
     win.cheats.fill()
     first, second = (win.cheats.table.item(i, COL_VALUE) for i in (0, 1))
-    assert first.toolTip() == ""
+    assert first.toolTip() == hints.LOCK_NO_VALUE, "only NOPs: no Full to change"
     assert second.toolTip() == hints.BUILD_FULL_PLACES == "Make it work again to change Full."
     assert not second.flags() & Qt.ItemFlag.ItemIsEditable

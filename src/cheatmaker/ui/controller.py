@@ -59,6 +59,7 @@ class Controller(QObject):
         self.code_reading = False
         self._lost.connect(self.handle_lost)
         self.session.on_game_changed.append(self._on_game)
+        self._run_pid: int | None = None  # the game run Lock it values belong to
 
     # -- errors --------------------------------------------------------------
     def fail(self, exc: BaseException, action: str | None = None) -> None:
@@ -90,6 +91,11 @@ class Controller(QObject):
         self.live.trackers.clear()  # objects are somewhere else in a new run
         self.freezer.clear()
         self.frozen_addresses.clear()
+        if game is not None and game.pid != self._run_pid:  # a new game run
+            self._run_pid = game.pid
+            if self.cheat_file is not None:  # a Lock it value's address was the old run's
+                for c in self.cheat_file.cheats:
+                    c.locked = None
         if game is not None and (
             self.cheat_file is None or self.cheat_file.title_id != game.title_id
         ):

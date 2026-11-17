@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-from cheatmaker.core.cheats import Cheat
+from cheatmaker.core.cheats import Cheat, Location, LocationKind
 from cheatmaker.core.locker import (
     Writer,
     find_writers,
@@ -199,9 +199,32 @@ class LockWizard(QDialog):
             cheats.remove(self.source)
         cheats.insert(idx, self.candidate)
         self.result_cheat, self.candidate = self.candidate, None
+        held = self._hold_value(self.result_cheat)
         self.ctl.cheats_changed.emit()
-        self.ctl.message.emit(f'"{self.result_cheat.name}" now works after a restart.')
+        if held:
+            self.ctl.message.emit(f'"{self.result_cheat.name}" now works after a restart.')
         self.accept()
+
+    def _hold_value(self, cheat: Cheat) -> bool:
+        """Keep the source's value with the lock, so My cheats shows it and it can be
+        typed, and put it back now: the game may have changed it while we watched.
+        False if putting it back failed (the error is already shown)."""
+        src = self.source.locations[0]
+        vt = self.source.value_type
+        if (
+            vt is None
+            or self.source.value_at is not None
+            or src.kind is not LocationKind.SESSION_ADDRESS
+            or len(src.on) != vt.size
+        ):
+            return True
+        cheat.locked = Location(LocationKind.SESSION_ADDRESS, src.offset, src.on, src.on, vtype=vt)
+        try:
+            self.ctl.live.refresh(cheat)
+        except Exception as exc:
+            self.ctl.fail(exc, "lock")
+            return False
+        return True
 
     def reject(self) -> None:
         self._untest()

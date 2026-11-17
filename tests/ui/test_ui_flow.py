@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import struct
 from pathlib import Path
@@ -861,3 +862,55 @@ def test_save_counts_a_found_again_combined_cheat_as_app_only(win, fake):  # AC-
     assert hints.SAVE_APP_ONLY.format(n=1) in dlg.skipped.text()
     assert "This session only" not in dlg.skipped.text()
     assert [c.name for c in win.ctl.cheat_file.saveable_cheats()] == ["nop"]
+
+
+def test_lock_it_keeps_the_value_editable(win, fake):  # bug: Lock it value empty
+    connect(win)
+    search(win, "100")
+    fake.poke(PID, HEALTH_ADDR, struct.pack("<i", 99))
+    search(win, "99")
+    win.find.table.selectRow(0)
+    win.find.make_btn.click()
+    wiz = LockWizard(win.ctl, win.ctl.cheat_file.cheats[0], win)
+    wiz.start_btn.click()  # the fake game changes health while we watch
+    wiz.test_btn.click()
+    fake.poke(PID, HEALTH_ADDR, struct.pack("<i", 40))  # took a hit before Keep it
+    wiz.keep_btn.click()
+    c = win.ctl.cheat_file.cheats[0]
+    t = win.cheats.table
+    assert t.item(0, COL_VALUE).text() == "99", "the lock shows the cheat's value"
+    assert i32(fake, HEALTH_ADDR) == 99, "Keep it puts the value back"
+    assert t.item(0, COL_VALUE).flags() & Qt.ItemFlag.ItemIsEditable
+    t.item(0, COL_VALUE).setText("300")
+    assert i32(fake, HEALTH_ADDR) == 300 and c.value == 300
+    assert fake.peek(PID, WRITER_ADDR, 2) == b"\x90\x90", "the code stays switched off"
+    assert c.saveable and t.item(0, COL_KEEPS).text() == "Yes"
+    t.item(0, COL_ON).setCheckState(Qt.CheckState.Unchecked)
+    assert fake.peek(PID, WRITER_ADDR, 2) == b"\x89\x08" and i32(fake, HEALTH_ADDR) == 300
+    fake.poke(PID, HEALTH_ADDR, struct.pack("<i", 10))
+    t.item(0, COL_ON).setCheckState(Qt.CheckState.Checked)
+    assert i32(fake, HEALTH_ADDR) == 300, "on again: locked at the typed value"
+
+
+def test_lock_it_value_dropped_on_new_game_run(win, fake):
+    connect(win)
+    search(win, "100")
+    fake.poke(PID, HEALTH_ADDR, struct.pack("<i", 99))
+    search(win, "99")
+    win.find.table.selectRow(0)
+    win.find.make_btn.click()
+    wiz = LockWizard(win.ctl, win.ctl.cheat_file.cheats[0], win)
+    wiz.start_btn.click()
+    wiz.test_btn.click()
+    wiz.keep_btn.click()
+    c = win.ctl.cheat_file.cheats[0]
+    assert c.value == 99
+    win.ctl._on_game(None)  # disconnected: same run on reconnect, value kept
+    win.ctl._on_game(win.ctl.session.game)
+    assert c.value == 99
+    game = win.ctl.session.game
+    win.ctl._on_game(dataclasses.replace(game, pid=game.pid + 1))  # game restarted
+    item = win.cheats.table.item(0, COL_VALUE)
+    assert c.locked is None and c.value is None and item.text() == ""
+    assert not item.flags() & Qt.ItemFlag.ItemIsEditable
+    assert item.toolTip() == hints.LOCK_NO_VALUE

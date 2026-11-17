@@ -243,10 +243,13 @@ class LiveCheats:
                 )
             return writes
         game = self.session.require_game()
-        return [
+        writes = [
             (game.pid, loc.address(game.module_base), loc.on if on else loc.off)
             for loc in cheat.locations
         ]
+        if on and cheat.locked is not None:  # Lock it: the value, after its code patch
+            writes.append((game.pid, cheat.locked.offset, cheat.locked.on))
+        return writes
 
     def set_once(self, cheat: Cheat) -> None:
         """Write the cheat's value once (AC-4.1). Raises WriteFailed (AC-4.3)."""

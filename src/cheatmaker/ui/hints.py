@@ -30,6 +30,10 @@ LOCK_ALL_ON = (
 LOCK_NOT_LANDED = (
     "The PS5 said OK but option {n} didn't change the game's code. Try the next option."
 )
+LOCK_NO_VALUE = (
+    "This cheat switches off game code, so it has no number to type here. The value stays "
+    "at whatever it is in the game: to change it, find the value again and press Set."
+)
 LOCK_PICK = "Pick an option and press Test it. If the game acts strangely, try another."
 SAVE = "Pick a format and press Save to PC, or Send to PS5 if ftpsrv is running."
 POINTER_START = (

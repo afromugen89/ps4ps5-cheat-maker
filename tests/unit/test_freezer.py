@@ -70,6 +70,24 @@ def test_toggle_restores_off_bytes_for_code_patch(session, fake):  # AC-5.3
     assert fake.peek(PID, MODULE_BASE + 0x100, 2) == b"\x89\x08"
 
 
+def test_lock_value_written_after_patch_on_and_never_on_off(session, fake):
+    loc = Location(LocationKind.CODE_PATCH, 0x100, b"\x90\x90", b"\x89\x08")
+    c = Cheat("Lock", [loc])
+    val = struct.pack("<i", 300)
+    c.locked = Location(LocationKind.SESSION_ADDRESS, HEALTH_ADDR, val, val, vtype=ValueType.INT32)
+    live = LiveCheats(session, Freezer(session))
+    assert live._writes(c, True) == [
+        (PID, MODULE_BASE + 0x100, b"\x90\x90"),
+        (PID, HEALTH_ADDR, val),
+    ]
+    live.turn_on(c)
+    assert _i32(fake, HEALTH_ADDR) == 300
+    fake.poke(PID, HEALTH_ADDR, struct.pack("<i", 5))
+    live.turn_off(c)
+    assert fake.peek(PID, MODULE_BASE + 0x100, 2) == b"\x89\x08"
+    assert _i32(fake, HEALTH_ADDR) == 5, "off restores the code only"
+
+
 def test_refresh_after_value_edit(session, fake):
     live = LiveCheats(session, Freezer(session))
     c = _health_cheat()
