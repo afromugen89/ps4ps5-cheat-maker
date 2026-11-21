@@ -1,0 +1,120 @@
+"""UI freeze watchdog: driven by a fake clock and direct check() calls, no sleeping."""
+
+from __future__ import annotations
+
+import logging
+import threading
+
+import pytest
+
+from cheatmaker.ui import watchdog as wd
+
+
+class Clock:
+    def __init__(self) -> None:
+        self.t = 1000.0
+
+    def __call__(self) -> float:
+        return self.t
+
+
+@pytest.fixture
+def clock():
+    return Clock()
+
+
+@pytest.fixture
+def dog(qapp, clock):
+    d = wd.UiWatchdog(freeze_s=15, clock=clock)
+    yield d
+    d.stop()
+
+
+def _messages(caplog):
+    return [r for r in caplog.records if r.name == "cheatmaker.watchdog"]
+
+
+def test_no_warning_while_heartbeat_is_fresh(dog, clock, caplog):
+    with caplog.at_level(logging.INFO, logger="cheatmaker.watchdog"):
+        for _ in range(30):
+            clock.t += 1
+            dog.beat()
+            dog.check()
+        clock.t += 15  # exactly at the threshold is not a freeze yet
+        dog.check()
+    assert _messages(caplog) == []
+
+
+def test_freeze_logged_once_with_all_thread_stacks(dog, clock, caplog, monkeypatch):
+    flushed = []
+    monkeypatch.setattr(wd, "flush_handlers", lambda: flushed.append(True))
+    stop = threading.Event()
+    worker = threading.Thread(target=stop.wait, name="scan-worker", daemon=True)
+    worker.start()
+    try:
+        with caplog.at_level(logging.INFO, logger="cheatmaker.watchdog"):
+            clock.t += 16
+            dog.check()
+            clock.t += 10
+            dog.check()  # still frozen: no second warning
+    finally:
+        stop.set()
+        worker.join()
+    [rec] = _messages(caplog)
+    msg = rec.getMessage()
+    assert rec.levelno == logging.WARNING and "action=ui_frozen seconds=16" in msg
+    assert "scan-worker" in msg and "MainThread" in msg
+    assert "test_freeze_logged_once_with_all_thread_stacks" in msg, "main thread's stack"
+    assert flushed == [True]
+
+
+def test_unfrozen_logged_when_heartbeat_moves(dog, clock, caplog, monkeypatch):
+    monkeypatch.setattr(wd, "flush_handlers", lambda: None)
+    with caplog.at_level(logging.INFO, logger="cheatmaker.watchdog"):
+        clock.t += 20
+        dog.check()
+        clock.t += 22
+        dog.check()
+        dog.beat()  # UI thread is back
+        dog.check()
+        dog.check()  # nothing more
+        clock.t += 16  # a new freeze is reported again
+        dog.check()
+    recs = _messages(caplog)
+    assert [r.levelno for r in recs] == [logging.WARNING, logging.INFO, logging.WARNING]
+    assert "action=ui_unfrozen seconds=42" in recs[1].getMessage()
+
+
+def test_check_errors_do_not_kill_the_thread(dog, caplog, monkeypatch):
+    calls = []
+
+    def boom():
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("bad")
+        dog._stop.set()
+
+    monkeypatch.setattr(dog, "check", boom)
+    monkeypatch.setattr(wd, "CHECK_S", 0)
+    with caplog.at_level(logging.ERROR, logger="cheatmaker.watchdog"):
+        dog._run()
+    assert len(calls) == 2
+    assert any("action=watchdog_failed" in r.getMessage() for r in caplog.records)
+
+
+def test_start_and_stop(dog, clock, qtbot):
+    dog.start()
+    thread = dog._thread
+    assert thread is not None and thread.daemon and thread.is_alive()
+    assert dog._timer.isActive()
+    dog.start()  # second start is a no-op
+    assert dog._thread is thread
+    clock.t += 5
+    qtbot.waitUntil(lambda: dog._heartbeat == clock.t, timeout=3000)  # timer beats
+    dog.stop()
+    assert not thread.is_alive() and not dog._timer.isActive() and dog._thread is None
+
+
+def test_all_thread_stacks_names_threads():
+    text = wd.all_thread_stacks()
+    assert "--- thread MainThread" in text and "test_all_thread_stacks_names_threads" in text

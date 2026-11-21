@@ -727,6 +727,13 @@ health cheat for CheatRunner.
 | Restart the game: fixes only live in memory until then. | The PS5 stopped answering during a test. Restarting the game removes the test fix. |
 | Fix N crashed the game last time. Your game is unchanged after a restart. | Nothing to do: that fix won't be tried again. |
 
+**If the app closes by itself.** Start it again and press **Copy log** straight away:
+the log notes that the last run ended unexpectedly. Also send the file `crash.log`.
+It is in the same folder as the log, `%APPDATA%\CheatMaker\logs` (type that into the
+File Explorer address bar). It holds what the app was doing when it closed. If the window
+stops responding instead, wait about 20 seconds before closing it, so the log can note
+where it got stuck.
+
 ---
 
 ## 9. Words you'll see

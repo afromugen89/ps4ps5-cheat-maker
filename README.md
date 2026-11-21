@@ -23,7 +23,7 @@ pip install -e ".[dev]"
 python -m cheatmaker
 ```
 
-Settings and logs live in `%APPDATA%\CheatMaker`. Saved cheats go to `Documents\CheatMaker\cheats` by default.
+Settings and logs live in `%APPDATA%\CheatMaker` (`logs\cheatmaker.log`, plus `logs\crash.log` for native crashes). Saved cheats go to `Documents\CheatMaker\cheats` by default.
 
 ## How it works
 
