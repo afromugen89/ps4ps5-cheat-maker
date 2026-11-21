@@ -1210,6 +1210,8 @@ class Ps5DebugNgClient:
         if self._closed:
             return
         self._cancel_here()  # a search kept here while there was no link (cheap if none)
+        # Main's own _jobs (fallback, no link) aren't consulted: a search running on main
+        # holds its socket, so its END waits for the lock (or _end_pending), never cuts in.
         link = self._link
         if link is None:
             return

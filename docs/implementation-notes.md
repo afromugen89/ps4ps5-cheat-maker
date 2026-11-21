@@ -641,3 +641,13 @@ Review round 4:
 - Find it again keeps the player's moved?-answer when applying it was busy: it shows the
   busy message and applies it on the next tick without asking again.
 - The watchdog's `ui_frozen seconds=` counts from the wake-up after a sleep.
+
+Review round 5:
+
+- Start over (or a game change, prefill, trace result) during Check which is real
+  doesn't count as stopping a search: it sets the check's cancel and the check puts its
+  test values back and ends through `_after_check` / `_check_failed`, so the buttons come
+  back.
+- Find it again drops a kept answer once its object's pending place is gone or another,
+  shows the busy message once per kept answer, and finishes a Yes whose carry-over save
+  (`carried_yes`) was busy on a later tick.

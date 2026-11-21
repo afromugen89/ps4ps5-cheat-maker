@@ -424,6 +424,90 @@ def test_answer_given_while_the_ps5_is_busy_is_applied_next_tick(win, console, m
     assert not win.cheats.finder._answers
 
 
+def test_busy_message_for_a_held_answer_is_shown_once(win, console, monkeypatch):
+    """Review round 5: a PS5 busy for several ticks reports it once per answer."""
+    connect(win)
+    learn(win, add_health_cheat(win, console.game))
+    tick(win)
+    tracker = win.ctl.live.trackers["obj1"]
+    finder = win.cheats.finder
+    finder.ask_confirm = lambda text: True
+    accept = tracker.accept_pending
+    tries = []
+
+    def accept_busy_twice(addr):
+        tries.append(addr)
+        if len(tries) <= 2:
+            raise ConsoleBusy(BUSY_MESSAGE)
+        accept(addr)
+
+    monkeypatch.setattr(tracker, "accept_pending", accept_busy_twice)
+    failed = []
+    fail = win.ctl.fail
+    monkeypatch.setattr(
+        win.ctl, "fail", lambda exc, where: failed.append(where) or fail(exc, where)
+    )
+    tracker.pending = console.game.player
+    for _ in range(3):
+        finder.check_pending()
+    assert len(tries) == 3 and failed == ["find_again"]
+    assert tracker.pending is None and not finder._answers and not finder._told_busy
+
+
+def test_held_answer_is_dropped_once_its_question_is_gone(win, console, monkeypatch):
+    """Review round 5: an answer kept for a busy PS5 doesn't outlive its question."""
+    connect(win)
+    learn(win, add_health_cheat(win, console.game))
+    tick(win)
+    tracker = win.ctl.live.trackers["obj1"]
+    finder = win.cheats.finder
+    asked = []
+    finder.ask_confirm = lambda text: asked.append(text) or True
+
+    def busy(addr):
+        raise ConsoleBusy(BUSY_MESSAGE)
+
+    monkeypatch.setattr(tracker, "accept_pending", busy)
+    tracker.pending = console.game.player
+    finder.check_pending()
+    assert "obj1" in finder._answers
+    tracker.pending = None  # it answered itself (only one place still checks out)
+    finder.check_pending()
+    assert finder._answers == {} and finder._told_busy == set()
+    tracker.pending = console.game.player  # moved again later: a new question
+    finder.check_pending()
+    assert len(asked) == 2, "asked again, not answered by the old Yes"
+
+
+def test_yes_whose_carry_over_save_was_busy_is_finished_later(win, console, monkeypatch):
+    """Review round 5: the move was accepted but carried_yes was busy: a later tick
+    finishes it."""
+    connect(win)
+    learn(win, add_health_cheat(win, console.game))
+    tick(win)
+    tracker = win.ctl.live.trackers["obj1"]
+    finder = win.cheats.finder
+    finder.ask_confirm = lambda text: True
+    tracker.obj.check = True  # brought over from an older version: not confirmed yet
+    carried = finder.carried_yes
+    tries = []
+
+    def carried_once_busy(obj, addr):
+        tries.append(addr)
+        if len(tries) == 1:
+            raise ConsoleBusy(BUSY_MESSAGE)
+        carried(obj, addr)
+
+    monkeypatch.setattr(finder, "carried_yes", carried_once_busy)
+    tracker.pending = console.game.player
+    finder.check_pending()
+    assert tracker.pending is None and tracker.address == console.game.player
+    assert tracker.obj.check and finder._carry == {"obj1": console.game.player}
+    finder.check_pending()
+    assert not tracker.obj.check and finder._carry == {}
+    assert tries == [console.game.player] * 2 and not finder._answers
+
+
 def test_notes_from_an_older_app_drop_the_hook_and_say_so(win, console):  # re-review
     connect(win)
     learn(win, add_health_cheat(win, console.game))

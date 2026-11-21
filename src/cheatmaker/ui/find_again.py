@@ -157,6 +157,9 @@ class FindAgain(QObject):
         self._ask_still: Callable[[], bool] = lambda: True  # the open question still holds
         # Moved-value answers not applied yet (the PS5 was busy): obj id -> (place, yes)
         self._answers: dict[str, tuple[int, bool]] = {}
+        self._told_busy: set[str] = set()  # answers the busy message was shown for
+        # Yes answers to a brought-over object whose save (carried_yes) was busy: id -> place
+        self._carry: dict[str, int] = {}
         self._unreadable: Path | None = None  # a .cmproj that failed to load: kept on save
         self.by_chain: set[str] = set()  # found by a memory path: no hook needed
         self._pid: int | None = None  # the game process the bookkeeping is for
@@ -758,12 +761,16 @@ class FindAgain(QObject):
             self._check_pending()
         except ConsoleBusy as exc:  # a timer tick: the next one tries again
             log.info("action=check_pending busy: skipped")
-            if self._answers:  # the player answered: say why nothing happened yet
+            untold = self._answers.keys() - self._told_busy
+            if untold:  # the player answered: say once why nothing happened yet
+                self._told_busy |= untold
                 self.ctl.fail(exc, "find_again")
 
     def _check_pending(self) -> None:
         if self._asking or not self.ctl.session.connected:
             return
+        self._drop_stale_answers()
+        self._retry_carried()
         cheats = self.ctl.cheat_file.cheats if self.ctl.cheat_file else []
         for obj_id, tracker in list(self.ctl.live.trackers.items()):
             if tracker.pending is None:
@@ -792,18 +799,47 @@ class FindAgain(QObject):
                 # Kept until applied: a busy PS5 below must not lose the answer.
                 self._answers[obj_id] = (pend, ok)
             if tracker.pending == pend:  # else it answered itself meanwhile: moot
-                self._apply_answer(tracker, pend, ok, mine, label)
-            self._answers.pop(obj_id, None)
+                self._apply_answer(obj_id, tracker, pend, ok, mine, label)
+            self._forget_answer(obj_id)
+
+    def _forget_answer(self, obj_id: str) -> None:
+        self._answers.pop(obj_id, None)
+        self._told_busy.discard(obj_id)
+
+    def _drop_stale_answers(self) -> None:
+        """An answer is only for the question it answered: once that object's pending
+        place is gone or another, it no longer applies."""
+        trackers = self.ctl.live.trackers
+        for obj_id, (pend, _ok) in list(self._answers.items()):
+            tracker = trackers.get(obj_id)
+            if tracker is None or tracker.pending != pend:
+                self._forget_answer(obj_id)
+
+    def _retry_carried(self) -> None:
+        """Finish a Yes whose carried_yes was busy (the move itself was accepted).
+        May raise ConsoleBusy again: the next tick retries."""
+        for obj_id, addr in list(self._carry.items()):
+            tracker = self.ctl.live.trackers.get(obj_id)
+            if tracker is not None and tracker.obj.check and tracker.address == addr:
+                self.carried_yes(tracker.obj, addr)
+                self.ctl.cheats_changed.emit()
+            del self._carry[obj_id]
 
     def _apply_answer(
-        self, tracker: rf.Tracker, pend: int, ok: bool, mine: list[Cheat], label: str
+        self,
+        obj_id: str,
+        tracker: rf.Tracker,
+        pend: int,
+        ok: bool,
+        mine: list[Cheat],
+        label: str,
     ) -> None:
         """The player's answer to "is it at ``pend`` now?". May raise ConsoleBusy."""
         if ok:
             tracker.accept_pending(pend)
             if tracker.obj.check and tracker.address == pend:
-                self.carried_yes(tracker.obj, pend)
-                self.ctl.cheats_changed.emit()
+                self._carry[obj_id] = pend  # kept until carried_yes gets through
+                self._retry_carried()
             return
         kept = tracker.pending_both
         tracker.reject_pending(pend)

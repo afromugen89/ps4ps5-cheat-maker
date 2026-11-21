@@ -815,14 +815,16 @@ class FindWizard(QWidget):
 
     def do_reset(self) -> None:
         try:
-            if self._cancel is not None:  # a search is running: stop it, don't wait
+            if self._cancel is not None and not self._checking:  # a search: stop it now
                 self._cancel.set()
                 self._cancel = None
                 self._scan_gen += 1
-                self._stopping += 1  # until its worker has ended
+                self._stopping += 1  # until its worker has ended (_late_scan)
                 self.progress.setValue(0)
                 self.ctl.scanner.stop()
             else:
+                if self._cancel is not None:  # a check: it puts its test values back and
+                    self._cancel.set()  # _after_check / _check_failed end it
                 self.ctl.scanner.reset()
         except Exception as exc:
             self.ctl.fail(exc, "scan")
