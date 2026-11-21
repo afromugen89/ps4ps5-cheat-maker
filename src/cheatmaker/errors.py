@@ -31,6 +31,18 @@ class ReadFailed(CheatMakerError):
     action = "read"
 
 
+class ConsoleBusy(ReadFailed):
+    """The UI asked the PS5 for something while its connection was busy for longer than
+    the UI may wait. Not a lost connection: the player can just try again."""
+
+
+class ScanLinkLost(ReadFailed):
+    """The connection a search runs on dropped. Only the search is gone; the session
+    (reads, writes, frozen cheats) is still connected."""
+
+    action = "scan"
+
+
 class WriteFailed(CheatMakerError):
     action = "write"
 

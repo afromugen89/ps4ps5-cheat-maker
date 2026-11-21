@@ -46,7 +46,15 @@ from cheatmaker.core.real_check import (
     targets_from_list,
 )
 from cheatmaker.core.scan_log import way_label
-from cheatmaker.core.scanner import ABOUT, FEW_MATCHES, MAX_SHOW, NOTED, TOO_MANY, Match
+from cheatmaker.core.scanner import (
+    ABOUT,
+    FEW_MATCHES,
+    LOST_LINK,
+    MAX_SHOW,
+    NOTED,
+    TOO_MANY,
+    Match,
+)
 from cheatmaker.core.templates import TEMPLATES, make_cheat
 from cheatmaker.core.trace_way import Way
 from cheatmaker.core.tracer import TraceResult
@@ -1148,7 +1156,8 @@ class FindWizard(QWidget):
         self.count.setText("")
         self.table.setRowCount(0)
         self.timer.stop()
-        self.hint.setText(hints.SEARCH_LOST)
+        dropped = self.ctl.scanner.lost_why == LOST_LINK
+        self.hint.setText(hints.SEARCH_DROPPED if dropped else hints.SEARCH_LOST)
         self._update_buttons()
 
     def _new_game(self, game=None) -> None:

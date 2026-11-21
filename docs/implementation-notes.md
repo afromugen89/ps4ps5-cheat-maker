@@ -531,3 +531,43 @@ Spec: docs/spec-linked-values.md, design: docs/architecture-linked-values.md.
   (`on_real_check`), as B1's do.
 - One `action=build_linked_result` line per place: `pass` from `after_pass`, and the
   fallback's `fallback_freeze`, `limit` or `fail` for the place that wasn't fixed in code.
+
+## Searches on their own connection: the scan link (2026-11-21)
+
+Design: docs/architecture-scan-link.md. A Find-view unknown snapshot took 86-156 s per
+type on the player's PS5 while holding the client's only socket lock, so the window hung
+and frozen cheats stopped being written.
+
+- `Ps5DebugNgClient._link` is a second client to the same host/port, opened on the first
+  search (`scan_start` or `find_pointers`), authed, with the main one's `_turbo`,
+  `_engines`, `scan_connections` and `fast_scan`. The public search calls
+  (`scan_start/next/rebase/results/restrict`, `find_pointers`) run their private bodies
+  (`_start`, `_next`, ...) on it through `_run_search`; the pool, the multi-type
+  connections and `_session()` reads all belong to the link. `scan_counts` /
+  `scan_way_counts` read the link's state with no lock and never open one.
+- No link (it couldn't be opened): a warning and the search runs on the main connection,
+  as before. The next `scan_start` tries again and frees any search left on main.
+- `scan_cancel` never waits: an idle link frees its search normally; a busy link (a call
+  is running on it: `_uses` counted in `_run_search`, more exact than trying its socket
+  lock, which a scan's worker threads release between slices) is marked `_discarded`,
+  let go and its sockets (pool and multi-type too) shut down. Shutting down wakes the
+  worker's blocked recv; `_run_search` turns the error into `ScanCancelled`.
+  `close()` lets the link go the same way.
+- The link dropping (`ConnectionLost` on it) becomes `ScanLinkLost(ReadFailed)`: not a
+  lost session. `Scanner` forgets the search (its "scan lost" path, `lost_why="link"`),
+  the Find view says the search was dropped and to press Search. The next search opens a
+  new link. `_reconnect()` replaces only the main socket.
+- Backstop: reads, writes, `read_many`, maps, process list, foreground app, version and
+  the watch attach take `_main_lock()`. On the UI (main) thread it waits at most
+  `MAIN_THREAD_WAIT` (1.5 s), then raises `ConsoleBusy(ReadFailed)` "The PS5 is busy right
+  now. Try again in a moment."; other threads wait as before. The watch's Continue and
+  clean-up always wait (the game is stopped at the trap). The freezer skips a round on
+  `ConsoleBusy` instead of turning the cheat off (only reachable when `tick()` runs on
+  the UI thread).
+- Connections: main + link + pool + one per extra unknown type + one Cancel must fit
+  NG's 12 clients (`NG_CLIENT_SLOTS`, `RESERVED_SLOTS`); the pool is capped and the cap
+  logged (`action=scan_pool capped=`). At the current limits (8 scan connections, two
+  unknown types) the worst case is 11 plus the Cancel.
+- Not changed: a live-list refresh that asks for `scan_results` while a narrow-down runs
+  on the link still waits for it (as before; narrowing a few matches is quick).
+  Start over during a *first* search doesn't cancel it (the Scanner has no search yet).

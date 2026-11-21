@@ -108,6 +108,14 @@ class FakeNgServer:
         self.scan_conns: set[int] = set()  # connections that ran an exact/between scan
         self.slices: list[tuple[int, int]] = []
         self.connections = 0
+        # Scan link tests: each connection's commands, which connections hung up, and
+        # gates that hold a snapshot / a value scan until the test lets it finish.
+        self.conn_commands: dict[int, list[int]] = {}
+        self.closed: set[int] = set()
+        self.snapshot_gate = threading.Event()
+        self.snapshot_gate.set()
+        self.scan_gate = threading.Event()
+        self.scan_gate.set()
         self.fail_scan_on: set[int] = set()
         self.snapshot_fail_on: set[int] = (
             set()
@@ -145,6 +153,7 @@ class FakeNgServer:
 
     def _client(self, c, conn_no):
         self._local.conn = conn_no
+        log = self.conn_commands.setdefault(conn_no, [])
         with c:
             try:
                 while True:
@@ -152,6 +161,7 @@ class FakeNgServer:
                     assert magic == MAGIC
                     body = self._recv(c, ln) if ln else b""
                     self.commands.append(cmd)
+                    log.append(cmd)
                     if cmd == 0xDEAD:
                         return
                     if cmd == Cmd.CONSOLE_FOREGROUND_APP and self.foreground == "drop":
@@ -162,6 +172,8 @@ class FakeNgServer:
                     self._handle(c, cmd, body)
             except (EOFError, OSError):
                 return
+            finally:
+                self.closed.add(conn_no)
 
     def _read0(self, pid, addr, n):
         """NG reads what it can and leaves the rest as zeros (proc_read_mem + memset)."""
@@ -275,6 +287,7 @@ class FakeNgServer:
             c.sendall(OK)
             needle = self._recv(c, lv)
             c.sendall(OK)
+            self.scan_gate.wait(20)
             self.scan_conns.add(self._local.conn)
             self.slices.append((addr, n))
             if self._local.conn in self.fail_scan_on:
@@ -337,6 +350,7 @@ class FakeNgServer:
         c.sendall(OK + OK)  # both acks before the segment list (real NG 1.3)
         (nseg,) = struct.unpack("<I", self._recv(c, 4))
         segs = [struct.unpack("<QI", self._recv(c, 12)) for _ in range(nseg)]
+        self.snapshot_gate.wait(20)  # a long snapshot (86-156 s per type on a big game)
         fmt = {5: "<i", 7: "<q", 8: "<f", 9: "<d"}[vt]
         size = struct.calcsize(fmt)
         vals = {}
@@ -828,10 +842,10 @@ def test_a_scan_connection_that_dies_hands_its_slice_back(monkeypatch):
     server = FakeNgServer()
     cl = Ps5DebugNgClient.connect("127.0.0.1", server.port, timeout=3, scan_connections=3)
     regions = [m for m in cl.maps(PID) if m.writable]
-    cl.scan_start(PID, regions, ValueType.INT32, Compare.EXACT, 5)  # opens the pool
-    server.fail_scan_on = {2}  # the first extra connection hangs up on its next scan
+    cl.scan_start(PID, regions, ValueType.INT32, Compare.EXACT, 5)  # opens the link and pool
+    server.fail_scan_on = {3}  # the first extra connection (after main, link) hangs up
     assert cl.scan_start(PID, regions, ValueType.INT32, Compare.EXACT, 100) == 2
-    assert len(cl._pool) == 1
+    assert len(cl._link._pool) == 1
     assert cl.version() == "1.3"
     cl.close()
 
@@ -841,13 +855,14 @@ def test_extra_connections_refused_scans_on_one(monkeypatch):
     server = FakeNgServer()
     cl = Ps5DebugNgClient.connect("127.0.0.1", server.port, timeout=3, scan_connections=4)
     regions = [m for m in cl.maps(PID) if m.writable]
-    cl.port = 1  # extra connections can't be opened
+    link = cl._search_link(open_link=True)  # searches run on connection 2
+    link.port = 1  # extra connections can't be opened
     assert cl.scan_start(PID, regions, ValueType.INT32, Compare.EXACT, 100) == 2
-    assert server.scan_conns == {1} and cl._pool_failed_at is not None
-    cl.port = server.port
+    assert server.scan_conns == {2} and link._pool_failed_at is not None
+    link.port = server.port
     cl.scan_start(PID, regions, ValueType.INT32, Compare.EXACT, 100)
-    assert server.scan_conns == {1}, "no new tries right after a failure"
-    cl._pool_failed_at -= 3600
+    assert server.scan_conns == {2}, "no new tries right after a failure"
+    link._pool_failed_at -= 3600
     cl.scan_start(PID, regions, ValueType.INT32, Compare.EXACT, 100)
     assert len(server.scan_conns) > 1, "tries again later"
     cl.close()
@@ -865,7 +880,7 @@ def test_progress_waits_while_extra_connections_finish(monkeypatch):
     real = Ps5DebugNgClient._scan_slice
 
     def slow(self, *a, **k):
-        if self is not cl:
+        if self not in (cl, cl._link):  # an extra connection
             _time.sleep(0.5)
         return real(self, *a, **k)
 
@@ -1152,7 +1167,7 @@ def test_two_type_unknown_keeps_the_type_that_fit():
     server = FakeNgServer(snapshot=True)
     cl = Ps5DebugNgClient.connect("127.0.0.1", server.port, timeout=3)
     regions = [m for m in cl.maps(PID) if m.writable]
-    server.snapshot_fail_on = {server.connections + 1}  # the next (extra) connection
+    server.snapshot_fail_on = {server.connections + 2}  # the extra one, after the link
     n = cl.scan_start(PID, regions, (ValueType.FLOAT, ValueType.INT32), Compare.UNKNOWN, None)
     assert n > 0 and set(cl.scan_counts()) == {ValueType.FLOAT}
     assert len(server.residents) == 1
@@ -1163,7 +1178,7 @@ def test_two_type_unknown_fails_when_no_type_fits():
     server = FakeNgServer(snapshot=True)
     cl = Ps5DebugNgClient.connect("127.0.0.1", server.port, timeout=3)
     regions = [m for m in cl.maps(PID) if m.writable]
-    server.snapshot_fail_on = {1, 2}
+    server.snapshot_fail_on = {2, 3}  # the scan link and the extra connection
     with pytest.raises(ScanNotSupported):
         cl.scan_start(PID, regions, (ValueType.FLOAT, ValueType.INT32), Compare.UNKNOWN, None)
     assert cl.version() == "1.3"

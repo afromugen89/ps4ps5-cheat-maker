@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 
 from cheatmaker.core.cheats import Cheat
 from cheatmaker.core.session import Session
-from cheatmaker.errors import CheatMakerError, ConnectionLost, FindFailed
+from cheatmaker.errors import CheatMakerError, ConnectionLost, ConsoleBusy, FindFailed
 
 if TYPE_CHECKING:
     from cheatmaker.core.refind import Tracker
@@ -121,6 +121,9 @@ class Freezer:
                     client.write(pid, addr, data)
             except ConnectionLost:
                 raise
+            except ConsoleBusy:  # only the UI thread gets this: try again next round
+                log.info("action=freeze key=%s busy: skipped this round", key)
+                return
             except CheatMakerError as exc:
                 log.error("action=freeze key=%s reason=%s", key, exc)
                 self.unfreeze(key)

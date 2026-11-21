@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import logging
 import math
 import threading
@@ -26,7 +27,7 @@ from cheatmaker.core.values import (
     percent_parts,
     window,
 )
-from cheatmaker.errors import ConnectionLost, ScanCancelled
+from cheatmaker.errors import ConnectionLost, ScanCancelled, ScanLinkLost
 
 log = logging.getLogger(__name__)
 LOG_MATCHES = 50  # match lists this short are written to the log
@@ -63,6 +64,26 @@ def default_unit(value: float | int) -> float:
     return 10.0**exponent if isinstance(exponent, int) and exponent < 0 else 1.0
 
 
+LOST_TAKEN = "taken"  # Scanner.lost_why: another search took the console's search
+LOST_LINK = "link"  # the connection the search ran on dropped
+
+
+def _ends_if_link_lost(method):
+    """The connection the search ran on dropped (ScanLinkLost): the search is gone, so
+    forget it and tell the Find view before the error goes on. The session stays
+    connected."""
+
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        try:
+            return method(self, *args, **kwargs)
+        except ScanLinkLost:
+            self._lost(LOST_LINK)
+            raise
+
+    return wrapper
+
+
 @dataclass(frozen=True)
 class Match:
     address: int
@@ -86,14 +107,24 @@ class Scanner:
         self._clear_search()
         session.on_game_changed.append(lambda _g: self.reset())  # AC-2.3
         session.on_search_taken.append(self._taken)
-        self.on_lost: list[Callable[[], None]] = []  # the search was ended by another
+        self.on_lost: list[Callable[[], None]] = []  # the search was ended (lost_why)
+        self.lost_why = LOST_TAKEN
 
     def _taken(self) -> None:
         """Another search replaces ours on the console: forget it (no scan_cancel, the
         other one owns the console's search now) and tell the Find view."""
+        self._lost(LOST_TAKEN)
+
+    def _lost(self, why: str) -> None:
         if not self.active:
             return
-        log.info("action=scan_lost count=%s: the console's search was used for another", self.count)
+        if why == LOST_TAKEN:
+            log.info(
+                "action=scan_lost count=%s: the console's search was used for another", self.count
+            )
+        else:
+            log.info("action=scan_lost count=%s: the search connection dropped", self.count)
+        self.lost_why = why
         self._clear_search()
         for cb in list(self.on_lost):
             cb()
@@ -160,6 +191,7 @@ class Scanner:
         """Some matches are tied to a way (percent, fraction, x10, of full)."""
         return any(w is not None for _t, w in self.parts)
 
+    @_ends_if_link_lost
     def first_scan(
         self,
         value: float | int | None,
@@ -264,6 +296,7 @@ class Scanner:
         self.count = count
         return count
 
+    @_ends_if_link_lost
     def next_scan(
         self,
         cmp: Compare,
@@ -327,6 +360,7 @@ class Scanner:
         return count
 
     # -- percent search (spec-health-finding AC-P1..P3) -------------------------------
+    @_ends_if_link_lost
     def percent_scan(
         self,
         value: float | int,
@@ -358,6 +392,7 @@ class Scanner:
         (they are checked on the PC again, every way)."""
         return any(w is None for _t, w in self.parts)
 
+    @_ends_if_link_lost
     def about_scan(
         self,
         value: float | int,
@@ -373,6 +408,7 @@ class Scanner:
         self._record()
         return count
 
+    @_ends_if_link_lost
     def mark_full(
         self,
         vtype: ValueType | None = None,
@@ -573,6 +609,7 @@ class Scanner:
         )
         return count
 
+    @_ends_if_link_lost
     def stand_still(
         self,
         rounds: int | None = None,
@@ -623,7 +660,7 @@ class Scanner:
             started = time.monotonic()
             try:
                 hits = self.session.require_client().scan_results(want)
-            except ConnectionLost:
+            except (ConnectionLost, ScanLinkLost):
                 raise  # the link is gone: the UI must hear about it now
             except Exception as exc:  # the scan itself worked; only the file/log suffers
                 log.warning("action=scan_file_fetch reason=%s; scan kept", exc)
@@ -698,6 +735,7 @@ class Scanner:
         number) grouping needs before it can tell linked copies apart; 0 when it can."""
         return max(0, GROUP_SCANS - self.recorded) if self.group_size else 0
 
+    @_ends_if_link_lost
     def matches(self, limit: int | None = None) -> list[Match]:
         """Current values of up to ``limit`` matches, read fresh (AC-3.4 live list)."""
         limit = self.show_limit if limit is None else limit
