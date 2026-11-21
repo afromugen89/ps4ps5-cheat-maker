@@ -20,6 +20,7 @@ from cheatmaker.core.locker import (
     patch_landed,
     verify_original,
 )
+from cheatmaker.errors import ConsoleBusy
 from cheatmaker.ui import hints
 from cheatmaker.ui.controller import Controller
 from cheatmaker.ui.player_only_dialog import PlayerOnlyDialog
@@ -125,19 +126,26 @@ class LockWizard(QDialog):
         self._untest()
         self._update()
 
-    def _untest(self) -> None:
+    def _untest(self) -> bool:
+        """Take the tested patch out. False when the PS5 was busy: the patch is still in
+        the game, so it is kept to be taken out on the next try."""
         if self.candidate is not None and self.candidate.enabled:
             try:
                 self.ctl.live.turn_off(self.candidate)
+            except ConsoleBusy as exc:
+                self.ctl.fail(exc, "lock")
+                return False
             except Exception as exc:
                 self.ctl.fail(exc, "lock")
         self.candidate = None
+        return True
 
     def do_test(self) -> None:
         row = self.options.currentRow()
         if row < 0:
             return
-        self._untest()
+        if not self._untest():
+            return
         try:
             cheat = make_lock_cheat(self.ctl.session, self.writers[row], self.source.name)
             verify_original(self.ctl.session, cheat)
@@ -161,7 +169,8 @@ class LockWizard(QDialog):
         safe = [w for w in self.writers if not (w.unsafe or w.shared)]
         if len(safe) < 2:
             return
-        self._untest()
+        if not self._untest():
+            return
         try:
             parts = [make_lock_cheat(self.ctl.session, w, self.source.name) for w in safe]
             cheat = parts[0]
@@ -180,7 +189,8 @@ class LockWizard(QDialog):
         row = self.options.currentRow()
         if row < 0:
             return
-        self._untest()
+        if not self._untest():
+            return
         try:
             dlg = PlayerOnlyDialog(self.ctl, self.source, self.writers[row], self)
         except Exception as exc:
@@ -227,5 +237,6 @@ class LockWizard(QDialog):
         return True
 
     def reject(self) -> None:
-        self._untest()
+        if not self._untest():
+            return
         super().reject()

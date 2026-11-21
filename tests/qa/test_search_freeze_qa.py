@@ -191,11 +191,6 @@ def test_tc08_turning_off_from_the_table_while_busy_keeps_it_on_and_ticked(qtbot
 
 
 # --- BUG-01: deleting an ON cheat while busy leaves it frozen with no row -----------------
-@pytest.mark.xfail(
-    reason="BUG-01: Delete while the PS5 is busy removes the row but leaves the cheat "
-    "on (frozen/patched) with no way to turn it off",
-    strict=True,
-)
 def test_bug01_delete_while_busy_does_not_leave_an_invisible_frozen_cheat(qtbot, monkeypatch):
     fake = build_fake()
     w, ctl = _fake_win(qtbot, fake)
@@ -216,11 +211,6 @@ def test_bug01_delete_while_busy_does_not_leave_an_invisible_frozen_cheat(qtbot,
 
 
 # --- BUG-02: Lock it's "Test it" forgets a test patch it couldn't take out ---------------
-@pytest.mark.xfail(
-    reason="BUG-02: Lock it / Player only forget the tested patch when taking it out "
-    "fails with ConsoleBusy; the patch stays in the game",
-    strict=True,
-)
 def test_bug02_lock_wizard_untest_while_busy_keeps_track_of_the_test_patch(qtbot, monkeypatch):
     from cheatmaker.ui.lock_wizard import LockWizard
 
@@ -287,11 +277,6 @@ def test_tc10_refresh_during_a_first_search_answers_at_once_and_leaves_no_search
 
 
 # --- BUG-03: editing a frozen cheat's value while busy -----------------------------------
-@pytest.mark.xfail(
-    reason="BUG-03: a value typed into an ON cheat while the PS5 is busy is shown in the "
-    "table but the old value keeps being frozen in the game",
-    strict=True,
-)
 def test_bug03_value_edit_while_busy_does_not_show_a_value_that_is_not_frozen(qtbot, monkeypatch):
     from cheatmaker.ui.cheats_view import COL_VALUE
 
@@ -320,11 +305,6 @@ def test_bug03_value_edit_while_busy_does_not_show_a_value_that_is_not_frozen(qt
 
 
 # --- TC-15: Start over during a running Went down search (C24b) --------------------------
-@pytest.mark.xfail(
-    reason="BUG-04: Start over is disabled while a search runs, so C24b (Start over "
-    "during the snapshot / a Went down scan) can't be done",
-    strict=True,
-)
 def test_bug04_start_over_can_be_pressed_during_a_running_search(qtbot):
     server = FakeNgServer(snapshot=True)
     ctl = Controller(
@@ -372,11 +352,6 @@ def test_tc21_short_crashed_run_is_reported(tmp_path):
     assert logs.previous_run_ended_unexpectedly(p) is True
 
 
-@pytest.mark.xfail(
-    reason="BUG-05: a run that logged more than 256 KB after its start and then "
-    "crashed is reported as a clean exit (start line outside the tail read)",
-    strict=True,
-)
 def test_bug05_long_crashed_run_is_still_reported(tmp_path):
     p = tmp_path / "cheatmaker.log"
     lines = _log_line("action=scan_stats requests=1 ranges=1 mib=1 " + "z" * 150)
@@ -424,11 +399,6 @@ class _Clock:
         return self.t
 
 
-@pytest.mark.xfail(
-    reason="BUG-06: after the PC sleeps during a UI freeze the watchdog logs "
-    "action=ui_unfrozen although the UI never beat again",
-    strict=True,
-)
 def test_bug06_watchdog_no_false_unfrozen_after_sleep_gap(qtbot, caplog):
     clock = _Clock()
     wd = UiWatchdog(freeze_s=15.0, clock=clock)
@@ -492,11 +462,6 @@ def test_tc09_freezer_thread_never_gets_console_busy():
 
 
 # --- BUG-07: a new search on a link that died while idle fails once ----------------------
-@pytest.mark.xfail(
-    reason="BUG-07: a brand-new search fails with 'The PS5 dropped the search' when the "
-    "idle scan link was dropped earlier; pressing Search again works",
-    strict=True,
-)
 def test_bug07_new_search_after_the_idle_link_dropped_opens_a_new_link():
     server = FakeNgServer()
     cl = _connect(server, scan_connections=1)
@@ -511,11 +476,6 @@ def test_bug07_new_search_after_the_idle_link_dropped_opens_a_new_link():
 
 
 # --- BUG-08: a deferred Start over wipes a search started while it is applied ------------
-@pytest.mark.xfail(
-    reason="BUG-08: the Start over left for after a pointer pass runs outside a counted "
-    "job, so a search started at that moment is wiped right after it returns",
-    strict=True,
-)
 def test_bug08_deferred_cancel_after_a_pointer_pass_does_not_wipe_a_new_search():
     server = FakeNgServer(snapshot=True)
     cl = _connect(server, scan_connections=1)

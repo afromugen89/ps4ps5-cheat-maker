@@ -53,6 +53,7 @@ class UiWatchdog(QObject):
         self._heartbeat = clock()
         self._frozen_since: float | None = None  # heartbeat value when the freeze began
         self._last_check: float | None = None
+        self._woke_at = float("-inf")  # a new freeze is counted from here after a sleep
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._timer = QTimer(self)
@@ -69,17 +70,17 @@ class UiWatchdog(QObject):
         now = self._clock()
         last, self._last_check = self._last_check, now
         if last is not None and now - last > SLEEP_GAP_S:
-            # The PC slept: nothing beat meanwhile, but the UI isn't stuck. Count from now.
+            # The PC slept: nothing beat meanwhile. Count a new freeze from the wake-up
+            # only; the heartbeat stays as it is (only a real beat means "unfrozen").
             log.info("action=watchdog_skip gap=%d: the PC was probably asleep", round(now - last))
-            with self._lock:
-                self._heartbeat = max(self._heartbeat, now)
+            self._woke_at = now
             return
         with self._lock:
             heartbeat = self._heartbeat
             frozen_since = self._frozen_since
             if frozen_since is not None and heartbeat > frozen_since:
                 self._frozen_since = None
-            elif frozen_since is None and now - heartbeat > self.freeze_s:
+            elif frozen_since is None and now - max(heartbeat, self._woke_at) > self.freeze_s:
                 self._frozen_since = heartbeat
             else:
                 return

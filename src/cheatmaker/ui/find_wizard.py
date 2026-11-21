@@ -147,6 +147,7 @@ class FindWizard(QWidget):
         self.open_build: Callable[..., None] = lambda **kw: None  # MainWindow.open_build
         self.open_trace: Callable[..., None] = lambda **kw: None  # MainWindow.open_trace
         self._search_gen = 0  # bumped when the search ends: a running check's results drop
+        self._scan_gen = 0  # bumped by Start over: a running scan's late answer is dropped
         self._checking = False
         self.pointers: dict[Chain, ValueType] = {}  # chains followed on every refresh
         self.row_chains: list[Chain | None] = []
@@ -435,7 +436,10 @@ class FindWizard(QWidget):
         for b in self.about_btns.values():
             b.setVisible(full)
             b.setEnabled(ready and full)
-        self.new_btn.setEnabled(ready and active)
+        # Start over also stops a running search at once (C24b); not a check, which
+        # must put its test values back first (its Cancel does that).
+        scanning = busy and not self._checking
+        self.new_btn.setEnabled(self._ready() and ((active and not busy) or scanning))
         self.files_btn.setVisible(self.ctl.scanner.scan_log.enabled)
         for b in (
             self.up_btn,
@@ -624,9 +628,29 @@ class FindWizard(QWidget):
         self.progress.setFormat("%p%")
         self._started = time.monotonic()
         self._update_buttons()
-        self.ctl.tasks.run(
-            lambda: fn(self._progress.done.emit, cancel), self._after_scan, self._scan_failed
-        )
+        gen = self._scan_gen
+
+        def done(count: int) -> None:
+            if gen == self._scan_gen:
+                self._after_scan(count)
+            else:
+                self._late_scan(count)
+
+        def failed(exc: BaseException) -> None:
+            if gen == self._scan_gen:
+                self._scan_failed(exc)
+            else:
+                log.info("action=scan_late reason=%s: stopped by Start over", exc)
+
+        self.ctl.tasks.run(lambda: fn(self._progress.done.emit, cancel), done, failed)
+
+    def _late_scan(self, count: int) -> None:
+        """A scan stopped by Start over finished anyway: drop what it left, unless a new
+        search is running by now."""
+        log.info("action=scan_late count=%s: stopped by Start over, dropped", count)
+        if self._cancel is None:
+            self.ctl.scanner.reset()
+            self._update_buttons()
 
     # -- actions --------------------------------------------------------------
     def do_search(self) -> None:
@@ -773,7 +797,14 @@ class FindWizard(QWidget):
 
     def do_reset(self) -> None:
         try:
-            self.ctl.scanner.reset()
+            if self._cancel is not None:  # a search is running: stop it, don't wait
+                self._cancel.set()
+                self._cancel = None
+                self._scan_gen += 1
+                self.progress.setValue(0)
+                self.ctl.scanner.stop()
+            else:
+                self.ctl.scanner.reset()
         except Exception as exc:
             self.ctl.fail(exc, "scan")
         self.unknown_mode = False
@@ -808,9 +839,10 @@ class FindWizard(QWidget):
             self._fill_table()
             return
         try:
-            if show_matches and self.ctl.tasks.busy:
-                # A search may be running on the console's search connection: keep the
-                # last match rows instead of waiting for it (typed-in rows still update).
+            searching = getattr(self.ctl.session.client, "search_running", None)
+            if show_matches and searching is not None and searching():
+                # A search is running on the console's search connection: keep the last
+                # match rows instead of waiting for it (typed-in rows still update).
                 rows = list(self.rows[: self._n_matches])
             elif show_matches:
                 rows = sc.matches(sc.count) if groups else sc.matches()

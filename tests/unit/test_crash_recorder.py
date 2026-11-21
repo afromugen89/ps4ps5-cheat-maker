@@ -215,11 +215,14 @@ def test_previous_run_missing_log(tmp_path):
     assert logs.previous_run_ended_unexpectedly(tmp_path / "nope.log") is False
 
 
-def test_previous_run_reads_only_the_tail(tmp_path):
+def test_previous_run_finds_a_start_before_the_tail(tmp_path):
+    """QA BUG-05: a long run's start is further back than the tail that is read first."""
     path = tmp_path / "cheatmaker.log"
     filler = "x INFO scan: action=scan n=3\n" * (logs.RUN_CHECK_BYTES // 20)
     path.write_text("x action=start version=0\n" + filler, encoding="utf-8")
-    assert logs.previous_run_ended_unexpectedly(path) is False, "start rolled out of the tail"
+    assert logs.previous_run_ended_unexpectedly(path) is True, "crashed after a long run"
+    path.write_text("x action=start version=0\n" + filler + "x action=exit code=0\n")
+    assert logs.previous_run_ended_unexpectedly(path) is False
 
 
 def test_check_previous_run_logs_warning(main_log):

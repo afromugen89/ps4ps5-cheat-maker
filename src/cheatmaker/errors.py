@@ -41,6 +41,7 @@ class ScanLinkLost(ReadFailed):
     (reads, writes, frozen cheats) is still connected."""
 
     action = "scan"
+    unanswered = False  # nothing came back in the failed call: the link died while idle
 
 
 class WriteFailed(CheatMakerError):

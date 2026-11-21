@@ -658,14 +658,25 @@ class FindAgain(QObject):
             self._ours.clear()
 
     def _remove(self, obj: pj.ObjectSpec) -> None:
-        if not self.take_out(obj):
+        try:
+            out = self.take_out(obj, raise_busy=True)
+        except ConsoleBusy:  # still in and still recorded: the next after_off tries again
+            log.info("action=hook_remove object=%s busy: kept for the next try", obj.id)
+            return
+        if not out:
             self._unrecord(obj.id)
 
-    def take_out(self, obj: pj.ObjectSpec) -> bool:
+    def take_out(self, obj: pj.ObjectSpec, raise_busy: bool = False) -> bool:
         """Take ``obj``'s hook out. False if it couldn't be: then it stays recorded as
-        ours (another try on close)."""
+        ours (another try on close). ``raise_busy``: a busy PS5 (UI thread) raises
+        ConsoleBusy instead, with nothing changed."""
         try:
             ah.remove(self.ctl.session, obj, self.sleep)
+        except ConsoleBusy as exc:
+            if raise_busy:
+                raise
+            log.warning("action=hook_remove object=%s reason=%s", obj.id, exc)
+            return False
         except CheatMakerError as exc:
             log.warning("action=hook_remove object=%s reason=%s", obj.id, exc)
             return False

@@ -568,7 +568,10 @@ and frozen cheats stopped being written.
   NG's 12 clients (`NG_CLIENT_SLOTS`, `RESERVED_SLOTS`); the pool is capped and the cap
   logged (`action=scan_pool capped=`). At the current limits (8 scan connections, two
   unknown types) the worst case is 11 plus the Cancel.
-- Start over during a *first* search doesn't cancel it (the Scanner has no search yet).
+- Start over can be pressed while a Find search runs (not during Check which is real): it
+  sets the scan's cancel event, ends the console search without waiting
+  (`Scanner.stop` -> `scan_cancel`) and resets the view; the scan's late answer or error
+  is dropped (`_scan_gen`).
 
 Review fixes (PR #36):
 
@@ -600,3 +603,26 @@ Review fixes (PR #36):
   are reported; a section without it counts only when the main log shows the run ended
   unexpectedly. Identical Qt messages are logged at most once per 10 s (`repeats=N`).
   The watchdog skips a check after a gap over 10 s (the PC slept).
+
+QA round (qa/reports/2026-11-21-search-freeze.md) and re-review leftovers:
+
+- Busy keeps things as they are: Delete keeps an ON cheat's row when turning it off was
+  busy (BUG-01); Lock it / Player only keep the tested patch when taking it out was busy
+  and don't start the next test or close until it is out (BUG-02); a value typed into an
+  ON cheat is put back when it couldn't be written (BUG-03); a hook that couldn't come
+  out stays recorded for the next try (m5).
+- `cheatmaker/busy.py` holds `MAIN_THREAD_WAIT`, `BUSY_MESSAGE` and `held(lock)`; the
+  Tracker's lock uses it, so the UI thread never waits long behind the freezer thread
+  inside `Tracker.current()` (M1).
+- A TURBOSCAN_END the UI thread couldn't send (busy) is sent before the next command on
+  that socket (m2). A new search on an idle link that had died is retried once on a new
+  link when the failed call got no answer at all (BUG-07). The cancel left for after a
+  pointer pass now holds `_cancelling` like `scan_cancel` (BUG-08).
+- The live list keeps its last match rows only while a search runs on the link
+  (`search_running()`), not during any task (m3). Pointer passes run from modal dialogs
+  (Pointer scan, Find it next time), so Find's Search buttons can't start a search
+  during one (m4).
+- `previous_run_ended_unexpectedly` reads the whole log when the tail has neither a start
+  nor an exit line (BUG-05). The watchdog's sleep skip moves only its own baseline, not
+  the heartbeat, so it never logs a false `ui_unfrozen` (BUG-06).
+

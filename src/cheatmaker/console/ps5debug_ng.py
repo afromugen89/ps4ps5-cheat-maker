@@ -22,6 +22,7 @@ import time
 from collections.abc import Callable
 from enum import IntEnum
 
+from cheatmaker.busy import BUSY_MESSAGE, MAIN_THREAD_WAIT, on_ui_thread
 from cheatmaker.console.client import (
     ForegroundApp,
     MemMap,
@@ -86,10 +87,6 @@ NG_CLIENT_SLOTS = 12
 RESERVED_SLOTS = 3 + len(UNKNOWN_TYPES) - 1
 """Slots the scan pool must leave free: the main connection, the scan link, one Cancel
 connection, and one per extra type of an unknown search."""
-MAIN_THREAD_WAIT = 1.5
-"""How long the UI thread waits for the main connection before it gives up with
-ConsoleBusy (a backstop: searches run on their own connection)."""
-BUSY_MESSAGE = "The PS5 is busy right now. Try again in a moment."
 BUSY_HOLD_S = 1.0
 """After the UI thread gave up waiting, its next tries in this window wait only
 BUSY_HOLD_WAIT (several reads in one UI action must not each wait MAIN_THREAD_WAIT)."""
@@ -354,6 +351,7 @@ class _Wire:
     def __init__(self, sock: socket.socket) -> None:
         self.sock = sock
         self.last_cmd = "-"  # named in errors so a log shows which command failed
+        self.received = 0  # answers read so far: did a failed call get any answer?
 
     def send(self, data: bytes) -> None:
         try:
@@ -375,6 +373,7 @@ class _Wire:
             if not chunk:
                 raise ConnectionLost(f"the PS5 closed the connection after {self.last_cmd}")
             buf += chunk
+        self.received += 1
         return bytes(buf)
 
     def close(self) -> None:
@@ -441,6 +440,7 @@ class Ps5DebugNgClient:
         self._cancel_pending = False
         self._discarded = False
         self._busy_until = 0.0  # UI-thread tries give up at once until then
+        self._end_pending = False  # TURBOSCAN_END to send before the next command
         self._pool_capped_logged = False
         # The PS5 dials back here for watchpoint hits. Tests set 0 (any free port) and
         # read the one bound from interrupt_bound.
@@ -587,6 +587,7 @@ class Ps5DebugNgClient:
             link._jobs[kind] += 1
             catch_up = kind == SEARCH and link._cancel_pending
             link._cancel_pending = link._cancel_pending and not catch_up
+        wire, answers = link._w, link._w.received
         try:
             if link._discarded:
                 raise ScanCancelled("the search was stopped")
@@ -602,7 +603,10 @@ class Ps5DebugNgClient:
                 if self._link is link:
                     self._link = None
                 link._abort()
-                raise ScanLinkLost(f"the search connection dropped: {exc}") from exc
+                lost = ScanLinkLost(f"the search connection dropped: {exc}")
+                # Not one answer on it in this call: it was dead before the call began.
+                lost.unanswered = link._w is wire and wire.received == answers
+                raise lost from exc
             raise
         finally:
             self._end_job(link, kind)
@@ -616,10 +620,18 @@ class Ps5DebugNgClient:
         with link._use:
             link._jobs[kind] -= 1
             catch_up = link._cancel_pending and not any(link._jobs.values())
-            if catch_up:
+            if catch_up:  # like scan_cancel: new calls wait until the search is freed
                 link._cancel_pending = False
-        if catch_up and not link._discarded:
-            link._cancel_here()  # the Start over that came during a pointer pass
+                link._cancelling = True
+        if not catch_up:
+            return
+        try:
+            if not link._discarded:
+                link._cancel_here()  # the Start over that came during a pointer pass
+        finally:
+            with link._use:
+                link._cancelling = False
+                link._use.notify_all()
 
     def _discard(self, link: Ps5DebugNgClient) -> None:
         """Let ``link`` go without waiting: a search running on it fails at once."""
@@ -634,7 +646,7 @@ class Ps5DebugNgClient:
         """The socket lock. The UI thread waits at most MAIN_THREAD_WAIT, then gets
         ConsoleBusy (the window must not hang), and for BUSY_HOLD_S after that it
         waits only BUSY_HOLD_WAIT; other threads (freezer, searches) wait as long as it takes."""
-        if threading.current_thread() is threading.main_thread():
+        if on_ui_thread():
             busy = time.monotonic() < self._busy_until
             got = self._lock.acquire(timeout=BUSY_HOLD_WAIT if busy else MAIN_THREAD_WAIT)
             if not got:
@@ -644,6 +656,8 @@ class Ps5DebugNgClient:
         else:
             self._lock.acquire()
         try:
+            if self._end_pending:  # a snapshot ended while this socket was busy
+                self._send_end()
             yield
         finally:
             self._lock.release()
@@ -1145,7 +1159,20 @@ class Ps5DebugNgClient:
                 self._cancel_here()  # a search kept here while no link could be opened
             return c._start(pid, regions, vtype, cmp, value, progress, cancel, ways)
 
-        return self._run_search(start, open_link=True)
+        try:
+            return self._run_search(start, open_link=True)
+        except ScanLinkLost as exc:
+            if not exc.unanswered:
+                raise
+            # The link died while idle (the PS5 dropped it between searches): nothing of
+            # this search ran, so start it once more on a new link.
+            log.info("action=scan_link_retry: the idle link was gone; opening a new one")
+            return self._run_search(start, open_link=True)
+
+    def search_running(self) -> bool:
+        """A search (not a pointer pass) is running on the scan link right now."""
+        link = self._link
+        return link is not None and link._jobs[SEARCH] > 0
 
     def scan_next(
         self,
@@ -1621,7 +1648,18 @@ class Ps5DebugNgClient:
         if self._resident is None:
             return
         self._resident = None
-        with contextlib.suppress(Exception), self._locked():
+        try:
+            with self._locked():
+                self._send_end()
+        except ConsoleBusy:  # UI thread: free it before the next command instead
+            self._end_pending = True
+        except Exception:  # the link is gone: the console frees it with the socket
+            log.debug("action=snapshot_end failed", exc_info=True)
+
+    def _send_end(self) -> None:
+        """Free the console's snapshot (call holding the lock)."""
+        self._end_pending = False
+        with contextlib.suppress(ConnectionLost, ProtocolError):
             self._w.request(Cmd.TURBOSCAN_END)
             self._w.status()
 

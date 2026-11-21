@@ -145,6 +145,17 @@ class Scanner:
                 log.debug("scan_cancel failed during reset", exc_info=True)
         self._clear_search()
 
+    def stop(self) -> None:
+        """Start over while a search may be running: end the console's search without
+        waiting (a running one ends with ScanCancelled) and forget ours."""
+        client = self.session.client
+        if client is not None:
+            try:
+                client.scan_cancel()
+            except Exception:  # dropping a dead session must not raise
+                log.debug("scan_cancel failed during stop", exc_info=True)
+        self._clear_search()
+
     def _clear_search(self) -> None:
         self.vtype, self.count, self.history = None, None, []
         self.types = {}

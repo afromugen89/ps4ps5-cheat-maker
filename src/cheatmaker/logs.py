@@ -260,14 +260,20 @@ def uninstall_native_crash_log() -> None:
 def previous_run_ended_unexpectedly(path: Path | None = None) -> bool:
     """True when the last ``action=start`` in the log has no ``action=exit`` after it.
 
-    Call before logging this run's start. Reads only the tail of the file.
+    Call before logging this run's start. Reads the tail of the file, or all of it
+    when the tail holds neither line (a run that logged a lot).
     """
     path = path or log_file_path()
     try:
         with path.open("rb") as f:
             f.seek(0, os.SEEK_END)
-            f.seek(max(0, f.tell() - RUN_CHECK_BYTES))
+            size = f.tell()
+            f.seek(max(0, size - RUN_CHECK_BYTES))
             text = f.read().decode("utf-8", errors="replace")
+            if START_MARKER not in text and EXIT_MARKER not in text and size > RUN_CHECK_BYTES:
+                # A long run: its start is further back. The file is at most MAX_BYTES.
+                f.seek(0)
+                text = f.read().decode("utf-8", errors="replace")
     except OSError:
         return False
     start = text.rfind(START_MARKER)

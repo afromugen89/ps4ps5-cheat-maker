@@ -325,8 +325,13 @@ class CheatsView(QWidget):
                 if old != name:
                     self.finder.renamed(c, old)
             elif item.column() == COL_VALUE:
+                saved = _value_bytes(c)
                 c.set_value(parse_number(item.text()))
-                self.ctl.live.refresh(c)
+                try:
+                    self.ctl.live.refresh(c)
+                except ConsoleBusy:  # the game still holds the old value: show that
+                    _restore_value_bytes(c, saved)
+                    raise
                 self.finder.cheat_changed(c)
         except Exception as exc:
             self.ctl.fail(exc, "toggle" if item.column() == COL_ON else "edit")
@@ -362,6 +367,9 @@ class CheatsView(QWidget):
             if c.enabled:
                 try:
                     self.ctl.live.turn_off(c)
+                except ConsoleBusy as exc:  # still on in the game: keep its row
+                    self.ctl.fail(exc, "toggle")
+                    continue
                 except Exception as exc:
                     self.ctl.fail(exc, "toggle")
             self.cheats.remove(c)
@@ -578,3 +586,20 @@ class CheatsView(QWidget):
         self._update_buttons()
         self.fill()
         self.ctl.fail(exc, "update_version")
+
+
+_ValueBytes = tuple[list[tuple[bytes, bytes]], tuple[bytes, bytes] | None]
+
+
+def _value_bytes(c: Cheat) -> _ValueBytes:
+    """What ``set_value`` changes, to put back when the new value couldn't be written."""
+    locked = (c.locked.on, c.locked.off) if c.locked is not None else None
+    return [(loc.on, loc.off) for loc in c.locations], locked
+
+
+def _restore_value_bytes(c: Cheat, saved: _ValueBytes) -> None:
+    locs, locked = saved
+    for loc, (on, off) in zip(c.locations, locs, strict=True):
+        loc.on, loc.off = on, off
+    if locked is not None and c.locked is not None:
+        c.locked.on, c.locked.off = locked

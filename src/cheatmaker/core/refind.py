@@ -30,6 +30,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 
+from cheatmaker.busy import held
 from cheatmaker.console.client import MemMap, ProgressFn
 from cheatmaker.core import anchor_hook as ah
 from cheatmaker.core import cave as cv
@@ -515,7 +516,7 @@ class Tracker:
 
         ``on_lost`` runs after the lock is released, so its console I/O (e.g. putting
         the hook in) never holds up another thread asking where the object is."""
-        with self._lock:
+        with held(self._lock):  # the UI thread waits at most MAIN_THREAD_WAIT
             addr, lost = self._current()
         if lost and self.on_lost is not None:
             self.on_lost()
@@ -638,7 +639,7 @@ class Tracker:
     def accept_pending(self, expected: int | None = None) -> None:
         """The player confirmed the new place. With ``expected``, only if the question
         is still about that place (it may have answered itself meanwhile)."""
-        with self._lock:
+        with held(self._lock):  # the UI thread waits at most MAIN_THREAD_WAIT
             if expected is not None and self.pending != expected:
                 return
             if self.pending is not None:
@@ -648,7 +649,7 @@ class Tracker:
     def reject_pending(self, expected: int | None = None) -> None:
         """Not it. If the old place still verified, keep it and never ask about that
         other object again; otherwise forget both and stay paused until a new search."""
-        with self._lock:
+        with held(self._lock):  # the UI thread waits at most MAIN_THREAD_WAIT
             if expected is not None and self.pending != expected:
                 return
             if self.pending_both and self.pending is not None:

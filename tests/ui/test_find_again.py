@@ -1226,3 +1226,27 @@ def test_busy_console_on_tick_refinds_nothing_and_puts_no_hook_in(win, console, 
     tick(win)  # not busy any more: the broken path is noticed and the hook goes in
     assert run2.fake.peek(fg.PID, fg.READER, 1) == b"\xe9"
     assert "obj1" not in win.cheats.finder.by_chain
+
+
+def test_hook_that_cant_come_out_while_busy_is_tried_again(win, console, monkeypatch):
+    """Re-review m5: a busy PS5 keeps the hook recorded, so the next off takes it out."""
+    from cheatmaker.errors import ConsoleBusy
+
+    connect(win)
+    cheat = add_health_cheat(win, console.game)
+    learn(win, cheat)
+    tick(win)
+    assert "obj1" in win.cheats.finder.installed
+    finder = win.cheats.finder
+
+    def busy(*_a, **_k):
+        raise ConsoleBusy("busy")
+
+    with monkeypatch.context() as m:
+        m.setattr(console.game.fake, "read", busy)
+        finder._remove(finder.installed["obj1"])
+    assert "obj1" in finder.installed, "kept for the next try"
+    assert console.game.fake.peek(fg.PID, fg.READER, 1) == b"\xe9"
+    finder._remove(finder.installed["obj1"])
+    assert "obj1" not in finder.installed
+    assert console.game.fake.peek(fg.PID, fg.READER, 10) == fg.VMOVSS_R

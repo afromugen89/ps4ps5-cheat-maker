@@ -128,7 +128,7 @@ class Freezer:
                         client.write(pid, addr, data)
             except ConnectionLost:
                 raise
-            except ConsoleBusy:  # only the UI thread gets this: try again next round
+            except ConsoleBusy:  # defensive: the freezer's own thread waits, never gets this
                 log.info("action=freeze key=%s busy: skipped this round", key)
                 continue
             except CheatMakerError as exc:

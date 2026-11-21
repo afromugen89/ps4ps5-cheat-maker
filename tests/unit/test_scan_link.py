@@ -591,3 +591,65 @@ def test_default_connections_fit_in_the_consoles_slots():
     # main + link + pool + one extra per unknown type + one Cancel
     most = 2 + (ps5debug_ng.MAX_SCAN_CONNECTIONS - 1) + ps5debug_ng.RESERVED_SLOTS - 3 + 1
     assert most <= ps5debug_ng.NG_CLIENT_SLOTS
+
+
+# re-review leftovers ----------------------------------------------------------------
+def test_ui_thread_does_not_wait_long_for_a_tracker_the_freezer_holds():
+    """M1: the freezer thread is inside Tracker.current() waiting on the socket; the UI
+    thread asking the same tracker (a confirm) gets ConsoleBusy instead of hanging."""
+    from cheatmaker.core import project as pj
+    from cheatmaker.core import refind as rf
+
+    server = FakeNgServer()
+    session = Session(lambda ip, port: _connect(server))
+    session.connect("127.0.0.1")
+    session.refresh_game()
+    field = pj.Field("Health", 0, ValueType.INT32)
+    obj = pj.ObjectSpec("o", "Health", None, [field])
+    tracker = rf.Tracker(session, obj, HEALTH_ADDR)
+    assert tracker.current() == HEALTH_ADDR
+    holder, release = _hold_main(session.client)
+    inside = _Bg(tracker.current)  # like the freezer: holds the tracker, waits on the PS5
+    _wait(lambda: tracker._lock.locked())
+    try:
+        t0 = time.monotonic()
+        with pytest.raises(ConsoleBusy):
+            tracker.current()
+        assert time.monotonic() - t0 < 3.0
+    finally:
+        release.set()
+        holder.join()
+    inside.join()
+    assert inside.result == HEALTH_ADDR and tracker.current() == HEALTH_ADDR
+    session.disconnect()
+
+
+def test_snapshot_end_left_by_a_busy_ui_thread_is_sent_first_next_time():
+    """m2: a TURBOSCAN_END the UI thread couldn't send isn't lost."""
+    server = FakeNgServer(snapshot=True)
+    cl = _connect(server)
+    cl.port = 1  # no link: the snapshot is kept on the main connection
+    cl.scan_start(PID, _regions(cl), ValueType.INT32, Compare.UNKNOWN, None)
+    assert server.residents
+    holder, release = _hold_main(cl)
+    try:
+        cl.scan_cancel()  # UI thread, socket busy: END can't go now
+    finally:
+        release.set()
+        holder.join()
+    assert server.residents and cl._end_pending
+    assert cl.read(PID, HEALTH_ADDR, 4) == struct.pack("<i", 100)
+    assert not server.residents and not cl._end_pending, "END went first"
+    cl.close()
+
+
+def test_search_running_is_only_a_search_on_the_link():
+    server = FakeNgServer(snapshot=True)
+    cl = _connect(server)
+    assert not cl.search_running()
+    bg = _gated_unknown(server, cl)
+    assert cl.search_running()
+    server.snapshot_gate.set()
+    bg.join()
+    assert not cl.search_running()
+    cl.close()
