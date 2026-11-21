@@ -27,7 +27,7 @@ from cheatmaker.core.cheats import Cheat, Location, LocationKind
 from cheatmaker.core.scanner import Scanner
 from cheatmaker.core.session import Session
 from cheatmaker.core.values import Compare, ValueType
-from cheatmaker.errors import ConsoleBusy
+from cheatmaker.errors import ConsoleBusy, ReadFailed
 from cheatmaker.settings import Settings
 from cheatmaker.ui import messages
 from cheatmaker.ui.cheats_view import COL_ON
@@ -251,7 +251,6 @@ def _restart_game(server, new_pid):
     f.remove_process(PID)
 
 
-@pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
 def test_tc10_refresh_during_a_first_search_answers_at_once_and_leaves_no_search():
     """TC-10: Refresh after a game restart no longer waits behind the snapshot; the old
     run's search does not become the new run's (the old process is gone, so the fake's
@@ -261,6 +260,15 @@ def test_tc10_refresh_during_a_first_search_answers_at_once_and_leaves_no_search
     session = Session(lambda ip, port: _connect(server))
     session.connect("127.0.0.1")
     session.refresh_game()
+    handle = server._handle
+
+    def hang_up_on_gone_process(c, cmd, body):  # like NG: no process, the client is dropped
+        try:
+            return handle(c, cmd, body)
+        except ReadFailed as exc:
+            raise EOFError from exc
+
+    server._handle = hang_up_on_gone_process
     sc = Scanner(session)
     server.snapshot_gate.clear()
     bg = _Bg(lambda: sc.first_scan(None, ValueType.INT32))
@@ -595,4 +603,63 @@ def test_bug09_live_list_does_not_wait_on_the_link_during_a_pointer_pass(qtbot):
         assert took < FAST, f"the window waited {took:.1f} s"
     finally:
         server.scan_gate.set()
+        ctl.shutdown()
+
+
+# --- Final re-test of 35b6113 -----------------------------------------------------------
+@pytest.mark.xfail(
+    reason="BUG-10: a TURBOSCAN_END answered after the read timeout is swallowed by "
+    "_end_resident and the socket kept; the next search reads the stale status, hangs "
+    "for SCAN_TIMEOUT and fails with 'The PS5 dropped the search'",
+    strict=True,
+)
+def test_bug10_slow_snapshot_end_does_not_desync_the_next_search(monkeypatch):
+    monkeypatch.setattr(ps5debug_ng, "IO_TIMEOUT", 0.3)  # real: 4 s
+    monkeypatch.setattr(ps5debug_ng, "SCAN_TIMEOUT", 2.0)  # real: 60 s
+    server = FakeNgServer(snapshot=True)
+    handle = server._handle
+
+    def slow_end(c, cmd, body):
+        if cmd == Cmd.TURBOSCAN_END:
+            time.sleep(0.6)  # freeing a big snapshot takes longer than the read timeout
+        return handle(c, cmd, body)
+
+    server._handle = slow_end
+    cl = _connect(server, scan_connections=1)
+    regions = _regions(cl)
+    try:
+        assert cl.scan_start(PID, regions, ValueType.INT32, Compare.UNKNOWN, None) > 0
+        cl.scan_cancel()  # Start over: TURBOSCAN_END times out on the PC side
+        time.sleep(0.5)  # its answer arrives late and waits on the socket
+        t0 = time.monotonic()
+        assert cl.scan_start(PID, regions, ValueType.INT32, Compare.EXACT, 100) == 2
+        assert time.monotonic() - t0 < 1.0
+    finally:
+        cl.close()
+
+
+def test_rt05_start_over_twice_then_reconnect_leaves_search_usable(qtbot):
+    """RT-05: the 'stopping' gate always opens again: Start over pressed twice, then
+    Connect again, and Search works."""
+    server = FakeNgServer(snapshot=True)
+    w, ctl = _ng_win(qtbot, server)
+    try:
+        server.snapshot_gate.clear()
+        w.find.do_unknown()
+        qtbot.waitUntil(lambda: _sent(server, LINK, {Cmd.TURBOSCAN_START}), timeout=5000)
+        w.find.new_btn.click()
+        assert w.find.new_btn.isEnabled()  # still offered while the stopped one ends
+        w.find.new_btn.click()
+        server.snapshot_gate.set()
+        qtbot.waitUntil(lambda: not ctl.tasks.busy, timeout=5000)
+        assert w.find._stopping == 0 and w.find.search_btn.isEnabled()
+        w.connect_view.connect_btn.click()  # Connect again
+        qtbot.waitUntil(lambda: ctl.session.game is not None and not ctl.tasks.busy, timeout=5000)
+        qtbot.wait(50)
+        w.find.number.setText("100")
+        w.find.search_btn.click()
+        qtbot.waitUntil(lambda: not ctl.tasks.busy and ctl.scanner.active, timeout=5000)
+        assert ctl.scanner.count == 2
+    finally:
+        server.snapshot_gate.set()
         ctl.shutdown()

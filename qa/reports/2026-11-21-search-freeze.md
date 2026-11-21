@@ -5,9 +5,11 @@
 - Design: docs/architecture-scan-link.md. Notes: docs/implementation-notes.md ("Searches on their own connection" and the PR #36 review fixes). Console tests: C24 in docs/console-tests.md.
 - Code: console/ps5debug_ng.py (scan link, `_locked`, `batch`, cancel and discard), core/freezer.py (turn_off, the freezer hold), core/scanner.py (ScanLinkLost), the `ConsoleBusy` re-raises in core/*, ui/find_wizard.py, ui/find_again.py, ui/cheats_view.py, ui/watchdog.py, logs.py (crash recorder), app.py
 - Environment: Linux 6.18, Python 3.13.18, PySide6 6.12.0, Qt offscreen. Uses the real `Ps5DebugNgClient` against `FakeNgServer` (with gated snapshot, narrow-down, value scan and auth), and `FakeConsole` for UI flows.
-- Automated tests: `tests/qa/test_search_freeze_qa.py` (first round: 13 pass, 8 strict xfail; re-test: 23 pass, 1 strict xfail)
-- Full suite: baseline 2421 passed, 3 skipped. First round: 2434 passed, 3 skipped, 8 xfailed. **Re-test on 16b8499: 2450 passed, 3 skipped, 1 xfailed**
+- Automated tests: `tests/qa/test_search_freeze_qa.py` (first round: 13 pass, 8 strict xfail; re-test: 23 pass, 1 strict xfail; final re-test: 25 pass, 1 strict xfail)
+- Full suite: baseline 2421 passed, 3 skipped. First round: 2434 passed, 3 skipped, 8 xfailed. Re-test on 16b8499: 2450 passed, 3 skipped, 1 xfailed. **Final re-test on 35b6113: 2460 passed, 3 skipped, 1 xfailed**
 
+> **Final re-test on `35b6113`:** BUG-09 is fixed and the Start over flow works. One new Low bug was found (BUG-10). Final recommendation: **Ready with known issues** (one Low). See "Final re-test of 35b6113" at the end.
+>
 > **Re-test 2026-11-21 on `16b8499`:** all 8 bugs are fixed and verified. One new bug was found in the fix (BUG-09, Medium). See "Re-test of 16b8499" at the end.
 
 ## Product owner summary
@@ -290,6 +292,58 @@ Commit `16b8499` ("Fix QA BUG-01..08 and re-review leftovers") was re-tested.
 - **R8.** `_send_end` suppresses ConnectionLost, which includes a 4 s receive timeout. If a big snapshot takes longer than 4 s to free, the late END status could stay queued ahead of the next answer on that socket. The old `_end_resident` already suppressed every error, so this risk is not new. Worth watching in C24 (`action=snapshot_end`).
 - **R9.** BUG-02's fix means Lock it / Player only can't be closed while the PS5 stays busy (fallback mode, a long attach). The busy message is shown each time. That was the intended trade-off.
 
-### Final recommendation (re-test)
+### Recommendation after the 16b8499 re-test (superseded below)
 
 **Ready with known issues.** All eight first-round bugs are fixed and stay covered by tests, and the two High bugs (cheats left on with no row or reference) are gone. BUG-09 is a Medium performance regression that only shows during pointer passes, or when the link can't be opened. It should be fixed soon, but it doesn't change any game state.
+
+## Final re-test of 35b6113 (2026-11-21)
+
+Commit `35b6113` ("Scan link review round 4") was reviewed with `git diff 72054a2..35b6113`. It changes:
+- `search_running()`: now counts every job, and also jobs on the main connection when there is no link
+- `_send_end`: now raises its errors
+- the Find view's "stopping" gate after Start over, with progress tagged by `_scan_gen`
+- the find-again "it moved" answers: kept in `_answers` until applied, with a busy message
+- the watchdog's freeze length after a sleep
+
+**Change to my RT-01 test:** right after Start over, Search is now disabled until the stopped search's worker has ended. The test asserts that, then that Search is enabled again and the next search works. It still checks what it was written to check: the window answers at once, no error is shown, and a new search works. I accept the change.
+
+### Results
+
+| ID | Title | Priority | Result |
+|---|---|---|---|
+| BUG-09 | Live list during a pointer pass | Medium | Fixed: `test_bug09_...` passes and the tick takes under 0.5 s |
+| RT-01 | Start over during a running first search: the window answers at once, no error, Search is gated until the stopped search's worker ends, then the next search works | High | Pass |
+| RT-02 | Start over is greyed out during Check which is real | Medium | Pass |
+| RT-05 | Start over twice, then Connect again: the gate opens again and a search works | Medium | Pass (new) |
+| RT-06 | A snapshot END answered after the read timeout, then a new search | Low | **Fail: BUG-10** (new) |
+| RT-07 | Every earlier test case and BUG-01 to BUG-08 | High | Pass |
+| RT-08 | Full suite | High | Pass: 2460 passed, 3 skipped, 1 xfailed (BUG-10) |
+
+I also fixed my own TC-10. The fake server now hangs up cleanly when the game process is gone, instead of raising in its thread. Five runs in a row produced no unhandled-thread warning.
+
+### BUG-10: A slow snapshot END leaves its answer on the socket, so the next search hangs for 60 s and fails
+- Severity: Low
+- Priority: P3
+- Related test case: RT-06 | Automated test: `tests/qa/test_search_freeze_qa.py::test_bug10_slow_snapshot_end_does_not_desync_the_next_search`
+- Environment: `35b6113`, Linux, Python 3.13.18. The test shortens the timeouts: `IO_TIMEOUT` is 0.3 s instead of 4 s, and `SCAN_TIMEOUT` is 2 s instead of 60 s.
+- Steps to reproduce:
+  1. Keep an unknown search on the link.
+  2. The fake answers TURBOSCAN_END 0.6 s late, which is longer than the read timeout.
+  3. Call `scan_cancel()`, the same call Start over makes.
+  4. Start an exact search.
+- Expected result: the new search works (2 matches) in under 1 s. If the END fails, that link must not be used again; then the BUG-07 retry opens a new link.
+- Actual result: the late END status is read as the TURBOSCAN_START answer, the stream is out of step, and the search waits `SCAN_TIMEOUT` (60 s on the real client). It then fails with `ScanLinkLost: receive failed after TURBOSCAN_START: timed out`. The BUG-07 retry doesn't apply, because an answer did come back. The search after that works.
+- Suspected cause: `ps5debug_ng.py` `_end_resident`. 35b6113 made `_send_end` raise ConnectionLost "so its late answer isn't read as the next command's", but `_end_resident`'s `except Exception` swallows it and keeps the socket. The deferred path (`_locked` → `_send_end`) does raise, and that is fine. Possible fix: on a non-busy failure in `_end_resident`, close or abort that connection (`self._w.close()`, or `_abort()` for a link), so the next call fails at once and is retried.
+- Impact for the product owner: only if the PS5 needs more than 4 s to free a big snapshot (not verified on the console). The next search after Start over then hangs for about a minute and fails once.
+
+### Observations
+- **R10.** With no scan link (fallback mode), a search on the main connection can't be stopped at once. Start over sets Cancel, and the snapshot notices it at the console's next progress update. Until then, the Start-over gate keeps Search disabled. This is the expected fallback behaviour (logged as `action=scan_link` warnings).
+- R7 is resolved: a busy moment after answering the "it moved" question now keeps the answer, applies it on the next tick and shows the busy message.
+- R8 is partly resolved: the deferred END now raises, but the direct END path still swallows errors (BUG-10).
+
+### Final recommendation
+
+**Ready with known issues.**
+- BUG-01 to BUG-09 are fixed and covered by tests that now pass.
+- The only open bug is BUG-10 (Low). It needs a console that takes more than 4 s to answer TURBOSCAN_END. It costs one failed search and loses no game state.
+- Before release, run console tests C24a to C24c, and note in them any `action=snapshot_end` or `scan_link_lost` lines.
