@@ -607,13 +607,13 @@ def test_bug09_live_list_does_not_wait_on_the_link_during_a_pointer_pass(qtbot):
 
 
 # --- Final re-test of 35b6113 -----------------------------------------------------------
-@pytest.mark.xfail(
-    reason="BUG-10: a TURBOSCAN_END answered after the read timeout is swallowed by "
-    "_end_resident and the socket kept; the next search reads the stale status, hangs "
-    "for SCAN_TIMEOUT and fails with 'The PS5 dropped the search'",
-    strict=True,
+@pytest.mark.parametrize(
+    "end_delay",
+    [0.6, 2.5],  # past the read timeout (now waited for) / past even the scan timeout
 )
-def test_bug10_slow_snapshot_end_does_not_desync_the_next_search(monkeypatch):
+def test_bug10_slow_snapshot_end_does_not_desync_the_next_search(monkeypatch, end_delay):
+    """BUG-10 (fixed): END waits SCAN_TIMEOUT; if even that runs out the connection is
+    closed, so a late answer is never read as the next command's."""
     monkeypatch.setattr(ps5debug_ng, "IO_TIMEOUT", 0.3)  # real: 4 s
     monkeypatch.setattr(ps5debug_ng, "SCAN_TIMEOUT", 2.0)  # real: 60 s
     server = FakeNgServer(snapshot=True)
@@ -621,7 +621,7 @@ def test_bug10_slow_snapshot_end_does_not_desync_the_next_search(monkeypatch):
 
     def slow_end(c, cmd, body):
         if cmd == Cmd.TURBOSCAN_END:
-            time.sleep(0.6)  # freeing a big snapshot takes longer than the read timeout
+            time.sleep(end_delay)  # freeing a big snapshot can be slow
         return handle(c, cmd, body)
 
     server._handle = slow_end
@@ -629,8 +629,8 @@ def test_bug10_slow_snapshot_end_does_not_desync_the_next_search(monkeypatch):
     regions = _regions(cl)
     try:
         assert cl.scan_start(PID, regions, ValueType.INT32, Compare.UNKNOWN, None) > 0
-        cl.scan_cancel()  # Start over: TURBOSCAN_END times out on the PC side
-        time.sleep(0.5)  # its answer arrives late and waits on the socket
+        cl.scan_cancel()  # Start over
+        time.sleep(end_delay + 0.2)  # a late answer would now wait on the socket
         t0 = time.monotonic()
         assert cl.scan_start(PID, regions, ValueType.INT32, Compare.EXACT, 100) == 2
         assert time.monotonic() - t0 < 1.0

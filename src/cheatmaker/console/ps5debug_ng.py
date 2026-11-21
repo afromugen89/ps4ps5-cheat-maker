@@ -683,8 +683,11 @@ class Ps5DebugNgClient:
 
     @contextlib.contextmanager
     def _timeout(self, seconds: float):
-        old = self._w.sock.gettimeout()
-        self._w.sock.settimeout(seconds)
+        try:
+            old = self._w.sock.gettimeout()
+            self._w.sock.settimeout(seconds)
+        except OSError as exc:  # closed, e.g. after a failed snapshot end
+            raise ConnectionLost(f"connection closed after {self._w.last_cmd}: {exc}") from exc
         try:
             yield
         finally:
@@ -1662,15 +1665,17 @@ class Ps5DebugNgClient:
                 self._send_end()
         except ConsoleBusy:  # UI thread: free it before the next command instead
             self._end_pending = True
-        except Exception:  # the link is gone: the console frees it with the socket
-            log.debug("action=snapshot_end failed", exc_info=True)
+        except Exception:  # e.g. a late answer: never read it as the next command's
+            log.warning("action=snapshot_end failed; closing this connection", exc_info=True)
+            self._w.close()  # the next call fails at once (main reconnects, a link reopens)
 
     def _send_end(self) -> None:
         """Free the console's snapshot (call holding the lock). A failure raises
         ConnectionLost: carrying on could read its late answer as the next command's."""
         self._end_pending = False
-        self._w.request(Cmd.TURBOSCAN_END)
-        self._w.status()
+        with self._timeout(SCAN_TIMEOUT):  # freeing a multi-GB snapshot can be slow
+            self._w.request(Cmd.TURBOSCAN_END)
+            self._w.status()
 
     def _next(
         self,

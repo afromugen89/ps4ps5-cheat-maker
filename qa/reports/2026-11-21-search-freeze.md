@@ -347,3 +347,7 @@ I also fixed my own TC-10. The fake server now hangs up cleanly when the game pr
 - BUG-01 to BUG-09 are fixed and covered by tests that now pass.
 - The only open bug is BUG-10 (Low). It needs a console that takes more than 4 s to answer TURBOSCAN_END. It costs one failed search and loses no game state.
 - Before release, run console tests C24a to C24c, and note in them any `action=snapshot_end` or `scan_link_lost` lines.
+
+## BUG-10 fix (after the final re-test)
+
+Fixed: TURBOSCAN_END now waits up to SCAN_TIMEOUT (freeing a multi-GB snapshot can be slow), and if even that runs out the connection is closed, so a late answer is never read as the next command's. A closed connection raises ConnectionLost at the next call (main reconnects; a search link is reopened by the BUG-07 retry). `test_bug10_*` runs with the END answered past the read timeout and past the scan timeout; both pass. Full suite 2462 passed, 3 skipped.
