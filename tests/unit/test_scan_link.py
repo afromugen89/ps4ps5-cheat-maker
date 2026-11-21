@@ -385,7 +385,7 @@ def test_busy_ui_thread_gives_up_at_once_for_a_moment(monkeypatch):
         t0 = time.monotonic()
         with pytest.raises(ConsoleBusy):
             cl.read(PID, HEALTH_ADDR, 4)
-        assert time.monotonic() - t0 >= 0.3
+        assert time.monotonic() - t0 >= 0.25  # Windows ticks ~16 ms: 0.3 s can read 0.297
         t0 = time.monotonic()
         for _ in range(5):  # e.g. five pointer rows
             with pytest.raises(ConsoleBusy):
@@ -395,7 +395,7 @@ def test_busy_ui_thread_gives_up_at_once_for_a_moment(monkeypatch):
         t0 = time.monotonic()
         with pytest.raises(ConsoleBusy):
             cl.read(PID, HEALTH_ADDR, 4)
-        assert time.monotonic() - t0 >= 0.3, "waits again once the moment has passed"
+        assert time.monotonic() - t0 >= 0.25, "waits again once the moment has passed"
     finally:
         release.set()
         holder.join()
