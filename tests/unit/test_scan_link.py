@@ -653,3 +653,50 @@ def test_search_running_is_only_a_search_on_the_link():
     bg.join()
     assert not cl.search_running()
     cl.close()
+
+
+def test_search_running_counts_a_search_on_main_and_a_pointer_pass():
+    """QA BUG-09: with no link the search runs on main and still counts; so does a
+    pointer pass on the link."""
+    server = FakeNgServer(snapshot=True)
+    cl = _connect(server)
+    cl.port = 1  # no link: the search runs on the main connection
+    server.snapshot_gate.clear()
+    regions = _regions(cl)
+    bg = _Bg(lambda: cl.scan_start(PID, regions, ValueType.INT32, Compare.UNKNOWN, None))
+    try:
+        _wait(lambda: _sent(server, MAIN, {Cmd.TURBOSCAN_START}))
+        assert cl._link is None and cl.search_running()
+    finally:
+        server.snapshot_gate.set()
+        bg.join()
+    assert not cl.search_running()
+    cl.close()
+    cl = _connect(server)
+    cl._jobs[ps5debug_ng.POINTERS] = 1  # a pointer pass in flight
+    assert cl.search_running()
+    cl._jobs[ps5debug_ng.POINTERS] = 0
+    cl.close()
+
+
+def test_snapshot_end_that_fails_stops_the_next_command(monkeypatch):
+    """Review round 4: a TURBOSCAN_END whose answer didn't come in time isn't
+    swallowed, so its late answer can't be read as the next command's."""
+    server = FakeNgServer(snapshot=True)
+    cl = _connect(server)
+    cl.port = 1  # no link: the snapshot is kept on the main connection
+    cl.scan_start(PID, _regions(cl), ValueType.INT32, Compare.UNKNOWN, None)
+    sent = len(server.conn_commands[MAIN])
+
+    def timed_out():
+        raise ConnectionLost("receive failed after TURBOSCAN_END: timed out")
+
+    monkeypatch.setattr(cl._w, "status", timed_out)  # END's answer stays unread
+    cl._end_pending = True
+    with pytest.raises(ConnectionLost):
+        cl.read(PID, HEALTH_ADDR, 4)
+    assert not cl._end_pending
+    _wait(lambda: len(server.conn_commands[MAIN]) > sent)
+    time.sleep(0.05)
+    assert server.conn_commands[MAIN][sent:] == [Cmd.TURBOSCAN_END], "no read was sent"
+    cl.close()

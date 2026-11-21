@@ -175,10 +175,25 @@ def test_start_over_stops_a_running_search_and_drops_its_late_answer(qtbot):
         w.find.new_btn.click()
         assert time.monotonic() - t0 < FAST
         assert not ctl.scanner.active and w.find.count.text() == ""
+        # Review round 4: nothing new starts while the stopped scan's worker still runs,
+        # and its progress can't move the bar.
+        f = w.find
+        assert not f.search_btn.isEnabled() and not f.unknown_btn.isEnabled()
+        assert f.new_btn.isEnabled()
+        f._scan_progress.done.emit((f._scan_gen - 1, 0.5))
+        qtbot.wait(20)
+        assert f.progress.value() == 0
+        server.count_gate.set()
         qtbot.waitUntil(lambda: not ctl.tasks.busy, timeout=5000)  # the scan ended
         qtbot.wait(50)
         assert not ctl.scanner.active and w.find.count.text() == "" and said == []
         assert ctl.session.connected and w.find.unknown_btn.isEnabled()
+        assert f._stopping == 0 and f.search_btn.isEnabled()
+        f.number.setText("100")
+        f.search_btn.click()
+        qtbot.waitUntil(lambda: not ctl.tasks.busy and ctl.scanner.active, timeout=5000)
+        qtbot.wait(50)
+        assert ctl.scanner.active and ctl.scanner.count == 2, said
     finally:
         server.count_gate.set()
         ctl.shutdown()

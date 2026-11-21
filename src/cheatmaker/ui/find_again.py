@@ -155,6 +155,8 @@ class FindAgain(QObject):
         self._lock = threading.Lock()  # installed/_ours are written by worker threads too
         self._asking = False
         self._ask_still: Callable[[], bool] = lambda: True  # the open question still holds
+        # Moved-value answers not applied yet (the PS5 was busy): obj id -> (place, yes)
+        self._answers: dict[str, tuple[int, bool]] = {}
         self._unreadable: Path | None = None  # a .cmproj that failed to load: kept on save
         self.by_chain: set[str] = set()  # found by a memory path: no hook needed
         self._pid: int | None = None  # the game process the bookkeeping is for
@@ -754,8 +756,10 @@ class FindAgain(QObject):
     def check_pending(self) -> None:
         try:
             self._check_pending()
-        except ConsoleBusy:  # a timer tick: the next one asks again
+        except ConsoleBusy as exc:  # a timer tick: the next one tries again
             log.info("action=check_pending busy: skipped")
+            if self._answers:  # the player answered: say why nothing happened yet
+                self.ctl.fail(exc, "find_again")
 
     def _check_pending(self) -> None:
         if self._asking or not self.ctl.session.connected:
@@ -771,33 +775,45 @@ class FindAgain(QObject):
             field_name, label = part_field(mine[0], obj_id)
             if not mine[0].combined:
                 label = tracker.obj.label
-            value = read_field(self.ctl, tracker.obj, pend, field_name)
-            self._asking = True
-            # The freezer keeps checking while the question is open: if only one
-            # object still verifies the question answers itself and the box closes.
-            self._ask_still = lambda t=tracker, p=pend: t.pending == p
-            try:
-                ok = self.ask_confirm(hints.CONFIRM_MOVED.format(name=label, value=fmt(value)))
-            finally:
-                self._asking = False
-                self._ask_still = lambda: True
-            if tracker.pending != pend:  # answered itself meanwhile: the reply is moot
-                continue
-            if ok:
-                tracker.accept_pending(pend)
-                if tracker.obj.check and tracker.address == pend:
-                    self.carried_yes(tracker.obj, pend)
-                    self.ctl.cheats_changed.emit()
-                continue
-            kept = tracker.pending_both
-            tracker.reject_pending(pend)
-            if kept:  # the first one still checks out: keep changing it
-                self.ctl.message.emit(hints.KEPT_FIRST.format(name=label))
-                continue
-            for c in mine:  # the whole cheat, every part
-                self.ctl.live.turn_off(c, restore=False)
-            self.ctl.message.emit(hints.CONFIRM_NO.format(name=label))
-            self.ctl.cheats_changed.emit()
+            answered = self._answers.get(obj_id)
+            if answered is not None and answered[0] == pend:
+                ok = answered[1]  # answered before, but the PS5 was busy: apply it now
+            else:
+                value = read_field(self.ctl, tracker.obj, pend, field_name)
+                self._asking = True
+                # The freezer keeps checking while the question is open: if only one
+                # object still verifies the question answers itself and the box closes.
+                self._ask_still = lambda t=tracker, p=pend: t.pending == p
+                try:
+                    ok = self.ask_confirm(hints.CONFIRM_MOVED.format(name=label, value=fmt(value)))
+                finally:
+                    self._asking = False
+                    self._ask_still = lambda: True
+                # Kept until applied: a busy PS5 below must not lose the answer.
+                self._answers[obj_id] = (pend, ok)
+            if tracker.pending == pend:  # else it answered itself meanwhile: moot
+                self._apply_answer(tracker, pend, ok, mine, label)
+            self._answers.pop(obj_id, None)
+
+    def _apply_answer(
+        self, tracker: rf.Tracker, pend: int, ok: bool, mine: list[Cheat], label: str
+    ) -> None:
+        """The player's answer to "is it at ``pend`` now?". May raise ConsoleBusy."""
+        if ok:
+            tracker.accept_pending(pend)
+            if tracker.obj.check and tracker.address == pend:
+                self.carried_yes(tracker.obj, pend)
+                self.ctl.cheats_changed.emit()
+            return
+        kept = tracker.pending_both
+        tracker.reject_pending(pend)
+        if kept:  # the first one still checks out: keep changing it
+            self.ctl.message.emit(hints.KEPT_FIRST.format(name=label))
+            return
+        for c in mine:  # the whole cheat, every part
+            self.ctl.live.turn_off(c, restore=False)
+        self.ctl.message.emit(hints.CONFIRM_NO.format(name=label))
+        self.ctl.cheats_changed.emit()
 
     # -- confirm before the first write (AC-12.2) -----------------------------------
     def confirm(self, cheat: Cheat) -> bool:

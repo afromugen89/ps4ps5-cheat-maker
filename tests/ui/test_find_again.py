@@ -8,12 +8,14 @@ import struct
 import pytest
 from PySide6.QtCore import Qt
 
+from cheatmaker.busy import BUSY_MESSAGE
 from cheatmaker.console.client import WatchHit
 from cheatmaker.core import anchor_hook as ah
 from cheatmaker.core import project as pj
 from cheatmaker.core import refind as rf
 from cheatmaker.core.cheats import Cheat, Location, LocationKind, combine
 from cheatmaker.core.values import ValueType
+from cheatmaker.errors import ConsoleBusy
 from cheatmaker.settings import Settings
 from cheatmaker.ui import hints
 from cheatmaker.ui.cheats_view import COL_KEEPS, COL_ON, FOUND_AGAIN
@@ -390,6 +392,36 @@ def test_moved_weak_value_asks_before_writing_again(win, console):  # M4
     win.cheats.finder.check_pending()
     assert not cheat.enabled and tracker.address is None
     assert win.status.text().startswith("OK, nothing was changed")
+
+
+def test_answer_given_while_the_ps5_is_busy_is_applied_next_tick(win, console, monkeypatch):
+    """Review round 4: a busy PS5 doesn't lose the player's answer; it says why nothing
+    happened yet and the next tick applies it without asking again."""
+    connect(win)
+    cheat = add_health_cheat(win, console.game)
+    learn(win, cheat)
+    tick(win)
+    tracker = win.ctl.live.trackers["obj1"]
+    asked = []
+    win.cheats.finder.ask_confirm = lambda text: asked.append(text) or True
+    accept = tracker.accept_pending
+    tries = []
+
+    def accept_once_busy(addr):  # the freezer holds the socket the first time
+        tries.append(addr)
+        if len(tries) == 1:
+            raise ConsoleBusy(BUSY_MESSAGE)
+        accept(addr)
+
+    monkeypatch.setattr(tracker, "accept_pending", accept_once_busy)
+    tracker.pending = console.game.player
+    win.cheats.finder.check_pending()
+    assert len(asked) == 1 and tracker.pending == console.game.player
+    assert win.status.text() == BUSY_MESSAGE
+    win.cheats.finder.check_pending()
+    assert len(asked) == 1, "not asked again"
+    assert tracker.pending is None and tracker.confirmed
+    assert not win.cheats.finder._answers
 
 
 def test_notes_from_an_older_app_drop_the_hook_and_say_so(win, console):  # re-review

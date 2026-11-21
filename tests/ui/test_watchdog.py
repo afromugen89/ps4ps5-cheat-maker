@@ -137,3 +137,17 @@ def test_a_long_gap_between_checks_is_the_pc_sleeping(dog, clock, caplog, monkey
     assert "action=watchdog_skip gap=3600" in recs[0].getMessage()
     advance(dog, clock, 16)  # ...and a real freeze after waking is still seen
     assert "action=ui_frozen" in _messages(caplog)[-1].getMessage()
+
+
+def test_freeze_right_after_a_sleep_counts_its_seconds_from_the_wake_up(
+    dog, clock, caplog, monkeypatch
+):
+    """Review round 4: the logged seconds don't include the hour the PC slept."""
+    monkeypatch.setattr(wd, "flush_handlers", lambda: None)
+    with caplog.at_level(logging.INFO, logger="cheatmaker.watchdog"):
+        dog.check()
+        clock.t += 3600  # the PC slept; the UI never beats after waking
+        dog.check()
+        advance(dog, clock, 16)
+    frozen = [r.getMessage() for r in _messages(caplog) if "ui_frozen" in r.getMessage()]
+    assert len(frozen) == 1 and "seconds=16 " in frozen[0], frozen

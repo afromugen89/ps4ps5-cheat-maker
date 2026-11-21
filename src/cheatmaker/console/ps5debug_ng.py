@@ -579,8 +579,14 @@ class Ps5DebugNgClient:
         if self._closed:
             raise ConnectionLost(CLOSED_MESSAGE)
         link = self._search_link(open_link)
-        if link is None:
-            return call(self)
+        if link is None:  # on this connection; counted for search_running()
+            with self._use:
+                self._jobs[kind] += 1
+            try:
+                return call(self)
+            finally:
+                with self._use:
+                    self._jobs[kind] -= 1
         with link._use:
             while link._cancelling:  # a Start over is freeing the old search
                 link._use.wait()
@@ -1170,9 +1176,10 @@ class Ps5DebugNgClient:
             return self._run_search(start, open_link=True)
 
     def search_running(self) -> bool:
-        """A search (not a pointer pass) is running on the scan link right now."""
+        """A search or pointer pass is running (on the scan link, or here when there is
+        no link): asking for matches now would wait for it."""
         link = self._link
-        return link is not None and link._jobs[SEARCH] > 0
+        return any(self._jobs.values()) or (link is not None and any(link._jobs.values()))
 
     def scan_next(
         self,
@@ -1657,11 +1664,11 @@ class Ps5DebugNgClient:
             log.debug("action=snapshot_end failed", exc_info=True)
 
     def _send_end(self) -> None:
-        """Free the console's snapshot (call holding the lock)."""
+        """Free the console's snapshot (call holding the lock). A failure raises
+        ConnectionLost: carrying on could read its late answer as the next command's."""
         self._end_pending = False
-        with contextlib.suppress(ConnectionLost, ProtocolError):
-            self._w.request(Cmd.TURBOSCAN_END)
-            self._w.status()
+        self._w.request(Cmd.TURBOSCAN_END)
+        self._w.status()
 
     def _next(
         self,

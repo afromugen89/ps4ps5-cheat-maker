@@ -89,7 +89,7 @@ class UiWatchdog(QObject):
             return
         log.warning(
             "action=ui_frozen seconds=%d the window stopped responding; all threads:\n%s",
-            round(now - heartbeat),
+            round(now - max(heartbeat, self._woke_at)),  # since the wake-up after a sleep
             all_thread_stacks(),
         )
         flush_handlers()

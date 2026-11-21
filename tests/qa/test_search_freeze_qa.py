@@ -543,10 +543,12 @@ def test_rt01_start_over_stops_a_running_first_search_at_once_and_a_new_one_work
         t0 = time.monotonic()
         w.find.new_btn.click()
         assert time.monotonic() - t0 < FAST
-        assert not ctl.scanner.active and w.find.search_btn.isEnabled()
+        # Review round 4: Search waits until the stopped search's worker has ended.
+        assert not ctl.scanner.active and not w.find.search_btn.isEnabled()
         qtbot.waitUntil(lambda: not ctl.tasks.busy, timeout=5000)  # ScanCancelled, dropped
         server.snapshot_gate.set()
         assert not ctl.scanner.active and said == [], said
+        assert w.find.search_btn.isEnabled()
         w.find.number.setText("100")
         w.find.search_btn.click()
         qtbot.waitUntil(lambda: not ctl.tasks.busy and ctl.scanner.active, timeout=5000)
@@ -572,11 +574,6 @@ def test_rt02_start_over_is_not_offered_during_check_which_is_real(qtbot):
     ctl.shutdown()
 
 
-@pytest.mark.xfail(
-    reason="BUG-09: the live list asks the scan link for matches during a pointer pass "
-    "(search_running() only counts searches), so each tick can hang the window 1.5 s",
-    strict=True,
-)
 def test_bug09_live_list_does_not_wait_on_the_link_during_a_pointer_pass(qtbot):
     server = FakeNgServer(snapshot=True)
     w, ctl = _ng_win(qtbot, server, scan_connections=1)

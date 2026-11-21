@@ -626,3 +626,18 @@ QA round (qa/reports/2026-11-21-search-freeze.md) and re-review leftovers:
   nor an exit line (BUG-05). The watchdog's sleep skip moves only its own baseline, not
   the heartbeat, so it never logs a false `ui_unfrozen` (BUG-06).
 
+
+Review round 4:
+
+- Start over during a search answers at once but counts the stopped search as
+  "stopping" until its worker's done/failed arrives: Search, I don't know, the compare
+  buttons and Full stay off meanwhile (Start over stays on); the late callback always
+  resets the scanner and clears the count. Progress carries the scan's generation, so a
+  stopped search can't move the bar.
+- `search_running()` is true for any job (search or pointer pass) on the link, and for a
+  search running on the main connection when no link could open (QA BUG-09).
+- A failed TURBOSCAN_END is no longer swallowed: ConnectionLost goes up from `_locked()`
+  before the next command, so a late END answer can't be read as that command's.
+- Find it again keeps the player's moved?-answer when applying it was busy: it shows the
+  busy message and applies it on the next tick without asking again.
+- The watchdog's `ui_frozen seconds=` counts from the wake-up after a sleep.
