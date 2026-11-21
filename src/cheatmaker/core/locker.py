@@ -16,7 +16,7 @@ import iced_x86 as ix
 from cheatmaker.console.client import WatchUntil
 from cheatmaker.core.cheats import Cheat, Location, LocationKind
 from cheatmaker.core.session import Session
-from cheatmaker.errors import LockFailed, ReadFailed
+from cheatmaker.errors import ConsoleBusy, LockFailed, ReadFailed
 
 log = logging.getLogger(__name__)
 
@@ -280,6 +280,8 @@ class _CodeCache:
             if block not in self._blocks:
                 try:
                     self._blocks[block] = self._read(block, CONTEXT)
+                except ConsoleBusy:  # the UI thread may try again; nothing is gone
+                    raise
                 except ReadFailed:
                     self._blocks[block] = b""
             out += self._blocks[block]
@@ -320,9 +322,13 @@ def find_writers(
     for rip, hits in sorted(counts.items(), key=lambda kv: -kv[1]):
         try:
             before = client.read(game.pid, rip - CONTEXT, CONTEXT)
+        except ConsoleBusy:  # the UI thread may try again; nothing is gone
+            raise
         except ReadFailed:
             try:
                 before = client.read(game.pid, rip - MAX_INSN, MAX_INSN)
+            except ConsoleBusy:  # the UI thread may try again; nothing is gone
+                raise
             except ReadFailed:
                 log.warning("action=lock_watch can't read code before rip=%#x", rip)
                 continue

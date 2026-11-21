@@ -14,13 +14,14 @@ def main() -> int:
         install_crash_hook,
         install_native_crash_log,
         install_qt_message_handler,
+        mark_clean_exit,
         setup_logging,
     )
 
     path = setup_logging()
     install_crash_hook()
-    check_previous_run()  # before this run's start line, which it looks for
-    install_native_crash_log()
+    unexpected = check_previous_run()  # before this run's start line, which it looks for
+    install_native_crash_log(ended_unexpectedly=unexpected)
     log = logging.getLogger(__name__)
     log.info("action=start version=%s log=%s", __version__, path)
 
@@ -55,6 +56,7 @@ def main() -> int:
     # A start without this line in the log means a hard crash or a kill.
     # crash.log stays armed until the process ends: Qt teardown can crash too.
     log.info("action=exit code=%s", code)
+    mark_clean_exit()  # dumps before this line in crash.log were handled, not crashes
     return code
 
 

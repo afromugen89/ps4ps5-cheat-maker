@@ -116,6 +116,10 @@ class FakeNgServer:
         self.snapshot_gate.set()
         self.scan_gate = threading.Event()
         self.scan_gate.set()
+        self.count_gate = threading.Event()  # holds a narrow-down (TURBOSCAN_COUNT)
+        self.count_gate.set()
+        self.auth_gate = threading.Event()  # holds scan auth (opening a connection)
+        self.auth_gate.set()
         self.fail_scan_on: set[int] = set()
         self.snapshot_fail_on: set[int] = (
             set()
@@ -250,6 +254,7 @@ class FakeNgServer:
         elif cmd == Cmd.PROC_AUTH:
             magic, _flags = struct.unpack("<II", body)
             assert magic == 0xBB40E64D
+            self.auth_gate.wait(20)
             chal = bytes(range(64))
             c.sendall(OK + struct.pack("<H", 64) + chal)
             ans = self._recv(c, 64)
@@ -373,6 +378,7 @@ class FakeNgServer:
         self.scan_compares.append(ct)
         c.sendall(OK)
         needle = self._recv(c, lv) if lv else b""
+        self.count_gate.wait(20)
         r = self.residents[self._local.conn]
         fmt = r["fmt"]
         keep = {}

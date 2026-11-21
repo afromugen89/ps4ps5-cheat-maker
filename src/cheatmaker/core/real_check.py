@@ -27,7 +27,7 @@ from enum import Enum
 from cheatmaker.console.client import ConsoleClient
 from cheatmaker.core.grouping import Group
 from cheatmaker.core.values import ValueType
-from cheatmaker.errors import ReadFailed, WriteFailed
+from cheatmaker.errors import ConsoleBusy, ReadFailed, WriteFailed
 
 log = logging.getLogger(__name__)
 
@@ -246,6 +246,8 @@ class RealChecker:
                 # time, and the game may have changed it since (picked up ammo).
                 try:
                     orig = self.client.read(self.pid, t.address, t.vtype.size)
+                except ConsoleBusy:  # the UI thread may try again; nothing is gone
+                    raise
                 except ReadFailed:
                     self.results[key] = Result(Verdict.FAILED)
                     continue
@@ -315,6 +317,8 @@ class RealChecker:
             try:
                 try:
                     now = self.client.read(self.pid, t.address, t.vtype.size)
+                except ConsoleBusy:  # the UI thread may try again; nothing is gone
+                    raise
                 except ReadFailed:
                     continue  # gone (an area unloaded): nothing to put back
                 if now != w.test:
@@ -356,6 +360,8 @@ def read_span(client: ConsoleClient, pid: int, ts: Sequence[Target]) -> dict[Key
     end = max(t.address + t.vtype.size for t in ts)
     try:
         data = client.read(pid, start, end - start)
+    except ConsoleBusy:  # the UI thread may try again; nothing is gone
+        raise
     except ReadFailed:
         for t in ts:
             with contextlib.suppress(ReadFailed):

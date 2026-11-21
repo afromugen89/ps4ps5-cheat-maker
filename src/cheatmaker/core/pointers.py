@@ -29,7 +29,7 @@ from pathlib import Path
 
 from cheatmaker.console.client import ProgressFn
 from cheatmaker.core.session import Session
-from cheatmaker.errors import ReadFailed, ScanCancelled
+from cheatmaker.errors import ConsoleBusy, ReadFailed, ScanCancelled
 
 log = logging.getLogger(__name__)
 
@@ -67,6 +67,8 @@ class Chain:
                 if ptr == 0:
                     return None
                 addr = ptr + off
+        except ConsoleBusy:  # the UI thread may try again; nothing is gone
+            raise
         except ReadFailed:
             return None
         return addr

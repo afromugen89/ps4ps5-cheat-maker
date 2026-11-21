@@ -736,6 +736,11 @@ class Scanner:
         return max(0, GROUP_SCANS - self.recorded) if self.group_size else 0
 
     @_ends_if_link_lost
+    def results(self, limit: int) -> list[ScanHit]:
+        """Up to ``limit`` matches as the console lists them (no values read)."""
+        return self.session.require_client().scan_results(limit)
+
+    @_ends_if_link_lost
     def matches(self, limit: int | None = None) -> list[Match]:
         """Current values of up to ``limit`` matches, read fresh (AC-3.4 live list)."""
         limit = self.show_limit if limit is None else limit

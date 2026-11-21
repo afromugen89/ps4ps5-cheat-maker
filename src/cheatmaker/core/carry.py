@@ -55,7 +55,14 @@ from cheatmaker.core.project import (
     VtableAnchor,
 )
 from cheatmaker.core.session import Session
-from cheatmaker.errors import FindFailed, LockFailed, ProjectFileError, ReadFailed, ScanCancelled
+from cheatmaker.errors import (
+    ConsoleBusy,
+    FindFailed,
+    LockFailed,
+    ProjectFileError,
+    ReadFailed,
+    ScanCancelled,
+)
 
 log = logging.getLogger(__name__)
 
@@ -770,6 +777,8 @@ def _dword(session: Session, addr: int) -> int | None:
     game = session.require_game()
     try:
         return struct.unpack("<I", session.require_client().read(game.pid, addr, 4))[0]
+    except ConsoleBusy:  # the UI thread may try again; nothing is gone
+        raise
     except ReadFailed:
         return None
 
@@ -1045,6 +1054,8 @@ def rebuild_hook_cheat(session: Session, line: HookLine, new: Project | None) ->
             raise CarryFailed(PC_OFF_AGAIN)
         return ah.hook_cheat(session, obj, c.name, c.value_type.encode(c.value), c.value_type)
     except CarryFailed:
+        raise
+    except ConsoleBusy:  # the UI thread may try again; nothing is gone
         raise
     except (FindFailed, LockFailed, ReadFailed) as exc:
         raise CarryFailed(str(exc)) from exc

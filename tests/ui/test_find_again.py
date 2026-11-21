@@ -1187,3 +1187,42 @@ def test_two_single_cheats_on_one_number_both_come_back(win, caplog):  # QA BUG-
     win.ctl.cheat_file.cheats[0].name = "God mode"  # renamed while the notes weren't loaded
     finder.ensure_cheats()
     assert [c.name for c in win.ctl.cheat_file.cheats] == ["God mode", "Health 500"]
+
+
+def test_busy_console_on_tick_refinds_nothing_and_puts_no_hook_in(win, console, monkeypatch):
+    """Review BLOCKER: "busy" is not "the value is gone". A tick on the UI thread while
+    the PS5's connection is busy fails with the busy message; nothing is re-found, no
+    hook goes in, nothing is written."""
+    from cheatmaker.errors import ConsoleBusy
+    from cheatmaker.ui import messages
+
+    console.restart(1, chain=True)
+    connect(win)
+    dlg = LearnDialog(win.ctl, win.cheats.finder, add_health_cheat(win, console.game), win)
+    dlg.pointers.setChecked(True)
+    dlg.start_btn.click()
+    win.ctl.shutdown()
+    run2 = console.restart(2, chain=True)
+    connect(win)
+    run2.move_player(fg.HEAP + 0x6000)  # the path broke: a re-find would put the hook in
+    tracker = win.ctl.live.trackers["obj1"]
+    tracker._last_try = -10.0
+    old, writes = tracker.address, len(run2.fake.writes)
+
+    def busy(*_a, **_k):
+        raise ConsoleBusy("The PS5 is busy right now. Try again in a moment.")
+
+    with monkeypatch.context() as m:  # what the client does on the UI thread when busy
+        for name in ("read", "write"):  # maps still answers: only reads are busy
+            m.setattr(run2.fake, name, busy)
+        tick(win)
+    cheat = win.ctl.cheat_file.cheats[0]
+    assert win.status.text() == messages.user_message(ConsoleBusy("x"))
+    assert not cheat.enabled and not tracker.confirmed
+    assert tracker.address == old, "not re-found"
+    assert run2.fake.peek(fg.PID, fg.READER, 1) != b"\xe9", "no hook put in"
+    assert len(run2.fake.writes) == writes, "nothing written"
+    assert "obj1" in win.cheats.finder.by_chain and win.ctl.session.connected
+    tick(win)  # not busy any more: the broken path is noticed and the hook goes in
+    assert run2.fake.peek(fg.PID, fg.READER, 1) == b"\xe9"
+    assert "obj1" not in win.cheats.finder.by_chain

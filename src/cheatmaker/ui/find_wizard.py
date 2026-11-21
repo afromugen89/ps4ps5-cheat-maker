@@ -71,7 +71,7 @@ from cheatmaker.core.values import (
     parse_number,
     parse_percent,
 )
-from cheatmaker.errors import ReadFailed
+from cheatmaker.errors import ConsoleBusy, ReadFailed
 from cheatmaker.ui import hints
 from cheatmaker.ui.controller import Controller
 from cheatmaker.ui.hit_test_dialog import HitTestDialog
@@ -808,8 +808,15 @@ class FindWizard(QWidget):
             self._fill_table()
             return
         try:
-            rows = (sc.matches(sc.count) if groups else sc.matches()) if show_matches else []
-            self._n_matches = len(rows)
+            if show_matches and self.ctl.tasks.busy:
+                # A search may be running on the console's search connection: keep the
+                # last match rows instead of waiting for it (typed-in rows still update).
+                rows = list(self.rows[: self._n_matches])
+            elif show_matches:
+                rows = sc.matches(sc.count) if groups else sc.matches()
+            else:
+                rows = []
+            n_matches = len(rows)
             types = [m.vtype or self._vtype() for m in rows]
             # by address and type: a match read as another type doesn't hide a typed-in
             # (or traced) row, which converts screen units with its own type
@@ -824,16 +831,24 @@ class FindWizard(QWidget):
                 addr = ptr.resolve_live(self.ctl.session, chain)
                 try:
                     m = self._read_match(addr, vt) if addr else Match(0, 0, b"")
+                except ConsoleBusy:  # the UI thread may try again; nothing is gone
+                    raise
                 except ReadFailed:
                     m = Match(0, 0, b"")
                 rows.append(m)
                 types.append(vt)
                 chains.append(chain)
+        except ConsoleBusy:  # keep the last values; the next tick reads again
+            log.info("action=live_refresh busy: kept the last values")
+            if not self.timer.isActive():
+                self.timer.start()
+            return
         except Exception as exc:
             self.timer.stop()
             self.ctl.fail(exc, "read")
             return
         self.rows, self.row_types, self.row_chains = rows, types, chains
+        self._n_matches = n_matches
         self._read_trace_maxes()
         self._show_groups(groups)
         self._fill_table()
@@ -1335,7 +1350,7 @@ class FindWizard(QWidget):
         the head there is nothing to test it against: then the most common way is used
         (the first candidate's on a tie). Raises ValueError when fewer than 2 are left."""
         sc = self.ctl.scanner
-        hits = self.ctl.session.require_client().scan_results(TEST_LIMIT)
+        hits = sc.results(TEST_LIMIT)
         # (address, way), in the order they are offered: first group first
         if not self.grouped:
             cands = [(h.address, h.way) for h in hits]

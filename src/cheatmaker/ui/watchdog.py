@@ -21,6 +21,8 @@ from cheatmaker.logs import flush_handlers
 FREEZE_S = 15.0
 BEAT_MS = 1000
 CHECK_S = 2.0
+SLEEP_GAP_S = 5 * CHECK_S
+"""Checks this far apart mean the PC was asleep (or the process paused), not the UI."""
 
 log = logging.getLogger("cheatmaker.watchdog")
 
@@ -50,6 +52,7 @@ class UiWatchdog(QObject):
         self._lock = threading.Lock()
         self._heartbeat = clock()
         self._frozen_since: float | None = None  # heartbeat value when the freeze began
+        self._last_check: float | None = None
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._timer = QTimer(self)
@@ -64,6 +67,13 @@ class UiWatchdog(QObject):
     def check(self) -> None:
         """One watchdog look (normally on the background thread)."""
         now = self._clock()
+        last, self._last_check = self._last_check, now
+        if last is not None and now - last > SLEEP_GAP_S:
+            # The PC slept: nothing beat meanwhile, but the UI isn't stuck. Count from now.
+            log.info("action=watchdog_skip gap=%d: the PC was probably asleep", round(now - last))
+            with self._lock:
+                self._heartbeat = max(self._heartbeat, now)
+            return
         with self._lock:
             heartbeat = self._heartbeat
             frozen_since = self._frozen_since

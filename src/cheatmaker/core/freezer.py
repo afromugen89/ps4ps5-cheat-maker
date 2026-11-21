@@ -7,6 +7,7 @@ import threading
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
+from cheatmaker.console.client import batch_of
 from cheatmaker.core.cheats import Cheat
 from cheatmaker.core.session import Session
 from cheatmaker.errors import CheatMakerError, ConnectionLost, ConsoleBusy, FindFailed
@@ -117,13 +118,19 @@ class Freezer:
                 if key in self.paused:
                     log.info("action=freeze key=%s resumed", key)
                     self.paused.discard(key)
-                for pid, addr, data in writes:
-                    client.write(pid, addr, data)
+                # Holding the connection, check it is still frozen: turn_off puts the
+                # original bytes back under the same hold, so they are never overwritten.
+                with batch_of(client):
+                    with self._lock:
+                        if key not in self._entries:
+                            continue
+                    for pid, addr, data in writes:
+                        client.write(pid, addr, data)
             except ConnectionLost:
                 raise
             except ConsoleBusy:  # only the UI thread gets this: try again next round
                 log.info("action=freeze key=%s busy: skipped this round", key)
-                return
+                continue
             except CheatMakerError as exc:
                 log.error("action=freeze key=%s reason=%s", key, exc)
                 self.unfreeze(key)
@@ -255,11 +262,14 @@ class LiveCheats:
         return writes
 
     def set_once(self, cheat: Cheat) -> None:
-        """Write the cheat's value once (AC-4.1). Raises WriteFailed (AC-4.3)."""
+        """Write the cheat's value once (AC-4.1). Raises WriteFailed (AC-4.3), or
+        ConsoleBusy (UI thread) before anything is written."""
         client = self.session.require_client()
-        for pid, addr, data in self._writes(cheat, True):
-            log.info("action=write cheat=%r addr=%#x bytes=%s", cheat.name, addr, data.hex())
-            client.write(pid, addr, data)
+        writes = self._writes(cheat, True)
+        with batch_of(client):
+            for pid, addr, data in writes:
+                log.info("action=write cheat=%r addr=%#x bytes=%s", cheat.name, addr, data.hex())
+                client.write(pid, addr, data)
 
     def turn_on(self, cheat: Cheat) -> None:
         self.set_once(cheat)
@@ -283,27 +293,51 @@ class LiveCheats:
         self.active[id(cheat)] = cheat
 
     def turn_off(self, cheat: Cheat, restore: bool = True) -> None:
+        """Put the original bytes back, then mark it off. ConsoleBusy (UI thread)
+        changes nothing: the cheat stays on, in the game and in the list."""
+        client = self.session.client if restore else None
+        if client is None:
+            self._mark_off(cheat)
+            return
+        try:
+            writes = self._restore_writes(cheat)
+        except ConsoleBusy:
+            raise
+        except Exception:
+            self._mark_off(cheat)
+            raise
+        # One hold for the whole set: the freezer can't write the cheat's bytes again
+        # in between, and a busy connection refuses before anything is written.
+        with batch_of(client):
+            try:
+                # Undo in reverse: a jump into a code cave must go before the cave does.
+                for pid, addr, data in reversed(writes):
+                    client.write(pid, addr, data)
+            except ConsoleBusy:  # a client without a hold: still on, try again
+                raise
+            except BaseException:
+                self._mark_off(cheat)
+                raise
+            self._mark_off(cheat)
+
+    def _mark_off(self, cheat: Cheat) -> None:
         self.freezer.unfreeze(str(id(cheat)))
         cheat.enabled = False
         self.active.pop(id(cheat), None)
         with self._parts_lock:
             self._part_paused.pop(id(cheat), None)
-        if restore and self.session.client is not None:
-            client = self.session.client
-            if cheat.learned_parts:  # learned parts are left as they are
-                game = self.session.require_game()
-                writes = [
-                    (game.pid, loc.address(game.module_base), loc.off)
-                    for loc in cheat.locations
-                    if loc.anchor is None
-                ]
-            elif cheat.anchor is not None:  # only where it's verified to be right now
-                writes = self._tracked(cheat, False) or []
-            else:
-                writes = self._writes(cheat, False)
-            # Undo in reverse: a jump into a code cave must go before the cave does.
-            for pid, addr, data in reversed(writes):
-                client.write(pid, addr, data)
+
+    def _restore_writes(self, cheat: Cheat) -> Writes:
+        if cheat.learned_parts:  # learned parts are left as they are
+            game = self.session.require_game()
+            return [
+                (game.pid, loc.address(game.module_base), loc.off)
+                for loc in cheat.locations
+                if loc.anchor is None
+            ]
+        if cheat.anchor is not None:  # only where it's verified to be right now
+            return self._tracked(cheat, False) or []
+        return self._writes(cheat, False)
 
     def refresh(self, cheat: Cheat) -> None:
         """Re-apply after the player edits the value of an active cheat."""

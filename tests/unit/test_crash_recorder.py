@@ -119,6 +119,48 @@ def test_previous_native_crash_none_cases(tmp_path):
     assert "access violation" in logs.previous_native_crash(no_header)
 
 
+HANDLED = (
+    "Windows fatal exception: code 0xe06d7363\n\nCurrent thread 0x1 (most recent call first):\n"
+)
+
+
+def test_dumps_before_the_exit_marker_are_not_crashes(tmp_path):
+    """Windows faulthandler also dumps exceptions the app handled: a run that exited
+    cleanly isn't reported, whatever the main log says."""
+    path = tmp_path / "crash.log"
+    path.write_text(f"{logs.CRASH_HEADER} x\n{HANDLED}{logs.CRASH_EXIT} y\n", encoding="utf-8")
+    assert logs.previous_native_crash(path) is None
+    assert logs.previous_native_crash(path, ended_unexpectedly=True) is None
+
+
+def test_crash_after_the_exit_marker_is_reported(tmp_path):
+    path = tmp_path / "crash.log"
+    path.write_text(
+        f"{logs.CRASH_HEADER} x\n{HANDLED}{logs.CRASH_EXIT} y\n{WINDOWS_CRASH}", encoding="utf-8"
+    )
+    tail = logs.previous_native_crash(path, ended_unexpectedly=False)
+    assert tail is not None and "access violation" in tail and "0xe06d7363" not in tail
+
+
+def test_no_exit_marker_counts_only_when_the_run_ended_unexpectedly(tmp_path):
+    path = tmp_path / "crash.log"
+    path.write_text(f"{logs.CRASH_HEADER} x\n{HANDLED}", encoding="utf-8")
+    assert logs.previous_native_crash(path, ended_unexpectedly=False) is None
+    assert "0xe06d7363" in logs.previous_native_crash(path, ended_unexpectedly=True)
+
+
+def test_clean_exit_writes_the_marker_and_next_start_is_quiet(main_log, native_log):
+    path = logs.install_native_crash_log()
+    logs._crash_file.write(HANDLED)  # what Windows dumps for a handled exception
+    logs._crash_file.flush()
+    logs.mark_clean_exit()
+    assert path.read_text(encoding="utf-8").rstrip().splitlines()[-1].startswith(logs.CRASH_EXIT)
+    logs.uninstall_native_crash_log()
+    logs.mark_clean_exit()  # not armed: nothing happens
+    logs.install_native_crash_log(ended_unexpectedly=False)
+    assert "action=previous_crash" not in _main_log_text(main_log)
+
+
 def test_crash_log_trimmed_when_too_big(main_log, native_log):
     path = logs.crash_log_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -214,6 +256,22 @@ def test_qt_debug_and_info_skipped(caplog, mode):
     assert caplog.records == []
 
 
+def test_identical_qt_messages_are_rate_limited(caplog, monkeypatch):
+    clock = types.SimpleNamespace(t=100.0)
+    monkeypatch.setattr(logs, "_qt_repeats", logs._Repeats(logs.QT_REPEAT_S, lambda: clock.t))
+    with caplog.at_level(logging.WARNING, logger="cheatmaker.qt"):
+        for _ in range(50):
+            logs.qt_message_handler(QtMsgType.QtWarningMsg, None, "same")
+        logs.qt_message_handler(QtMsgType.QtWarningMsg, None, "other")
+        clock.t += logs.QT_REPEAT_S
+        logs.qt_message_handler(QtMsgType.QtWarningMsg, None, "same")
+    msgs = [r.getMessage() for r in caplog.records]
+    assert len(msgs) == 3
+    assert msgs[0].endswith(" same") and "repeats" not in msgs[0]
+    assert msgs[1].endswith(" other")
+    assert "repeats=49" in msgs[2]
+
+
 def test_qt_fatal_flushes_handlers(monkeypatch):
     flushed = []
     monkeypatch.setattr(logs, "flush_handlers", lambda: flushed.append(True))
@@ -306,6 +364,8 @@ def test_main_logs_start_and_exit(main_log, native_log, monkeypatch):
     ]
     assert order == sorted(order)
     assert logs.crash_log_path().exists() and faulthandler.is_enabled()
+    crash = logs.crash_log_path().read_text(encoding="utf-8")
+    assert crash.rstrip().splitlines()[-1].startswith(logs.CRASH_EXIT), "clean exit marked"
     assert events[:4] == ["qt", "show", "watchdog_start", events[3]]
     assert events[3][0] == "quit_hook" and events[4] == "exec"
     assert logs.previous_run_ended_unexpectedly() is False

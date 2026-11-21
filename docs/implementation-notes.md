@@ -568,6 +568,35 @@ and frozen cheats stopped being written.
   NG's 12 clients (`NG_CLIENT_SLOTS`, `RESERVED_SLOTS`); the pool is capped and the cap
   logged (`action=scan_pool capped=`). At the current limits (8 scan connections, two
   unknown types) the worst case is 11 plus the Cancel.
-- Not changed: a live-list refresh that asks for `scan_results` while a narrow-down runs
-  on the link still waits for it (as before; narrowing a few matches is quick).
-  Start over during a *first* search doesn't cancel it (the Scanner has no search yet).
+- Start over during a *first* search doesn't cancel it (the Scanner has no search yet).
+
+Review fixes (PR #36):
+
+- **Busy is not gone.** `ConsoleBusy` stays a `ReadFailed`, but every `except ReadFailed`
+  / `except CheatMakerError` that can run on the UI thread re-raises it first (verify,
+  `Chain.resolve`, the hook-slot reads, `read_field`, carry confirm, `before_on`,
+  locker/real-check/carry reads), so a busy moment never makes a value "lost": no
+  re-find, no hook put in, the action fails with the busy message. `path_lost` puts the
+  object back in `by_chain` when busy; `check_pending` skips the tick; the Find view's
+  live list keeps its last values and keeps ticking.
+- **Turning off writes first.** `turn_off` puts the original bytes back, then marks the
+  cheat off; busy leaves it on in the game and the list. A cheat's writes go under one
+  hold of the connection (`ConsoleClient.batch()`, a no-op on FakeConsole); the freezer
+  checks an entry is still frozen under the same hold, so turned-off bytes are never
+  written again.
+- **close() during the link opening:** `_closed` is set under `_link_lock`; an opener
+  that finishes after it closes the new link and raises `ConnectionLost`, as does any
+  search call after close().
+- **The UI thread never waits long on either connection:** the link's lock has the same
+  1.5 s limit; after one give-up, UI-thread tries wait only 0.1 s for a second
+  (`BUSY_HOLD_S`, `BUSY_HOLD_WAIT`). The live list doesn't ask for matches while a task
+  runs. Find's "test the candidates" goes through the Scanner.
+- **Jobs on the link:** Start over discards the link only for a running search; during a
+  pointer pass the search is freed when the pass ends. New calls wait while a cancel
+  frees the old search. A pointer pass runs on the main connection while a search is
+  kept there (no link). A link discarded while it opens extra connections closes them.
+- **Crash log:** a clean exit writes `=== Cheat Maker exit` to crash.log; dumps before it
+  (Windows reports exceptions the app handled) are ignored, dumps after it (teardown)
+  are reported; a section without it counts only when the main log shows the run ended
+  unexpectedly. Identical Qt messages are logged at most once per 10 s (`repeats=N`).
+  The watchdog skips a check after a gap over 10 s (the PC slept).

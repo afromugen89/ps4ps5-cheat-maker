@@ -48,7 +48,14 @@ from cheatmaker.core.project import (
 )
 from cheatmaker.core.session import Session
 from cheatmaker.core.values import ValueType
-from cheatmaker.errors import CheatMakerError, FindFailed, LockFailed, ReadFailed, ScanCancelled
+from cheatmaker.errors import (
+    CheatMakerError,
+    ConsoleBusy,
+    FindFailed,
+    LockFailed,
+    ReadFailed,
+    ScanCancelled,
+)
 
 log = logging.getLogger(__name__)
 
@@ -104,6 +111,8 @@ def verify(
         for f in obj.fields:
             if not f.plausible(client.read(game.pid, addr + f.off, f.vtype.size)):
                 return f"{f.name} doesn't look right"
+    except ConsoleBusy:  # the UI thread may try again; nothing is gone
+        raise
     except ReadFailed:
         return "can't be read"
     return None
@@ -203,6 +212,8 @@ def find_again(
         while True:
             try:
                 addr, _count = ah.read_slot(session, hook)
+            except ConsoleBusy:  # the UI thread may try again; nothing is gone
+                raise
             except ReadFailed:
                 addr = 0
             if addr and attempt("hook_slot", addr):
@@ -616,6 +627,8 @@ class Tracker:
             return None
         try:
             addr, _count = ah.read_slot(self.session, hook)
+        except ConsoleBusy:  # the UI thread may try again; nothing is gone
+            raise
         except ReadFailed:
             return None
         if not addr or addr == self.address or addr in self.ignored:

@@ -29,7 +29,7 @@ from cheatmaker.core import updater as up
 from cheatmaker.core.cheats import Cheat, Location, LocationKind, combine, versions_differ
 from cheatmaker.core.locker import NOP
 from cheatmaker.core.values import parse_number
-from cheatmaker.errors import CheatMakerError, ProjectFileError
+from cheatmaker.errors import CheatMakerError, ConsoleBusy, ProjectFileError
 from cheatmaker.ui import hints
 from cheatmaker.ui.controller import Controller
 from cheatmaker.ui.find_again import FindAgain, LearnDialog
@@ -381,7 +381,7 @@ class CheatsView(QWidget):
                 addr_of=self._part_address,
                 module_base=game.module_base if game is not None else None,
             )
-        except ValueError as exc:
+        except (ValueError, ConsoleBusy) as exc:
             self.ctl.fail(exc, "combine")
             return
         was_on = any(c.enabled for c in picked)
@@ -421,6 +421,8 @@ class CheatsView(QWidget):
         tracker = self.ctl.live.trackers.get(loc.anchor[0])
         try:
             return tracker.field_address(loc.anchor[1]) if tracker is not None else None
+        except ConsoleBusy:  # the UI thread may try again; nothing is gone
+            raise
         except (CheatMakerError, KeyError):
             return None
 

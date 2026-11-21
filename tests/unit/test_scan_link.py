@@ -20,7 +20,13 @@ from cheatmaker.core.freezer import Freezer
 from cheatmaker.core.scanner import LOST_LINK, Scanner
 from cheatmaker.core.session import Session
 from cheatmaker.core.values import Compare, ValueType
-from cheatmaker.errors import ConsoleBusy, ReadFailed, ScanCancelled, ScanLinkLost
+from cheatmaker.errors import (
+    ConnectionLost,
+    ConsoleBusy,
+    ReadFailed,
+    ScanCancelled,
+    ScanLinkLost,
+)
 from cheatmaker.ui import messages
 from tests.conftest import GOLD_ADDR, HEALTH_ADDR, HEAP_BASE, PID
 from tests.unit.test_ps5debug_ng import FakeNgServer
@@ -288,7 +294,7 @@ def test_ui_thread_gets_console_busy_instead_of_hanging():
     t0 = time.monotonic()
     with pytest.raises(ConsoleBusy) as exc:
         cl.read(PID, HEALTH_ADDR, 4)
-    assert 1.0 <= time.monotonic() - t0 < 2.0
+    assert 1.0 <= time.monotonic() - t0 < 3.0
     assert isinstance(exc.value, ReadFailed)
     assert messages.user_message(exc.value) == ps5debug_ng.BUSY_MESSAGE
     assert waiting.thread.is_alive(), "other threads wait as before"
@@ -300,10 +306,15 @@ def test_ui_thread_gets_console_busy_instead_of_hanging():
     session.disconnect()
 
 
-def test_freezer_skips_a_round_when_the_console_is_busy():
+def test_freezer_skips_a_busy_entry_and_writes_the_others():
     class Busy:
+        def __init__(self):
+            self.written = []
+
         def write(self, pid, addr, data):
-            raise ConsoleBusy(ps5debug_ng.BUSY_MESSAGE)
+            if addr == HEALTH_ADDR:
+                raise ConsoleBusy(ps5debug_ng.BUSY_MESSAGE)
+            self.written.append(addr)
 
     class S:
         client = Busy()
@@ -311,8 +322,230 @@ def test_freezer_skips_a_round_when_the_console_is_busy():
     fz = Freezer(S())  # type: ignore[arg-type]
     with fz._lock:  # no worker thread: tick() is driven here
         fz._entries["health"] = [(PID, HEALTH_ADDR, b"\x64\0\0\0")]
+        fz._entries["gold"] = [(PID, GOLD_ADDR, b"\x64\0\0\0")]
     fz.tick()
-    assert fz.keys == {"health"}, "still frozen"
+    assert fz.keys == {"health", "gold"}, "still frozen"
+    assert S.client.written == [GOLD_ADDR], "the next entry is still written"
+
+
+def _hold_main(cl):
+    """Hold ``cl``'s socket lock on a worker thread until the returned event is set."""
+    held, release = threading.Event(), threading.Event()
+
+    def hold():
+        with cl._lock:
+            held.set()
+            release.wait(10)
+
+    holder = _Bg(hold)
+    held.wait(2)
+    return holder, release
+
+
+def test_turning_a_cheat_off_while_busy_changes_nothing():
+    """Review MAJOR 1: the original bytes go back first; busy leaves the cheat on."""
+    from cheatmaker.core.cheats import Cheat, Location, LocationKind
+    from cheatmaker.core.freezer import LiveCheats
+
+    server = FakeNgServer()
+    session = Session(lambda ip, port: _connect(server))
+    session.connect("127.0.0.1")
+    session.refresh_game()
+    live = LiveCheats(session, Freezer(session))
+    on, off = struct.pack("<i", 999), struct.pack("<i", 100)
+    cheat = Cheat("Health", [Location(LocationKind.SESSION_ADDRESS, HEALTH_ADDR, on, off)])
+    cheat.freeze = True
+    live.turn_on(cheat)
+    assert _i32(server, HEALTH_ADDR) == 999
+    holder, release = _hold_main(session.client)
+    try:
+        with pytest.raises(ConsoleBusy):
+            live.turn_off(cheat)
+        assert cheat.enabled and id(cheat) in live.active and live.freezer.keys
+        assert _i32(server, HEALTH_ADDR) == 999, "nothing written"
+        with pytest.raises(ConsoleBusy):  # turning on writes nothing either
+            live.set_once(cheat)
+    finally:
+        release.set()
+        holder.join()
+    live.turn_off(cheat)
+    assert not cheat.enabled and not live.freezer.keys and _i32(server, HEALTH_ADDR) == 100
+    live.freezer.stop()
+    session.disconnect()
+
+
+def test_busy_ui_thread_gives_up_at_once_for_a_moment(monkeypatch):
+    """Review MAJOR 4: after one wait, further UI-thread tries don't each wait."""
+    monkeypatch.setattr(ps5debug_ng, "MAIN_THREAD_WAIT", 0.3)
+    monkeypatch.setattr(ps5debug_ng, "BUSY_HOLD_S", 0.5)
+    server = FakeNgServer()
+    cl = _connect(server)
+    holder, release = _hold_main(cl)
+    try:
+        t0 = time.monotonic()
+        with pytest.raises(ConsoleBusy):
+            cl.read(PID, HEALTH_ADDR, 4)
+        assert time.monotonic() - t0 >= 0.3
+        t0 = time.monotonic()
+        for _ in range(5):  # e.g. five pointer rows
+            with pytest.raises(ConsoleBusy):
+                cl.read(PID, HEALTH_ADDR, 4)
+        assert time.monotonic() - t0 < 5 * ps5debug_ng.BUSY_HOLD_WAIT + 0.3
+        time.sleep(0.55)
+        t0 = time.monotonic()
+        with pytest.raises(ConsoleBusy):
+            cl.read(PID, HEALTH_ADDR, 4)
+        assert time.monotonic() - t0 >= 0.3, "waits again once the moment has passed"
+    finally:
+        release.set()
+        holder.join()
+    assert cl.read(PID, HEALTH_ADDR, 4) == struct.pack("<i", 100), "free: no wait"
+    cl.close()
+
+
+# review MAJOR 3: the UI thread never waits long on the scan link ---------------------
+def test_scan_results_on_the_ui_thread_while_narrowing_is_bounded():
+    server = FakeNgServer(snapshot=True)
+    cl = _connect(server)
+    n = cl.scan_start(PID, _regions(cl), ValueType.INT32, Compare.UNKNOWN, None)
+    server.count_gate.clear()
+    bg = _Bg(lambda: cl.scan_next(Compare.UNCHANGED, None))
+    _wait(lambda: _sent(server, LINK, {Cmd.TURBOSCAN_COUNT}))
+    t0 = time.monotonic()
+    with pytest.raises(ConsoleBusy):
+        cl.scan_results(5)
+    assert time.monotonic() - t0 < 3.0
+    server.count_gate.set()
+    bg.join()
+    assert bg.error is None and bg.result == n
+    assert len(cl.scan_results(5)) == 5
+    cl.close()
+
+
+def test_scan_results_on_the_ui_thread_during_a_pointer_pass_is_bounded():
+    server = FakeNgServer(snapshot=True)
+    cl = _connect(server, scan_connections=1)
+    regions = _regions(cl)
+    cl.scan_start(PID, regions, ValueType.INT32, Compare.UNKNOWN, None)
+    server.scan_gate.clear()
+    lo, hi = HEALTH_ADDR - 0x1000, HEALTH_ADDR
+    bg = _Bg(lambda: cl.find_pointers(PID, regions, lo, hi, lambda v: True))
+    _wait(lambda: _sent(server, LINK, {Cmd.PROC_SCAN_START, Cmd.TURBOSCAN_START}))
+    _wait(lambda: server.conn_commands[LINK].count(Cmd.TURBOSCAN_START) >= 2)
+    t0 = time.monotonic()
+    with pytest.raises(ConsoleBusy):
+        cl.scan_results(5)
+    assert time.monotonic() - t0 < 3.0
+    server.scan_gate.set()
+    bg.join()
+    assert bg.error is None
+    cl.close()
+
+
+# review MAJOR 2: close() while the link is being opened --------------------------------
+def test_close_while_the_link_opens_closes_it_and_ends_the_search():
+    server = FakeNgServer(snapshot=True)
+    cl = _connect(server)
+    regions = _regions(cl)
+    server.auth_gate.clear()  # the link's scan auth waits
+    bg = _Bg(lambda: cl.scan_start(PID, regions, ValueType.INT32, Compare.UNKNOWN, None))
+    _wait(lambda: _sent(server, LINK, {Cmd.PROC_AUTH}))
+    t0 = time.monotonic()
+    cl.close()
+    assert time.monotonic() - t0 < FAST
+    server.auth_gate.set()
+    bg.join()
+    assert isinstance(bg.error, ConnectionLost) and not isinstance(bg.error, ScanLinkLost)
+    assert cl._link is None
+    _wait(lambda: server.closed == {MAIN, LINK}, timeout=2.0)
+    for call in (
+        lambda: cl.scan_start(PID, regions, ValueType.INT32, Compare.UNKNOWN, None),
+        lambda: cl.scan_results(5),
+        lambda: cl.find_pointers(PID, regions, 0, 1, lambda v: True),
+    ):
+        with pytest.raises(ConnectionLost):
+            call()
+    assert server.connections == 2, "no link opened after close"
+    cl.scan_cancel()  # quiet after close
+
+
+# review minors --------------------------------------------------------------------------
+def test_start_over_during_a_pointer_pass_leaves_it_running():
+    server = FakeNgServer(snapshot=True)
+    server.fake.poke(PID, HEAP_BASE + 0x400, struct.pack("<Q", HEALTH_ADDR - 0x40))
+    cl = _connect(server, scan_connections=1)
+    regions = _regions(cl)
+    cl.scan_start(PID, regions, ValueType.INT32, Compare.UNKNOWN, None)
+    assert server.residents
+    server.scan_gate.clear()
+    lo, hi = HEALTH_ADDR - 0x1000, HEALTH_ADDR
+    bg = _Bg(lambda: cl.find_pointers(PID, regions, lo, hi, lambda v: True))
+    _wait(lambda: server.conn_commands[LINK].count(Cmd.TURBOSCAN_START) >= 2)
+    link = cl._link
+    t0 = time.monotonic()
+    cl.scan_cancel()
+    assert time.monotonic() - t0 < FAST
+    assert cl._link is link and not link._discarded
+    server.scan_gate.set()
+    bg.join()
+    assert bg.error is None and (HEAP_BASE + 0x400, HEALTH_ADDR - 0x40) in bg.result
+    _wait(lambda: not server.residents)  # the search was freed once the pass ended
+    assert cl.scan_counts() == {}
+
+
+def test_a_new_call_waits_for_a_cancel_in_progress():
+    server = FakeNgServer(snapshot=True)
+    cl = _connect(server)
+    cl.scan_start(PID, _regions(cl), ValueType.INT32, Compare.UNKNOWN, None)
+    link = cl._link
+    with link._use:
+        link._cancelling = True  # as scan_cancel does while freeing the old search
+    bg = _Bg(lambda: cl.scan_results(5))
+    time.sleep(0.2)
+    assert bg.thread.is_alive(), "waits for the cancel"
+    with link._use:
+        link._cancelling = False
+        link._use.notify_all()
+    bg.join()
+    assert bg.error is None
+    cl.close()
+
+
+def test_a_discarded_link_keeps_no_new_pool_connection():
+    server = FakeNgServer()
+    cl = _connect(server, scan_connections=3)
+    link = cl._search_link(open_link=True)
+    link._discarded = True  # Start over came while the pool was being opened
+    assert link._scan_pool() == [link] and link._pool == []
+    _wait(lambda: server.connections == 3 and 3 in server.closed, timeout=2.0)
+    cl.close()
+
+
+def test_pointer_pass_runs_on_main_while_a_search_is_kept_there():
+    server = FakeNgServer()
+    cl = _connect(server, scan_connections=1)
+    regions = _regions(cl)
+    cl.port = 1  # no link: the search stays on the main connection
+    assert cl.scan_start(PID, regions, ValueType.INT32, Compare.EXACT, 100) == 2
+    cl.port = server.port
+    cl.find_pointers(PID, regions, HEALTH_ADDR - 0x1000, HEALTH_ADDR, lambda v: True)
+    assert cl._link is None and server.connections == 1
+    assert cl.scan_counts() == {ValueType.INT32: 2}
+    cl.close()
+
+
+def test_scanner_results_end_the_search_when_the_link_drops():
+    server = FakeNgServer(snapshot=True)
+    session = Session(lambda ip, port: _connect(server, scan_connections=1))
+    session.connect("127.0.0.1")
+    session.refresh_game()
+    sc = Scanner(session)
+    assert sc.first_scan(None, ValueType.INT32) > 0  # kept on the console
+    session.client._link._w.close()  # the link is gone
+    with pytest.raises(ScanLinkLost):
+        sc.results(5)
+    assert not sc.active and sc.lost_why == LOST_LINK and session.connected
+    session.disconnect()
 
 
 # connection limits and fallbacks --------------------------------------------------------

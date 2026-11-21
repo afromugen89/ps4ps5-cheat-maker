@@ -12,6 +12,7 @@ import logging
 import os
 import sys
 import threading
+import time
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -28,6 +29,10 @@ CRASH_FILE_NAME = "crash.log"
 CRASH_MAX_BYTES = 1024 * 1024  # trim crash.log once it passes 1 MB...
 CRASH_KEEP_BYTES = 256 * 1024  # ...down to its last 256 KB
 CRASH_HEADER = "=== Cheat Maker start"
+CRASH_EXIT = "=== Cheat Maker exit"
+"""Written on a clean exit. On Windows faulthandler also dumps exceptions the app
+handled ("Windows fatal exception: code 0x..."), so a dump before this line isn't a
+crash; one after it is (Qt teardown)."""
 CRASH_TAIL_LINES = 60
 # What faulthandler writes when the process dies natively (or hangs on exit).
 CRASH_MARKERS = ("Fatal Python error", "Windows fatal exception", "Current thread", "Thread 0x")
@@ -164,29 +169,46 @@ def _trim_crash_log(path: Path) -> None:
         )
 
 
-def previous_native_crash(path: Path) -> str | None:
-    """The tail of what faulthandler wrote after the last start header, if anything."""
+def _after_line(text: str, marker: str) -> str | None:
+    """The text after the line holding the last ``marker``; None if there is none."""
+    at = text.rfind(marker)
+    if at < 0:
+        return None
+    line_end = text.find("\n", at)
+    return "" if line_end < 0 else text[line_end + 1 :]
+
+
+def previous_native_crash(path: Path, ended_unexpectedly: bool = True) -> str | None:
+    """The tail of what faulthandler wrote in the last run, if that run crashed.
+
+    A run that wrote the exit marker only counts what came after it (a crash while
+    closing). A run without one counts only when ``ended_unexpectedly`` (the main log
+    has its start but no exit): otherwise the dumps are exceptions Windows reported
+    but the app handled."""
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
-    last_header = text.rfind(CRASH_HEADER)
-    if last_header >= 0:
-        line_end = text.find("\n", last_header)
-        section = "" if line_end < 0 else text[line_end + 1 :]
-    else:
+    section = _after_line(text, CRASH_HEADER)
+    if section is None:
         section = text  # header trimmed away or never written: look at it all
+    after_exit = _after_line(section, CRASH_EXIT)
+    if after_exit is not None:
+        section = after_exit
+    elif not ended_unexpectedly:
+        return None
     if not any(marker in section for marker in CRASH_MARKERS):
         return None
     lines = section.strip().splitlines()
     return "\n".join(lines[-CRASH_TAIL_LINES:])
 
 
-def install_native_crash_log() -> Path:
+def install_native_crash_log(ended_unexpectedly: bool = True) -> Path:
     """Send native crashes (access violations, aborts) of every thread to crash.log.
 
     Reports a crash left by the previous run to the main log first, so it shows
-    up in "Copy log". Safe to call twice.
+    up in "Copy log" (see previous_native_crash for ``ended_unexpectedly``). Safe to
+    call twice.
     """
     global _crash_file
     path = crash_log_path()
@@ -194,7 +216,7 @@ def install_native_crash_log() -> Path:
         return path
     path.parent.mkdir(parents=True, exist_ok=True)
     _trim_crash_log(path)
-    previous = previous_native_crash(path)
+    previous = previous_native_crash(path, ended_unexpectedly)
     if previous:
         logging.getLogger("cheatmaker.crash").warning(
             "action=previous_crash file=%s last run stopped with a native error:\n%s",
@@ -208,6 +230,18 @@ def install_native_crash_log() -> Path:
     faulthandler.enable(file=f, all_threads=True)
     _crash_file = f
     return path
+
+
+def mark_clean_exit() -> None:
+    """Write the exit marker to crash.log; it stays armed for Qt's teardown."""
+    if _crash_file is None:
+        return
+    stamp = datetime.now().isoformat(sep=" ", timespec="seconds")
+    try:
+        _crash_file.write(f"{CRASH_EXIT} {stamp}\n")
+        _crash_file.flush()
+    except OSError:
+        logging.getLogger("cheatmaker.crash").warning("action=crash_log_exit_failed")
 
 
 def uninstall_native_crash_log() -> None:
@@ -242,12 +276,15 @@ def previous_run_ended_unexpectedly(path: Path | None = None) -> bool:
     return EXIT_MARKER not in text[start:]
 
 
-def check_previous_run() -> None:
+def check_previous_run() -> bool:
+    """Log and return whether the previous run ended without its exit line."""
     if previous_run_ended_unexpectedly():
         logging.getLogger("cheatmaker.crash").warning(
             "action=previous_run_ended_unexpectedly the last run has a start but no exit "
             "(closed by a crash, a freeze or Task Manager)"
         )
+        return True
+    return False
 
 
 # --- Qt's own messages --------------------------------------------------------
@@ -258,6 +295,37 @@ def install_qt_message_handler() -> None:
     from PySide6.QtCore import qInstallMessageHandler
 
     qInstallMessageHandler(qt_message_handler)
+
+
+QT_REPEAT_S = 10.0  # the same Qt message is logged at most once in this many seconds
+
+
+class _Repeats:
+    """Rate limit for identical messages (Qt can warn hundreds of times a second)."""
+
+    MAX_KEYS = 500
+
+    def __init__(self, every_s: float, clock=time.monotonic) -> None:
+        self.every_s = every_s
+        self.clock = clock
+        self._lock = threading.Lock()
+        self._last: dict[object, tuple[float, int]] = {}  # key -> (logged at, skipped)
+
+    def seen(self, key: object) -> int | None:
+        """None: skip it. Else log it, saying how many were skipped since."""
+        now = self.clock()
+        with self._lock:
+            logged_at, skipped = self._last.get(key, (None, 0))
+            if logged_at is not None and now - logged_at < self.every_s:
+                self._last[key] = (logged_at, skipped + 1)
+                return None
+            if len(self._last) >= self.MAX_KEYS:
+                self._last.clear()
+            self._last[key] = (now, 0)
+            return skipped
+
+
+_qt_repeats = _Repeats(QT_REPEAT_S)
 
 
 def qt_message_handler(mode, context, message: str) -> None:
@@ -273,6 +341,10 @@ def qt_message_handler(mode, context, message: str) -> None:
     where = ""
     if context is not None and getattr(context, "file", None):
         where = f" at={context.file}:{context.line}"
-    logging.getLogger("cheatmaker.qt").log(level, "action=qt_message%s %s", where, message)
+    repeats = 0 if level == logging.CRITICAL else _qt_repeats.seen((level, where, message))
+    if repeats is None:  # the same message logged moments ago
+        return
+    more = f" repeats={repeats}" if repeats else ""
+    logging.getLogger("cheatmaker.qt").log(level, "action=qt_message%s%s %s", where, more, message)
     if level == logging.CRITICAL:
         flush_handlers()  # Qt aborts the process right after a fatal message

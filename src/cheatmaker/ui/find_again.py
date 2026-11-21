@@ -35,7 +35,13 @@ from cheatmaker.core import refind as rf
 from cheatmaker.core.cheats import Cheat, Location, LocationKind
 from cheatmaker.core.session import GameInfo
 from cheatmaker.core.values import ValueType
-from cheatmaker.errors import CheatMakerError, ConnectionLost, FindFailed, ScanCancelled
+from cheatmaker.errors import (
+    CheatMakerError,
+    ConnectionLost,
+    ConsoleBusy,
+    FindFailed,
+    ScanCancelled,
+)
 from cheatmaker.ui import hints
 from cheatmaker.ui.controller import Controller
 from cheatmaker.ui.tasks import _Signals
@@ -57,6 +63,8 @@ def read_field(ctl: Controller, obj: pj.ObjectSpec, addr: int, name: str) -> flo
         f = obj.field(name)
         g = ctl.session.require_game()
         raw = ctl.session.require_client().read(g.pid, addr + f.off, f.vtype.size)
+    except ConsoleBusy:  # the UI thread may try again; nothing is gone
+        raise
     except (CheatMakerError, KeyError):
         return None
     return f.vtype.decode(raw)
@@ -576,14 +584,15 @@ class FindAgain(QObject):
         """The player said Yes to a brought-over object: it is confirmed, and its class
         is learned again from its first 8 bytes when they point into the game's module
         (memory search and the wide ranges come back, spec AC-U5). Saved."""
-        obj.check = False
         if obj.relearn_class:
-            obj.relearn_class = False
-            try:
+            try:  # read first: busy (UI thread) changes nothing, the next try asks again
                 vt = ah.object_vtable(self.ctl.session, addr)
+            except ConsoleBusy:
+                raise
             except CheatMakerError as exc:
                 log.warning("action=carry_confirm object=%s reason=%s", obj.id, exc)
                 vt = None
+            obj.relearn_class = False
             if vt is not None:
                 obj.vtable = vt
                 if not obj.anchors_of(pj.VtableAnchor):
@@ -591,6 +600,7 @@ class FindAgain(QObject):
                 for f in obj.fields:
                     if f.range is not None:
                         f.range = rf.class_range(f.vtype, f.last if f.last is not None else 0)
+        obj.check = False
         log.info(
             "action=carry_confirm object=%s class=%s",
             obj.id,
@@ -677,6 +687,10 @@ class FindAgain(QObject):
             try:
                 state = ah.install(session, obj)
                 self.note_install(obj, state, session.require_game().pid)
+            except ConsoleBusy:  # UI thread: nothing put in; decide again next time
+                with self._lock:
+                    self.by_chain.add(obj.id)
+                raise
             except CheatMakerError as exc:
                 log.warning("action=hook_install object=%s reason=%s", obj.id, exc)
             else:
@@ -699,6 +713,8 @@ class FindAgain(QObject):
             try:
                 state = ah.install(self.ctl.session, obj)
                 self.note_install(obj, state, self.ctl.session.require_game().pid)
+            except ConsoleBusy:  # the UI thread may try again; nothing is gone
+                raise
             except CheatMakerError as exc:
                 log.warning("action=hook_install object=%s reason=%s", obj.id, exc)
 
@@ -725,6 +741,12 @@ class FindAgain(QObject):
 
     # -- a weak object moved: ask before following it ---------------------------------
     def check_pending(self) -> None:
+        try:
+            self._check_pending()
+        except ConsoleBusy:  # a timer tick: the next one asks again
+            log.info("action=check_pending busy: skipped")
+
+    def _check_pending(self) -> None:
         if self._asking or not self.ctl.session.connected:
             return
         cheats = self.ctl.cheat_file.cheats if self.ctl.cheat_file else []
@@ -789,9 +811,9 @@ class FindAgain(QObject):
         else:
             text = hints.CONFIRM.format(name=obj.label, value=fmt(value))
         if self.ask_confirm(text):
-            tracker.confirmed = True
             if obj.check:
                 self.carried_yes(obj, addr)
+            tracker.confirmed = True
             return True
         no = hints.CONFIRM_NO_CARRIED if obj.check else hints.CONFIRM_NO
         self.ctl.message.emit(no.format(name=obj.label))
@@ -821,11 +843,11 @@ class FindAgain(QObject):
             versions = dict.fromkeys(self._carried_version(o) for o in carried)
             text = hints.CARRIED_FROM.format(version=", ".join(versions)) + " " + text
         if self.ask_confirm(text):
+            for obj in carried:  # first: busy here (UI thread) leaves them unconfirmed
+                self.carried_yes(obj, where[obj.id])
             for t in trackers:
                 if t is not None:
                     t.confirmed = True
-            for obj in carried:
-                self.carried_yes(obj, where[obj.id])
             return True
         if carried:  # search for a value, not for the cheat's name
             self.ctl.message.emit(hints.CONFIRM_NO_CARRIED.format(name=carried[0].label))
@@ -1011,7 +1033,8 @@ class LearnDialog(QDialog):
         self.address = cheat.locations[0].address(ctl.session.require_game().module_base)
         tracker = ctl.live.trackers.get(cheat.anchor[0]) if cheat.anchor else None
         if tracker is not None and cheat.anchor is not None:
-            self.address = tracker.field_address(cheat.anchor[1]) or self.address
+            with contextlib.suppress(ConsoleBusy):  # busy: start from the saved address
+                self.address = tracker.field_address(cheat.anchor[1]) or self.address
         self.learned: rf.Learned | None = None
         self.parts_done = False
         self._cancel: threading.Event | None = None

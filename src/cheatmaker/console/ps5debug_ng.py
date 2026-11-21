@@ -90,6 +90,14 @@ MAIN_THREAD_WAIT = 1.5
 """How long the UI thread waits for the main connection before it gives up with
 ConsoleBusy (a backstop: searches run on their own connection)."""
 BUSY_MESSAGE = "The PS5 is busy right now. Try again in a moment."
+BUSY_HOLD_S = 1.0
+"""After the UI thread gave up waiting, its next tries in this window wait only
+BUSY_HOLD_WAIT (several reads in one UI action must not each wait MAIN_THREAD_WAIT)."""
+BUSY_HOLD_WAIT = 0.1
+"""Enough for one freezer write or read to finish (about 36 ms on the PS5)."""
+CLOSED_MESSAGE = "the connection to the PS5 is closed"
+SEARCH = "search"  # a job on the scan link: the player's search (or a class search)
+POINTERS = "pointers"  # a pointer pass: Start over leaves it running
 POOL_RETRY_S = 60.0  # after an extra connection fails, scan without it this long
 PIPELINE_DEPTH = 128
 """Plain reads sent before waiting for the answers. NG reads requests in order with
@@ -418,13 +426,21 @@ class Ps5DebugNgClient:
         self._lock = threading.RLock()  # freezer thread and UI share the socket
         # Searches run on their own connection, the scan link (opened on the first
         # search), so a long snapshot doesn't hold the socket that reads and writes use.
-        # _link_lock only guards opening it. On the link itself, _uses counts the calls
-        # running on it and _discarded marks it closed under a running search.
+        # _link_lock guards _link and _closed (short holds); _open_lock lets one thread
+        # open the link at a time. On the link itself, _jobs counts the calls running
+        # on it by kind, _cancelling is a cancel in progress (new calls wait for it),
+        # _cancel_pending a cancel left for when the pointer passes end, and
+        # _discarded marks it closed under a running search.
         self._link: Ps5DebugNgClient | None = None
         self._link_lock = threading.Lock()
-        self._use_lock = threading.Lock()
-        self._uses = 0
+        self._open_lock = threading.Lock()
+        self._closed = False
+        self._use = threading.Condition()
+        self._jobs: dict[str, int] = {SEARCH: 0, POINTERS: 0}
+        self._cancelling = False
+        self._cancel_pending = False
         self._discarded = False
+        self._busy_until = 0.0  # UI-thread tries give up at once until then
         self._pool_capped_logged = False
         # The PS5 dials back here for watchpoint hits. Tests set 0 (any free port) and
         # read the one bound from interrupt_bound.
@@ -480,7 +496,9 @@ class Ps5DebugNgClient:
         self._close_multi()
 
     def close(self) -> None:
-        link, self._link = self._link, None
+        with self._link_lock:  # a link being opened right now is closed by its opener
+            self._closed = True
+            link, self._link = self._link, None
         if link is not None:  # a search running on it ends with ScanCancelled
             self._discard(link)
         self._close_own()
@@ -501,14 +519,26 @@ class Ps5DebugNgClient:
     # -- the scan link -----------------------------------------------------------
     def _search_link(self, open_link: bool) -> Ps5DebugNgClient | None:
         """The scan link, opened when ``open_link`` and there is none. None: searches
-        run on this connection (no link could be opened, or none is needed)."""
+        run on this connection (no link could be opened, or none is needed). Raises
+        ConnectionLost once this client is closed, also when close() came while the
+        link was being opened (that link is closed again)."""
         link = self._link
         if link is not None or not open_link:
             return link
-        with self._link_lock:
-            if self._link is None:
-                self._link = self._open_link()
-            return self._link
+        with self._open_lock:
+            with self._link_lock:
+                if self._closed:
+                    raise ConnectionLost(CLOSED_MESSAGE)
+                if self._link is not None:
+                    return self._link
+            link = self._open_link()  # slow: close() must not wait for it
+            with self._link_lock:
+                if not self._closed:
+                    self._link = link
+                    return link
+            if link is not None:
+                link.close()
+            raise ConnectionLost(CLOSED_MESSAGE)
 
     def _open_link(self) -> Ps5DebugNgClient | None:
         try:
@@ -526,27 +556,46 @@ class Ps5DebugNgClient:
                 link.close()
                 raise
         except Exception as exc:  # e.g. the PS5's client slots are full
-            log.warning("action=scan_link reason=%s; searching on the main connection", exc)
+            log.warning(
+                "action=scan_link reason=%s; searching on the main connection. The window "
+                "may be slow to answer while this search runs; if this keeps happening, "
+                "restart PS5Debug-NG on the PS5.",
+                exc,
+            )
             return None
         log.info("action=scan_link opened")
         return link
 
-    def _run_search(self, call: Callable[[Ps5DebugNgClient], object], open_link: bool = False):
+    def _run_search(
+        self,
+        call: Callable[[Ps5DebugNgClient], object],
+        open_link: bool = False,
+        kind: str = SEARCH,
+    ):
         """``call(conn)`` on the connection that holds searches: the scan link, or this
         one when there is no link. A link that drops is let go and the error becomes
         ScanLinkLost (the session stays connected); a link closed under the call
         (Start over, disconnect) makes it ScanCancelled."""
+        if self._closed:
+            raise ConnectionLost(CLOSED_MESSAGE)
         link = self._search_link(open_link)
         if link is None:
             return call(self)
-        with link._use_lock:
-            link._uses += 1
+        with link._use:
+            while link._cancelling:  # a Start over is freeing the old search
+                link._use.wait()
+            link._jobs[kind] += 1
+            catch_up = kind == SEARCH and link._cancel_pending
+            link._cancel_pending = link._cancel_pending and not catch_up
         try:
             if link._discarded:
                 raise ScanCancelled("the search was stopped")
+            if catch_up:  # a Start over came during a pointer pass
+                link._cancel_here()
             out = call(link)
         except Exception as exc:
             if link._discarded:
+                link._abort()  # sockets this call opened after the discard
                 raise ScanCancelled("the search was stopped") from exc
             if isinstance(exc, ConnectionLost):
                 log.warning("action=scan_link_lost reason=%s; the search is gone", exc)
@@ -556,11 +605,21 @@ class Ps5DebugNgClient:
                 raise ScanLinkLost(f"the search connection dropped: {exc}") from exc
             raise
         finally:
-            with link._use_lock:
-                link._uses -= 1
+            self._end_job(link, kind)
         if link._discarded:
+            link._abort()
             raise ScanCancelled("the search was stopped")
         return out
+
+    @staticmethod
+    def _end_job(link: Ps5DebugNgClient, kind: str) -> None:
+        with link._use:
+            link._jobs[kind] -= 1
+            catch_up = link._cancel_pending and not any(link._jobs.values())
+            if catch_up:
+                link._cancel_pending = False
+        if catch_up and not link._discarded:
+            link._cancel_here()  # the Start over that came during a pointer pass
 
     def _discard(self, link: Ps5DebugNgClient) -> None:
         """Let ``link`` go without waiting: a search running on it fails at once."""
@@ -569,14 +628,17 @@ class Ps5DebugNgClient:
             self._link = None
         link._abort()
 
-    # -- the main connection's lock ----------------------------------------------
+    # -- the socket lock ------------------------------------------------------------
     @contextlib.contextmanager
-    def _main_lock(self):
-        """The socket lock for reads, writes and info. The UI thread waits at most
-        MAIN_THREAD_WAIT, then gets ConsoleBusy (the window must not hang); other
-        threads (freezer, searches) wait as long as it takes."""
+    def _locked(self):
+        """The socket lock. The UI thread waits at most MAIN_THREAD_WAIT, then gets
+        ConsoleBusy (the window must not hang), and for BUSY_HOLD_S after that it
+        waits only BUSY_HOLD_WAIT; other threads (freezer, searches) wait as long as it takes."""
         if threading.current_thread() is threading.main_thread():
-            if not self._lock.acquire(timeout=MAIN_THREAD_WAIT):
+            busy = time.monotonic() < self._busy_until
+            got = self._lock.acquire(timeout=BUSY_HOLD_WAIT if busy else MAIN_THREAD_WAIT)
+            if not got:
+                self._busy_until = time.monotonic() + BUSY_HOLD_S
                 log.warning("action=console_busy cmd_before=%s", self._w.last_cmd)
                 raise ConsoleBusy(BUSY_MESSAGE)
         else:
@@ -585,6 +647,13 @@ class Ps5DebugNgClient:
             yield
         finally:
             self._lock.release()
+
+    @contextlib.contextmanager
+    def batch(self):
+        """Hold the socket for several calls (a cheat's whole set of writes), so they
+        all go through together; on the UI thread it raises ConsoleBusy before any."""
+        with self._locked():
+            yield
 
     def _close_pool(self) -> None:
         with self._pool_lock:
@@ -604,12 +673,12 @@ class Ps5DebugNgClient:
 
     # -- info ----------------------------------------------------------------
     def version(self) -> str:
-        with self._main_lock():
+        with self._locked():
             self._w.request(Cmd.VERSION)
             return self._w.recv(self._w.u32()).decode("ascii", "replace")
 
     def processes(self) -> list[ProcInfo]:
-        with self._main_lock():
+        with self._locked():
             self._w.request(Cmd.PROC_LIST)
             self._w.ok("process list")
             entries = []
@@ -639,7 +708,7 @@ class Ps5DebugNgClient:
         stop asking and the session falls back to the process list."""
         if not self._fg_supported:
             return None
-        with self._main_lock():
+        with self._locked():
             try:
                 self._w.request(Cmd.CONSOLE_FOREGROUND_APP)
                 status = self._w.status()
@@ -660,7 +729,7 @@ class Ps5DebugNgClient:
         return ForegroundApp(pid, title_id, _cstr(rec[84:124]), _cstr(rec[124:140]))
 
     def maps(self, pid: int) -> list[MemMap]:
-        with self._main_lock():
+        with self._locked():
             self._w.request(Cmd.PROC_MAPS, struct.pack("<I", pid))
             self._w.ok("memory map", ReadFailed)
             out = []
@@ -673,7 +742,7 @@ class Ps5DebugNgClient:
     # -- memory --------------------------------------------------------------
     def read(self, pid: int, addr: int, size: int) -> bytes:
         out = bytearray()
-        with self._main_lock():
+        with self._locked():
             while len(out) < size:
                 n = min(MAX_BODY, size - len(out))
                 self._w.request(Cmd.PROC_READ, struct.pack("<IQI", pid, addr + len(out), n))
@@ -682,7 +751,7 @@ class Ps5DebugNgClient:
         return bytes(out)
 
     def write(self, pid: int, addr: int, data: bytes) -> None:
-        with self._main_lock():
+        with self._locked():
             for i in range(0, len(data), MAX_BODY):
                 part = data[i : i + MAX_BODY]
                 # The server acks the 16-byte header, THEN reads the bytes to write
@@ -702,7 +771,7 @@ class Ps5DebugNgClient:
         fresh connection and raises ReadFailed."""
         out: list[bytes] = []
         bad: int | None = None
-        with self._main_lock():
+        with self._locked():
             for i in range(0, len(spans), PIPELINE_DEPTH):
                 batch = spans[i : i + PIPELINE_DEPTH]
                 self._w.last_cmd = Cmd.PROC_READ.name
@@ -728,7 +797,7 @@ class Ps5DebugNgClient:
     def _auth(self) -> None:
         if self._authed:
             return
-        with self._lock:
+        with self._locked():
             self._w.request(Cmd.PROC_AUTH, struct.pack("<II", AUTH_MAGIC, 2))
             self._w.ok("scan auth")
             n = self._w.u16()
@@ -740,7 +809,7 @@ class Ps5DebugNgClient:
 
     def _has_turbo(self) -> bool:
         if self._turbo is None:
-            with self._lock:
+            with self._locked():
                 self._w.request(Cmd.TURBOSCAN_CAPS)
                 self._turbo = self._w.status() == Status.SUCCESS
                 if self._turbo:
@@ -795,6 +864,9 @@ class Ps5DebugNgClient:
                     log.warning("action=scan_pool reason=%s; scanning on fewer connections", exc)
                     self._pool_failed_at = time.monotonic()
                     break
+                if self._discarded:  # Start over came while it was being opened
+                    w.close()
+                    break
                 w._turbo, w._engines = self._turbo, self._engines
                 self._pool.append(w)
             return [self, *self._pool]
@@ -838,7 +910,7 @@ class Ps5DebugNgClient:
             flags = 0
         body = hdr + (struct.pack("<I", flags) if turbo else b"")
         hits = []
-        with self._lock, self._timeout(SCAN_TIMEOUT):
+        with self._locked(), self._timeout(SCAN_TIMEOUT):
             self._w.request(cmd, body)
             if self._w.status() != Status.SUCCESS:
                 if turbo and flags:
@@ -878,7 +950,7 @@ class Ps5DebugNgClient:
         body = hdr + (struct.pack("<I", 0) if turbo else b"")
         out = []
         unpack = struct.Struct("<IQ").unpack_from
-        with self._lock, self._timeout(SCAN_TIMEOUT):
+        with self._locked(), self._timeout(SCAN_TIMEOUT):
             self._w.request(Cmd.TURBOSCAN_START if turbo else Cmd.PROC_SCAN_START, body)
             self._w.ok("pointer scan", ReadFailed)
             self._w.send(vbytes)
@@ -902,10 +974,16 @@ class Ps5DebugNgClient:
         progress: ProgressFn | None = None,
         cancel: threading.Event | None = None,
     ) -> list[tuple[int, int]]:
-        """Pointer pass; runs on the scan link like a search."""
+        """Pointer pass; runs on the scan link like a search (on this connection while
+        a search is kept here because no link could be opened)."""
         return self._run_search(
-            lambda c: c._pointers(pid, regions, low, high, keep, progress, cancel), open_link=True
+            lambda c: c._pointers(pid, regions, low, high, keep, progress, cancel),
+            open_link=not self._holds_search(),
+            kind=POINTERS,
         )
+
+    def _holds_search(self) -> bool:
+        return self._scan is not None or self._resident is not None or self._multi is not None
 
     def _pointers(
         self,
@@ -1093,24 +1171,34 @@ class Ps5DebugNgClient:
 
     def scan_cancel(self) -> None:
         """End the search. Never waits for a running one: its connection is closed
-        instead and that search ends with ScanCancelled."""
+        instead and that search ends with ScanCancelled. A running pointer pass is
+        left alone; the search is freed when it ends."""
+        if self._closed:
+            return
         self._cancel_here()  # a search kept here while there was no link (cheap if none)
         link = self._link
         if link is None:
             return
-        with link._use_lock:
-            idle = link._uses == 0
-            if idle:
-                link._uses += 1
-        if not idle:
+        with link._use:
+            searching = link._jobs[SEARCH] > 0
+            busy = searching or link._jobs[POINTERS] > 0 or link._cancelling
+            if not busy:
+                link._cancelling = True  # new calls wait until the search is freed
+            elif not searching:
+                link._cancel_pending = True
+        if searching:
             log.info("action=scan_link_discard: a search is running; closing its connection")
             self._discard(link)
+            return
+        if busy:
+            log.info("action=scan_cancel deferred: a pointer pass is running")
             return
         try:
             link._cancel_here()
         finally:
-            with link._use_lock:
-                link._uses -= 1
+            with link._use:
+                link._cancelling = False
+                link._use.notify_all()
 
     def scan_counts(self) -> dict[ValueType, int]:
         """No lock and no I/O: safe from any thread while a search runs."""
@@ -1224,7 +1312,7 @@ class Ps5DebugNgClient:
         )
         t0 = time.monotonic()
         cancelled = False
-        with self._lock, self._timeout(SCAN_TIMEOUT):
+        with self._locked(), self._timeout(SCAN_TIMEOUT):
             self._w.request(Cmd.TURBOSCAN_START, hdr)
             self._w.ok("snapshot start", ReadFailed)
             self._w.ok("snapshot start", ReadFailed)  # no seed value for unknown
@@ -1287,7 +1375,7 @@ class Ps5DebugNgClient:
         cancelled = False
         rescan = TS_RESCAN_ALIASING if self._rescan_aliasing() else 0
         t0 = time.monotonic()
-        with self._lock, self._timeout(SCAN_TIMEOUT):
+        with self._locked(), self._timeout(SCAN_TIMEOUT):
             self._w.request(
                 Cmd.TURBOSCAN_COUNT,
                 struct.pack(
@@ -1332,7 +1420,7 @@ class Ps5DebugNgClient:
         assert self._resident is not None
         _pid, vtype, _ = self._resident
         n = vtype.size
-        with self._lock:
+        with self._locked():
             self._w.request(Cmd.TURBOSCAN_GET, struct.pack("<III", 0, limit, 0))
             self._w.ok("get matches", ReadFailed)
             hdr = self._w.u32()
@@ -1386,6 +1474,11 @@ class Ps5DebugNgClient:
             except Exception as exc:  # no free connection: search the first types only
                 log.warning("action=multi_type_conn reason=%s; fewer types searched", exc)
                 break
+            if self._discarded:  # Start over came while it was being opened
+                c.close()
+                for other in conns[1:]:
+                    other.close()
+                raise ScanCancelled("the search was stopped")
             conns.append(c)
         types = vtypes[: len(conns)]
         for c, vt in zip(conns, types, strict=True):
@@ -1528,7 +1621,7 @@ class Ps5DebugNgClient:
         if self._resident is None:
             return
         self._resident = None
-        with contextlib.suppress(Exception), self._lock:
+        with contextlib.suppress(Exception), self._locked():
             self._w.request(Cmd.TURBOSCAN_END)
             self._w.status()
 
@@ -1689,7 +1782,7 @@ class Ps5DebugNgClient:
         t.start()
         found: list[WatchHit] = []
         try:
-            with self._main_lock():
+            with self._locked():
                 with self._timeout(ATTACH_TIMEOUT):
                     self._w.request(Cmd.DEBUG_ATTACH, struct.pack("<I", pid))
                     status = self._w.status()
