@@ -612,8 +612,9 @@ def test_bug09_live_list_does_not_wait_on_the_link_during_a_pointer_pass(qtbot):
     [0.6, 2.5],  # past the read timeout (now waited for) / past even the scan timeout
 )
 def test_bug10_slow_snapshot_end_does_not_desync_the_next_search(monkeypatch, end_delay):
-    """BUG-10 (fixed): END waits SCAN_TIMEOUT; if even that runs out the connection is
-    closed, so a late answer is never read as the next command's."""
+    """BUG-10 (fixed): a late END answer is never read as the next command's: the
+    connection is closed when END times out (the UI thread waits at most IO_TIMEOUT,
+    a worker SCAN_TIMEOUT), and the next search reopens the link."""
     monkeypatch.setattr(ps5debug_ng, "IO_TIMEOUT", 0.3)  # real: 4 s
     monkeypatch.setattr(ps5debug_ng, "SCAN_TIMEOUT", 2.0)  # real: 60 s
     server = FakeNgServer(snapshot=True)
@@ -629,7 +630,9 @@ def test_bug10_slow_snapshot_end_does_not_desync_the_next_search(monkeypatch, en
     regions = _regions(cl)
     try:
         assert cl.scan_start(PID, regions, ValueType.INT32, Compare.UNKNOWN, None) > 0
-        cl.scan_cancel()  # Start over
+        t_cancel = time.monotonic()
+        cl.scan_cancel()  # Start over, on the UI (main) thread
+        assert time.monotonic() - t_cancel < 1.0, "the window never waits long for END"
         time.sleep(end_delay + 0.2)  # a late answer would now wait on the socket
         t0 = time.monotonic()
         assert cl.scan_start(PID, regions, ValueType.INT32, Compare.EXACT, 100) == 2

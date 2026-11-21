@@ -1616,7 +1616,7 @@ class Ps5DebugNgClient:
         conns, self._multi = self._multi, None
         for c in conns or []:
             if c is not self:
-                c._end_resident()
+                c._end_resident()  # the UI thread waits at most IO_TIMEOUT for it
                 c.close()
         if conns:
             self._end_resident()
@@ -1667,13 +1667,18 @@ class Ps5DebugNgClient:
             self._end_pending = True
         except Exception:  # e.g. a late answer: never read it as the next command's
             log.warning("action=snapshot_end failed; closing this connection", exc_info=True)
-            self._w.close()  # the next call fails at once (main reconnects, a link reopens)
+            # The next call on it fails at once: a link is reopened (BUG-07 retry); main
+            # (fallback mode only) is reported as a lost connection.
+            self._w.close()
 
     def _send_end(self) -> None:
         """Free the console's snapshot (call holding the lock). A failure raises
         ConnectionLost: carrying on could read its late answer as the next command's."""
         self._end_pending = False
-        with self._timeout(SCAN_TIMEOUT):  # freeing a multi-GB snapshot can be slow
+        # Freeing a multi-GB snapshot can be slow: a worker waits for it, but the UI
+        # thread never waits past IO_TIMEOUT (on a timeout the socket is closed instead).
+        wait = IO_TIMEOUT if on_ui_thread() else SCAN_TIMEOUT
+        with self._timeout(wait):
             self._w.request(Cmd.TURBOSCAN_END)
             self._w.status()
 

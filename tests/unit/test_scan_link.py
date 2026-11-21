@@ -700,3 +700,31 @@ def test_snapshot_end_that_fails_stops_the_next_command(monkeypatch):
     time.sleep(0.05)
     assert server.conn_commands[MAIN][sent:] == [Cmd.TURBOSCAN_END], "no read was sent"
     cl.close()
+
+
+def test_slow_snapshot_end_waits_longer_off_the_ui_thread(monkeypatch):
+    """A worker waits up to SCAN_TIMEOUT for a slow END and keeps the connection."""
+    monkeypatch.setattr(ps5debug_ng, "IO_TIMEOUT", 0.3)
+    monkeypatch.setattr(ps5debug_ng, "SCAN_TIMEOUT", 2.0)
+    server = FakeNgServer(snapshot=True)
+    handle = server._handle
+
+    def slow_end(c, cmd, body):
+        if cmd == Cmd.TURBOSCAN_END:
+            time.sleep(0.6)
+        return handle(c, cmd, body)
+
+    server._handle = slow_end
+    cl = _connect(server, scan_connections=1)
+    regions = _regions(cl)
+    try:
+        assert cl.scan_start(PID, regions, ValueType.INT32, Compare.UNKNOWN, None) > 0
+        link = cl._link
+        wire = link._w
+        done = threading.Event()
+        threading.Thread(target=lambda: (cl.scan_cancel(), done.set()), daemon=True).start()
+        assert done.wait(3.0)
+        assert cl._link is link and link._w is wire, "END answered in time: link kept"
+        assert cl.scan_start(PID, regions, ValueType.INT32, Compare.EXACT, 100) == 2
+    finally:
+        cl.close()
