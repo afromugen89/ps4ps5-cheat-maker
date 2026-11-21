@@ -30,6 +30,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 
+from cheatmaker.busy import held
 from cheatmaker.console.client import MemMap, ProgressFn
 from cheatmaker.core import anchor_hook as ah
 from cheatmaker.core import cave as cv
@@ -48,7 +49,14 @@ from cheatmaker.core.project import (
 )
 from cheatmaker.core.session import Session
 from cheatmaker.core.values import ValueType
-from cheatmaker.errors import CheatMakerError, FindFailed, LockFailed, ReadFailed, ScanCancelled
+from cheatmaker.errors import (
+    CheatMakerError,
+    ConsoleBusy,
+    FindFailed,
+    LockFailed,
+    ReadFailed,
+    ScanCancelled,
+)
 
 log = logging.getLogger(__name__)
 
@@ -104,6 +112,8 @@ def verify(
         for f in obj.fields:
             if not f.plausible(client.read(game.pid, addr + f.off, f.vtype.size)):
                 return f"{f.name} doesn't look right"
+    except ConsoleBusy:  # the UI thread may try again; nothing is gone
+        raise
     except ReadFailed:
         return "can't be read"
     return None
@@ -203,6 +213,8 @@ def find_again(
         while True:
             try:
                 addr, _count = ah.read_slot(session, hook)
+            except ConsoleBusy:  # the UI thread may try again; nothing is gone
+                raise
             except ReadFailed:
                 addr = 0
             if addr and attempt("hook_slot", addr):
@@ -504,7 +516,7 @@ class Tracker:
 
         ``on_lost`` runs after the lock is released, so its console I/O (e.g. putting
         the hook in) never holds up another thread asking where the object is."""
-        with self._lock:
+        with held(self._lock):  # the UI thread waits at most MAIN_THREAD_WAIT
             addr, lost = self._current()
         if lost and self.on_lost is not None:
             self.on_lost()
@@ -616,6 +628,8 @@ class Tracker:
             return None
         try:
             addr, _count = ah.read_slot(self.session, hook)
+        except ConsoleBusy:  # the UI thread may try again; nothing is gone
+            raise
         except ReadFailed:
             return None
         if not addr or addr == self.address or addr in self.ignored:
@@ -625,7 +639,7 @@ class Tracker:
     def accept_pending(self, expected: int | None = None) -> None:
         """The player confirmed the new place. With ``expected``, only if the question
         is still about that place (it may have answered itself meanwhile)."""
-        with self._lock:
+        with held(self._lock):  # the UI thread waits at most MAIN_THREAD_WAIT
             if expected is not None and self.pending != expected:
                 return
             if self.pending is not None:
@@ -635,7 +649,7 @@ class Tracker:
     def reject_pending(self, expected: int | None = None) -> None:
         """Not it. If the old place still verified, keep it and never ask about that
         other object again; otherwise forget both and stay paused until a new search."""
-        with self._lock:
+        with held(self._lock):  # the UI thread waits at most MAIN_THREAD_WAIT
             if expected is not None and self.pending != expected:
                 return
             if self.pending_both and self.pending is not None:

@@ -8,12 +8,14 @@ import struct
 import pytest
 from PySide6.QtCore import Qt
 
+from cheatmaker.busy import BUSY_MESSAGE
 from cheatmaker.console.client import WatchHit
 from cheatmaker.core import anchor_hook as ah
 from cheatmaker.core import project as pj
 from cheatmaker.core import refind as rf
 from cheatmaker.core.cheats import Cheat, Location, LocationKind, combine
 from cheatmaker.core.values import ValueType
+from cheatmaker.errors import ConsoleBusy
 from cheatmaker.settings import Settings
 from cheatmaker.ui import hints
 from cheatmaker.ui.cheats_view import COL_KEEPS, COL_ON, FOUND_AGAIN
@@ -390,6 +392,120 @@ def test_moved_weak_value_asks_before_writing_again(win, console):  # M4
     win.cheats.finder.check_pending()
     assert not cheat.enabled and tracker.address is None
     assert win.status.text().startswith("OK, nothing was changed")
+
+
+def test_answer_given_while_the_ps5_is_busy_is_applied_next_tick(win, console, monkeypatch):
+    """Review round 4: a busy PS5 doesn't lose the player's answer; it says why nothing
+    happened yet and the next tick applies it without asking again."""
+    connect(win)
+    cheat = add_health_cheat(win, console.game)
+    learn(win, cheat)
+    tick(win)
+    tracker = win.ctl.live.trackers["obj1"]
+    asked = []
+    win.cheats.finder.ask_confirm = lambda text: asked.append(text) or True
+    accept = tracker.accept_pending
+    tries = []
+
+    def accept_once_busy(addr):  # the freezer holds the socket the first time
+        tries.append(addr)
+        if len(tries) == 1:
+            raise ConsoleBusy(BUSY_MESSAGE)
+        accept(addr)
+
+    monkeypatch.setattr(tracker, "accept_pending", accept_once_busy)
+    tracker.pending = console.game.player
+    win.cheats.finder.check_pending()
+    assert len(asked) == 1 and tracker.pending == console.game.player
+    assert win.status.text() == BUSY_MESSAGE
+    win.cheats.finder.check_pending()
+    assert len(asked) == 1, "not asked again"
+    assert tracker.pending is None and tracker.confirmed
+    assert not win.cheats.finder._answers
+
+
+def test_busy_message_for_a_held_answer_is_shown_once(win, console, monkeypatch):
+    """Review round 5: a PS5 busy for several ticks reports it once per answer."""
+    connect(win)
+    learn(win, add_health_cheat(win, console.game))
+    tick(win)
+    tracker = win.ctl.live.trackers["obj1"]
+    finder = win.cheats.finder
+    finder.ask_confirm = lambda text: True
+    accept = tracker.accept_pending
+    tries = []
+
+    def accept_busy_twice(addr):
+        tries.append(addr)
+        if len(tries) <= 2:
+            raise ConsoleBusy(BUSY_MESSAGE)
+        accept(addr)
+
+    monkeypatch.setattr(tracker, "accept_pending", accept_busy_twice)
+    failed = []
+    fail = win.ctl.fail
+    monkeypatch.setattr(
+        win.ctl, "fail", lambda exc, where: failed.append(where) or fail(exc, where)
+    )
+    tracker.pending = console.game.player
+    for _ in range(3):
+        finder.check_pending()
+    assert len(tries) == 3 and failed == ["find_again"]
+    assert tracker.pending is None and not finder._answers and not finder._told_busy
+
+
+def test_held_answer_is_dropped_once_its_question_is_gone(win, console, monkeypatch):
+    """Review round 5: an answer kept for a busy PS5 doesn't outlive its question."""
+    connect(win)
+    learn(win, add_health_cheat(win, console.game))
+    tick(win)
+    tracker = win.ctl.live.trackers["obj1"]
+    finder = win.cheats.finder
+    asked = []
+    finder.ask_confirm = lambda text: asked.append(text) or True
+
+    def busy(addr):
+        raise ConsoleBusy(BUSY_MESSAGE)
+
+    monkeypatch.setattr(tracker, "accept_pending", busy)
+    tracker.pending = console.game.player
+    finder.check_pending()
+    assert "obj1" in finder._answers
+    tracker.pending = None  # it answered itself (only one place still checks out)
+    finder.check_pending()
+    assert finder._answers == {} and finder._told_busy == set()
+    tracker.pending = console.game.player  # moved again later: a new question
+    finder.check_pending()
+    assert len(asked) == 2, "asked again, not answered by the old Yes"
+
+
+def test_yes_whose_carry_over_save_was_busy_is_finished_later(win, console, monkeypatch):
+    """Review round 5: the move was accepted but carried_yes was busy: a later tick
+    finishes it."""
+    connect(win)
+    learn(win, add_health_cheat(win, console.game))
+    tick(win)
+    tracker = win.ctl.live.trackers["obj1"]
+    finder = win.cheats.finder
+    finder.ask_confirm = lambda text: True
+    tracker.obj.check = True  # brought over from an older version: not confirmed yet
+    carried = finder.carried_yes
+    tries = []
+
+    def carried_once_busy(obj, addr):
+        tries.append(addr)
+        if len(tries) == 1:
+            raise ConsoleBusy(BUSY_MESSAGE)
+        carried(obj, addr)
+
+    monkeypatch.setattr(finder, "carried_yes", carried_once_busy)
+    tracker.pending = console.game.player
+    finder.check_pending()
+    assert tracker.pending is None and tracker.address == console.game.player
+    assert tracker.obj.check and finder._carry == {"obj1": console.game.player}
+    finder.check_pending()
+    assert not tracker.obj.check and finder._carry == {}
+    assert tries == [console.game.player] * 2 and not finder._answers
 
 
 def test_notes_from_an_older_app_drop_the_hook_and_say_so(win, console):  # re-review
@@ -1187,3 +1303,66 @@ def test_two_single_cheats_on_one_number_both_come_back(win, caplog):  # QA BUG-
     win.ctl.cheat_file.cheats[0].name = "God mode"  # renamed while the notes weren't loaded
     finder.ensure_cheats()
     assert [c.name for c in win.ctl.cheat_file.cheats] == ["God mode", "Health 500"]
+
+
+def test_busy_console_on_tick_refinds_nothing_and_puts_no_hook_in(win, console, monkeypatch):
+    """Review BLOCKER: "busy" is not "the value is gone". A tick on the UI thread while
+    the PS5's connection is busy fails with the busy message; nothing is re-found, no
+    hook goes in, nothing is written."""
+    from cheatmaker.errors import ConsoleBusy
+    from cheatmaker.ui import messages
+
+    console.restart(1, chain=True)
+    connect(win)
+    dlg = LearnDialog(win.ctl, win.cheats.finder, add_health_cheat(win, console.game), win)
+    dlg.pointers.setChecked(True)
+    dlg.start_btn.click()
+    win.ctl.shutdown()
+    run2 = console.restart(2, chain=True)
+    connect(win)
+    run2.move_player(fg.HEAP + 0x6000)  # the path broke: a re-find would put the hook in
+    tracker = win.ctl.live.trackers["obj1"]
+    tracker._last_try = -10.0
+    old, writes = tracker.address, len(run2.fake.writes)
+
+    def busy(*_a, **_k):
+        raise ConsoleBusy("The PS5 is busy right now. Try again in a moment.")
+
+    with monkeypatch.context() as m:  # what the client does on the UI thread when busy
+        for name in ("read", "write"):  # maps still answers: only reads are busy
+            m.setattr(run2.fake, name, busy)
+        tick(win)
+    cheat = win.ctl.cheat_file.cheats[0]
+    assert win.status.text() == messages.user_message(ConsoleBusy("x"))
+    assert not cheat.enabled and not tracker.confirmed
+    assert tracker.address == old, "not re-found"
+    assert run2.fake.peek(fg.PID, fg.READER, 1) != b"\xe9", "no hook put in"
+    assert len(run2.fake.writes) == writes, "nothing written"
+    assert "obj1" in win.cheats.finder.by_chain and win.ctl.session.connected
+    tick(win)  # not busy any more: the broken path is noticed and the hook goes in
+    assert run2.fake.peek(fg.PID, fg.READER, 1) == b"\xe9"
+    assert "obj1" not in win.cheats.finder.by_chain
+
+
+def test_hook_that_cant_come_out_while_busy_is_tried_again(win, console, monkeypatch):
+    """Re-review m5: a busy PS5 keeps the hook recorded, so the next off takes it out."""
+    from cheatmaker.errors import ConsoleBusy
+
+    connect(win)
+    cheat = add_health_cheat(win, console.game)
+    learn(win, cheat)
+    tick(win)
+    assert "obj1" in win.cheats.finder.installed
+    finder = win.cheats.finder
+
+    def busy(*_a, **_k):
+        raise ConsoleBusy("busy")
+
+    with monkeypatch.context() as m:
+        m.setattr(console.game.fake, "read", busy)
+        finder._remove(finder.installed["obj1"])
+    assert "obj1" in finder.installed, "kept for the next try"
+    assert console.game.fake.peek(fg.PID, fg.READER, 1) == b"\xe9"
+    finder._remove(finder.installed["obj1"])
+    assert "obj1" not in finder.installed
+    assert console.game.fake.peek(fg.PID, fg.READER, 10) == fg.VMOVSS_R

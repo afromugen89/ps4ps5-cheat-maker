@@ -7,6 +7,7 @@ Tests build one in code (``add_region``) or load a recorded dump directory
 
 from __future__ import annotations
 
+import contextlib
 import json
 import struct
 import threading
@@ -196,6 +197,9 @@ class FakeConsole:
             for tick in list(self.game_ticks):
                 tick()
             return self.peek(pid, addr, size)
+
+    def batch(self) -> contextlib.AbstractContextManager[None]:
+        return contextlib.nullcontext()  # no shared socket to hold
 
     def write(self, pid: int, addr: int, data: bytes) -> None:
         self._alive()

@@ -18,6 +18,7 @@ from cheatmaker.core import cave as cv
 from cheatmaker.core.cheats import Cheat
 from cheatmaker.core.locker import Writer, patch_landed, verify_original
 from cheatmaker.core.values import ValueType, parse_number
+from cheatmaker.errors import ConsoleBusy
 from cheatmaker.ui import hints
 from cheatmaker.ui.controller import Controller
 
@@ -85,16 +86,23 @@ class PlayerOnlyDialog(QDialog):
         self._untest()
         self._update()
 
-    def _untest(self) -> None:
+    def _untest(self) -> bool:
+        """Take the tested patch out. False when the PS5 was busy: the patch is still in
+        the game, so it is kept to be taken out on the next try."""
         if self.candidate is not None and self.candidate.enabled:
             try:
                 self.ctl.live.turn_off(self.candidate)
+            except ConsoleBusy as exc:
+                self.ctl.fail(exc, "lock")
+                return False
             except Exception as exc:
                 self.ctl.fail(exc, "lock")
         self.candidate = None
+        return True
 
     def do_collect(self) -> None:
-        self._untest()
+        if not self._untest():
+            return
         if self.source.enabled:  # our own freeze would only add our writes
             self.ctl.live.turn_off(self.source, restore=False)
             self.ctl.cheats_changed.emit()
@@ -135,7 +143,8 @@ class PlayerOnlyDialog(QDialog):
         row = self.fields.currentRow()
         if row < 0:
             return
-        self._untest()
+        if not self._untest():
+            return
         try:
             value, vt = self._value()
             cheat = cv.make_player_only_cheat(
@@ -167,5 +176,6 @@ class PlayerOnlyDialog(QDialog):
     def reject(self) -> None:
         if self._cancel is not None:
             self._cancel.set()
-        self._untest()
+        if not self._untest():
+            return
         super().reject()

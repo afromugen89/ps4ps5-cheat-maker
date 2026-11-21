@@ -296,3 +296,14 @@ any game; Returnal health or Obolites is fine.
 | C23b | Edit the locked value | Type a new number (e.g. 500) in that cheat's Value. | The game shows 500 and keeps it. | The `action=write` lines. |
 | C23c | Off and on again | Untick the cheat, take a hit (value goes down), tick it again. | Off: the game changes the value again. On: it goes back to the number in Value and stays. | The `action=write` lines. |
 | C23d | After a game restart | Restart the game, Connect again. | The lock cheat is still there, Value is empty with a tooltip saying to find the value again and press **Set**; ticking it still stops the value from changing. | Nothing, unless it fails. |
+
+## C24 The window stays usable during a search (added 2026-11-21)
+
+Bug fix: an "I don't know the number" search on a big game hung the window for minutes
+and frozen cheats stopped working. Searches now run on their own connection to the PS5.
+
+| # | Test | Steps | Pass when | Send back |
+|---|---|---|---|---|
+| C24a | Search with a cheat frozen | A big game (e.g. Returnal). Turn on an **Infinite Health** cheat (frozen). On Find, add an address so a live value shows. Press **I don't know the number**. While it runs, take a hit, switch tabs, scroll My cheats. | The window stays usable the whole time; health stays full; the live value keeps updating; the search finishes with a count as before. | The `action=scan_link`, `action=snapshot` and `action=freeze`/`action=write` log lines from during the snapshot (freezer writes must appear while it runs). |
+| C24b | Start over during the snapshot | Start a search as in C24a, then press **Start over** while the snapshot runs (also try it during a Went down scan). | The button answers at once; no freeze of the window; a new search can start right after. | The `action=scan_link_discard` line if any, and the time from press to the window answering. |
+| C24c | Connection count | With **Scan connections** at 8 in settings, run a number search, then an unknown search. | Both work; no "slots are full" errors. | Any `action=scan_pool` or `action=scan_link` warning lines. |

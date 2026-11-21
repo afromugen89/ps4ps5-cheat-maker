@@ -9,8 +9,10 @@ console later without the core changing.
 
 from __future__ import annotations
 
+import contextlib
 import threading
 from collections.abc import Callable
+from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from typing import Literal, Protocol, runtime_checkable
 
@@ -120,6 +122,12 @@ class ConsoleClient(Protocol):
 
     def write(self, pid: int, addr: int, data: bytes) -> None:
         """Raises WriteFailed when the console refuses or the read-back differs."""
+        ...
+
+    def batch(self) -> AbstractContextManager[None]:
+        """Hold the connection for several calls (e.g. a cheat's whole set of writes)
+        so they go through together. On the UI thread a busy connection raises
+        ConsoleBusy here, before any of them."""
         ...
 
     def scan_start(
@@ -233,3 +241,9 @@ class ConsoleClient(Protocol):
         ...
 
     def close(self) -> None: ...
+
+
+def batch_of(client: object) -> AbstractContextManager[None]:
+    """``client.batch()``, or no hold for a client without one (simple test doubles)."""
+    batch = getattr(client, "batch", None)
+    return batch() if batch is not None else contextlib.nullcontext()

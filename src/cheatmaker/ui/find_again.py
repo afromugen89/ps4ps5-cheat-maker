@@ -35,7 +35,13 @@ from cheatmaker.core import refind as rf
 from cheatmaker.core.cheats import Cheat, Location, LocationKind
 from cheatmaker.core.session import GameInfo
 from cheatmaker.core.values import ValueType
-from cheatmaker.errors import CheatMakerError, ConnectionLost, FindFailed, ScanCancelled
+from cheatmaker.errors import (
+    CheatMakerError,
+    ConnectionLost,
+    ConsoleBusy,
+    FindFailed,
+    ScanCancelled,
+)
 from cheatmaker.ui import hints
 from cheatmaker.ui.controller import Controller
 from cheatmaker.ui.tasks import _Signals
@@ -57,6 +63,8 @@ def read_field(ctl: Controller, obj: pj.ObjectSpec, addr: int, name: str) -> flo
         f = obj.field(name)
         g = ctl.session.require_game()
         raw = ctl.session.require_client().read(g.pid, addr + f.off, f.vtype.size)
+    except ConsoleBusy:  # the UI thread may try again; nothing is gone
+        raise
     except (CheatMakerError, KeyError):
         return None
     return f.vtype.decode(raw)
@@ -147,6 +155,11 @@ class FindAgain(QObject):
         self._lock = threading.Lock()  # installed/_ours are written by worker threads too
         self._asking = False
         self._ask_still: Callable[[], bool] = lambda: True  # the open question still holds
+        # Moved-value answers not applied yet (the PS5 was busy): obj id -> (place, yes)
+        self._answers: dict[str, tuple[int, bool]] = {}
+        self._told_busy: set[str] = set()  # answers the busy message was shown for
+        # Yes answers to a brought-over object whose save (carried_yes) was busy: id -> place
+        self._carry: dict[str, int] = {}
         self._unreadable: Path | None = None  # a .cmproj that failed to load: kept on save
         self.by_chain: set[str] = set()  # found by a memory path: no hook needed
         self._pid: int | None = None  # the game process the bookkeeping is for
@@ -576,14 +589,15 @@ class FindAgain(QObject):
         """The player said Yes to a brought-over object: it is confirmed, and its class
         is learned again from its first 8 bytes when they point into the game's module
         (memory search and the wide ranges come back, spec AC-U5). Saved."""
-        obj.check = False
         if obj.relearn_class:
-            obj.relearn_class = False
-            try:
+            try:  # read first: busy (UI thread) changes nothing, the next try asks again
                 vt = ah.object_vtable(self.ctl.session, addr)
+            except ConsoleBusy:
+                raise
             except CheatMakerError as exc:
                 log.warning("action=carry_confirm object=%s reason=%s", obj.id, exc)
                 vt = None
+            obj.relearn_class = False
             if vt is not None:
                 obj.vtable = vt
                 if not obj.anchors_of(pj.VtableAnchor):
@@ -591,6 +605,7 @@ class FindAgain(QObject):
                 for f in obj.fields:
                     if f.range is not None:
                         f.range = rf.class_range(f.vtype, f.last if f.last is not None else 0)
+        obj.check = False
         log.info(
             "action=carry_confirm object=%s class=%s",
             obj.id,
@@ -648,14 +663,25 @@ class FindAgain(QObject):
             self._ours.clear()
 
     def _remove(self, obj: pj.ObjectSpec) -> None:
-        if not self.take_out(obj):
+        try:
+            out = self.take_out(obj, raise_busy=True)
+        except ConsoleBusy:  # still in and still recorded: the next after_off tries again
+            log.info("action=hook_remove object=%s busy: kept for the next try", obj.id)
+            return
+        if not out:
             self._unrecord(obj.id)
 
-    def take_out(self, obj: pj.ObjectSpec) -> bool:
+    def take_out(self, obj: pj.ObjectSpec, raise_busy: bool = False) -> bool:
         """Take ``obj``'s hook out. False if it couldn't be: then it stays recorded as
-        ours (another try on close)."""
+        ours (another try on close). ``raise_busy``: a busy PS5 (UI thread) raises
+        ConsoleBusy instead, with nothing changed."""
         try:
             ah.remove(self.ctl.session, obj, self.sleep)
+        except ConsoleBusy as exc:
+            if raise_busy:
+                raise
+            log.warning("action=hook_remove object=%s reason=%s", obj.id, exc)
+            return False
         except CheatMakerError as exc:
             log.warning("action=hook_remove object=%s reason=%s", obj.id, exc)
             return False
@@ -677,6 +703,10 @@ class FindAgain(QObject):
             try:
                 state = ah.install(session, obj)
                 self.note_install(obj, state, session.require_game().pid)
+            except ConsoleBusy:  # UI thread: nothing put in; decide again next time
+                with self._lock:
+                    self.by_chain.add(obj.id)
+                raise
             except CheatMakerError as exc:
                 log.warning("action=hook_install object=%s reason=%s", obj.id, exc)
             else:
@@ -699,6 +729,8 @@ class FindAgain(QObject):
             try:
                 state = ah.install(self.ctl.session, obj)
                 self.note_install(obj, state, self.ctl.session.require_game().pid)
+            except ConsoleBusy:  # the UI thread may try again; nothing is gone
+                raise
             except CheatMakerError as exc:
                 log.warning("action=hook_install object=%s reason=%s", obj.id, exc)
 
@@ -725,8 +757,20 @@ class FindAgain(QObject):
 
     # -- a weak object moved: ask before following it ---------------------------------
     def check_pending(self) -> None:
+        try:
+            self._check_pending()
+        except ConsoleBusy as exc:  # a timer tick: the next one tries again
+            log.info("action=check_pending busy: skipped")
+            untold = self._answers.keys() - self._told_busy
+            if untold:  # the player answered: say once why nothing happened yet
+                self._told_busy |= untold
+                self.ctl.fail(exc, "find_again")
+
+    def _check_pending(self) -> None:
         if self._asking or not self.ctl.session.connected:
             return
+        self._drop_stale_answers()
+        self._retry_carried()
         cheats = self.ctl.cheat_file.cheats if self.ctl.cheat_file else []
         for obj_id, tracker in list(self.ctl.live.trackers.items()):
             if tracker.pending is None:
@@ -738,33 +782,74 @@ class FindAgain(QObject):
             field_name, label = part_field(mine[0], obj_id)
             if not mine[0].combined:
                 label = tracker.obj.label
-            value = read_field(self.ctl, tracker.obj, pend, field_name)
-            self._asking = True
-            # The freezer keeps checking while the question is open: if only one
-            # object still verifies the question answers itself and the box closes.
-            self._ask_still = lambda t=tracker, p=pend: t.pending == p
-            try:
-                ok = self.ask_confirm(hints.CONFIRM_MOVED.format(name=label, value=fmt(value)))
-            finally:
-                self._asking = False
-                self._ask_still = lambda: True
-            if tracker.pending != pend:  # answered itself meanwhile: the reply is moot
-                continue
-            if ok:
-                tracker.accept_pending(pend)
-                if tracker.obj.check and tracker.address == pend:
-                    self.carried_yes(tracker.obj, pend)
-                    self.ctl.cheats_changed.emit()
-                continue
-            kept = tracker.pending_both
-            tracker.reject_pending(pend)
-            if kept:  # the first one still checks out: keep changing it
-                self.ctl.message.emit(hints.KEPT_FIRST.format(name=label))
-                continue
-            for c in mine:  # the whole cheat, every part
-                self.ctl.live.turn_off(c, restore=False)
-            self.ctl.message.emit(hints.CONFIRM_NO.format(name=label))
-            self.ctl.cheats_changed.emit()
+            answered = self._answers.get(obj_id)
+            if answered is not None and answered[0] == pend:
+                ok = answered[1]  # answered before, but the PS5 was busy: apply it now
+            else:
+                value = read_field(self.ctl, tracker.obj, pend, field_name)
+                self._asking = True
+                # The freezer keeps checking while the question is open: if only one
+                # object still verifies the question answers itself and the box closes.
+                self._ask_still = lambda t=tracker, p=pend: t.pending == p
+                try:
+                    ok = self.ask_confirm(hints.CONFIRM_MOVED.format(name=label, value=fmt(value)))
+                finally:
+                    self._asking = False
+                    self._ask_still = lambda: True
+                # Kept until applied: a busy PS5 below must not lose the answer.
+                self._answers[obj_id] = (pend, ok)
+            if tracker.pending == pend:  # else it answered itself meanwhile: moot
+                self._apply_answer(obj_id, tracker, pend, ok, mine, label)
+            self._forget_answer(obj_id)
+
+    def _forget_answer(self, obj_id: str) -> None:
+        self._answers.pop(obj_id, None)
+        self._told_busy.discard(obj_id)
+
+    def _drop_stale_answers(self) -> None:
+        """An answer is only for the question it answered: once that object's pending
+        place is gone or another, it no longer applies."""
+        trackers = self.ctl.live.trackers
+        for obj_id, (pend, _ok) in list(self._answers.items()):
+            tracker = trackers.get(obj_id)
+            if tracker is None or tracker.pending != pend:
+                self._forget_answer(obj_id)
+
+    def _retry_carried(self) -> None:
+        """Finish a Yes whose carried_yes was busy (the move itself was accepted).
+        May raise ConsoleBusy again: the next tick retries."""
+        for obj_id, addr in list(self._carry.items()):
+            tracker = self.ctl.live.trackers.get(obj_id)
+            if tracker is not None and tracker.obj.check and tracker.address == addr:
+                self.carried_yes(tracker.obj, addr)
+                self.ctl.cheats_changed.emit()
+            del self._carry[obj_id]
+
+    def _apply_answer(
+        self,
+        obj_id: str,
+        tracker: rf.Tracker,
+        pend: int,
+        ok: bool,
+        mine: list[Cheat],
+        label: str,
+    ) -> None:
+        """The player's answer to "is it at ``pend`` now?". May raise ConsoleBusy."""
+        if ok:
+            tracker.accept_pending(pend)
+            if tracker.obj.check and tracker.address == pend:
+                self._carry[obj_id] = pend  # kept until carried_yes gets through
+                self._retry_carried()
+            return
+        kept = tracker.pending_both
+        tracker.reject_pending(pend)
+        if kept:  # the first one still checks out: keep changing it
+            self.ctl.message.emit(hints.KEPT_FIRST.format(name=label))
+            return
+        for c in mine:  # the whole cheat, every part
+            self.ctl.live.turn_off(c, restore=False)
+        self.ctl.message.emit(hints.CONFIRM_NO.format(name=label))
+        self.ctl.cheats_changed.emit()
 
     # -- confirm before the first write (AC-12.2) -----------------------------------
     def confirm(self, cheat: Cheat) -> bool:
@@ -789,9 +874,9 @@ class FindAgain(QObject):
         else:
             text = hints.CONFIRM.format(name=obj.label, value=fmt(value))
         if self.ask_confirm(text):
-            tracker.confirmed = True
             if obj.check:
                 self.carried_yes(obj, addr)
+            tracker.confirmed = True
             return True
         no = hints.CONFIRM_NO_CARRIED if obj.check else hints.CONFIRM_NO
         self.ctl.message.emit(no.format(name=obj.label))
@@ -821,11 +906,11 @@ class FindAgain(QObject):
             versions = dict.fromkeys(self._carried_version(o) for o in carried)
             text = hints.CARRIED_FROM.format(version=", ".join(versions)) + " " + text
         if self.ask_confirm(text):
+            for obj in carried:  # first: busy here (UI thread) leaves them unconfirmed
+                self.carried_yes(obj, where[obj.id])
             for t in trackers:
                 if t is not None:
                     t.confirmed = True
-            for obj in carried:
-                self.carried_yes(obj, where[obj.id])
             return True
         if carried:  # search for a value, not for the cheat's name
             self.ctl.message.emit(hints.CONFIRM_NO_CARRIED.format(name=carried[0].label))
@@ -1011,7 +1096,8 @@ class LearnDialog(QDialog):
         self.address = cheat.locations[0].address(ctl.session.require_game().module_base)
         tracker = ctl.live.trackers.get(cheat.anchor[0]) if cheat.anchor else None
         if tracker is not None and cheat.anchor is not None:
-            self.address = tracker.field_address(cheat.anchor[1]) or self.address
+            with contextlib.suppress(ConsoleBusy):  # busy: start from the saved address
+                self.address = tracker.field_address(cheat.anchor[1]) or self.address
         self.learned: rf.Learned | None = None
         self.parts_done = False
         self._cancel: threading.Event | None = None

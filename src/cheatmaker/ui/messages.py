@@ -22,6 +22,8 @@ _MESSAGES: list[tuple[type[BaseException], str]] = [
     ),
     (e.GameNotFound, NO_GAME),
     (e.WriteFailed, "Couldn't change this value ({reason}). Press Refresh and search again."),
+    (e.ConsoleBusy, "The PS5 is busy right now. Try again in a moment."),
+    (e.ScanLinkLost, "The PS5 dropped the search. Press Search to start it again."),
     (e.ReadFailed, "Couldn't read the game's memory. Press Refresh and try again."),
     (e.ScanCancelled, "Search cancelled."),
     (

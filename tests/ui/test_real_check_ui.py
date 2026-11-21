@@ -185,3 +185,24 @@ def test_live_list_runs_again_and_a_second_check_works(win, fake):
     assert f.timer.isActive()
     f.check_btn.click()
     assert f.groups[0].head.address == HP and hp_now(fake) == 25.0
+
+
+def test_new_game_during_a_check_leaves_the_search_buttons_usable(win, fake):
+    """Review round 5: a game change while Check which is real runs stops the check
+    (test values put back), and Search works again once it has ended."""
+    f = win.find
+    full_and_three_hits(win, fake)
+    game_copies_health(fake)
+    changed: list[bool] = []
+
+    def new_game() -> None:
+        if fake.writes and not changed:
+            changed.append(True)
+            win.ctl.game_changed.emit(win.ctl.session.game)
+
+    fake.game_ticks.append(new_game)
+    f.check_btn.click()
+    assert changed and f._cancel is None and not f._checking
+    assert f._stopping == 0 and f.verdicts == {}
+    assert hp_now(fake) == 25.0, "the test value was put back"
+    assert f.search_btn.isEnabled() and f.unknown_btn.isEnabled()

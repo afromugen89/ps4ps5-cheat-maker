@@ -531,3 +531,123 @@ Spec: docs/spec-linked-values.md, design: docs/architecture-linked-values.md.
   (`on_real_check`), as B1's do.
 - One `action=build_linked_result` line per place: `pass` from `after_pass`, and the
   fallback's `fallback_freeze`, `limit` or `fail` for the place that wasn't fixed in code.
+
+## Searches on their own connection: the scan link (2026-11-21)
+
+Design: docs/architecture-scan-link.md. A Find-view unknown snapshot took 86-156 s per
+type on the player's PS5 while holding the client's only socket lock, so the window hung
+and frozen cheats stopped being written.
+
+- `Ps5DebugNgClient._link` is a second client to the same host/port, opened on the first
+  search (`scan_start` or `find_pointers`), authed, with the main one's `_turbo`,
+  `_engines`, `scan_connections` and `fast_scan`. The public search calls
+  (`scan_start/next/rebase/results/restrict`, `find_pointers`) run their private bodies
+  (`_start`, `_next`, ...) on it through `_run_search`; the pool, the multi-type
+  connections and `_session()` reads all belong to the link. `scan_counts` /
+  `scan_way_counts` read the link's state with no lock and never open one.
+- No link (it couldn't be opened): a warning and the search runs on the main connection,
+  as before. The next `scan_start` tries again and frees any search left on main.
+- `scan_cancel` never waits: an idle link frees its search normally; a busy link (a call
+  is running on it: `_uses` counted in `_run_search`, more exact than trying its socket
+  lock, which a scan's worker threads release between slices) is marked `_discarded`,
+  let go and its sockets (pool and multi-type too) shut down. Shutting down wakes the
+  worker's blocked recv; `_run_search` turns the error into `ScanCancelled`.
+  `close()` lets the link go the same way.
+- The link dropping (`ConnectionLost` on it) becomes `ScanLinkLost(ReadFailed)`: not a
+  lost session. `Scanner` forgets the search (its "scan lost" path, `lost_why="link"`),
+  the Find view says the search was dropped and to press Search. The next search opens a
+  new link. `_reconnect()` replaces only the main socket.
+- Backstop: reads, writes, `read_many`, maps, process list, foreground app, version and
+  the watch attach take `_main_lock()`. On the UI (main) thread it waits at most
+  `MAIN_THREAD_WAIT` (1.5 s), then raises `ConsoleBusy(ReadFailed)` "The PS5 is busy right
+  now. Try again in a moment."; other threads wait as before. The watch's Continue and
+  clean-up always wait (the game is stopped at the trap). The freezer skips a round on
+  `ConsoleBusy` instead of turning the cheat off (only reachable when `tick()` runs on
+  the UI thread).
+- Connections: main + link + pool + one per extra unknown type + one Cancel must fit
+  NG's 12 clients (`NG_CLIENT_SLOTS`, `RESERVED_SLOTS`); the pool is capped and the cap
+  logged (`action=scan_pool capped=`). At the current limits (8 scan connections, two
+  unknown types) the worst case is 11 plus the Cancel.
+- Start over can be pressed while a Find search runs (not during Check which is real): it
+  sets the scan's cancel event, ends the console search without waiting
+  (`Scanner.stop` -> `scan_cancel`) and resets the view; the scan's late answer or error
+  is dropped (`_scan_gen`).
+
+Review fixes (PR #36):
+
+- **Busy is not gone.** `ConsoleBusy` stays a `ReadFailed`, but every `except ReadFailed`
+  / `except CheatMakerError` that can run on the UI thread re-raises it first (verify,
+  `Chain.resolve`, the hook-slot reads, `read_field`, carry confirm, `before_on`,
+  locker/real-check/carry reads), so a busy moment never makes a value "lost": no
+  re-find, no hook put in, the action fails with the busy message. `path_lost` puts the
+  object back in `by_chain` when busy; `check_pending` skips the tick; the Find view's
+  live list keeps its last values and keeps ticking.
+- **Turning off writes first.** `turn_off` puts the original bytes back, then marks the
+  cheat off; busy leaves it on in the game and the list. A cheat's writes go under one
+  hold of the connection (`ConsoleClient.batch()`, a no-op on FakeConsole); the freezer
+  checks an entry is still frozen under the same hold, so turned-off bytes are never
+  written again.
+- **close() during the link opening:** `_closed` is set under `_link_lock`; an opener
+  that finishes after it closes the new link and raises `ConnectionLost`, as does any
+  search call after close().
+- **The UI thread never waits long on either connection:** the link's lock has the same
+  1.5 s limit; after one give-up, UI-thread tries wait only 0.1 s for a second
+  (`BUSY_HOLD_S`, `BUSY_HOLD_WAIT`). The live list doesn't ask for matches while a task
+  runs. Find's "test the candidates" goes through the Scanner.
+- **Jobs on the link:** Start over discards the link only for a running search; during a
+  pointer pass the search is freed when the pass ends. New calls wait while a cancel
+  frees the old search. A pointer pass runs on the main connection while a search is
+  kept there (no link). A link discarded while it opens extra connections closes them.
+- **Crash log:** a clean exit writes `=== Cheat Maker exit` to crash.log; dumps before it
+  (Windows reports exceptions the app handled) are ignored, dumps after it (teardown)
+  are reported; a section without it counts only when the main log shows the run ended
+  unexpectedly. Identical Qt messages are logged at most once per 10 s (`repeats=N`).
+  The watchdog skips a check after a gap over 10 s (the PC slept).
+
+QA round (qa/reports/2026-11-21-search-freeze.md) and re-review leftovers:
+
+- Busy keeps things as they are: Delete keeps an ON cheat's row when turning it off was
+  busy (BUG-01); Lock it / Player only keep the tested patch when taking it out was busy
+  and don't start the next test or close until it is out (BUG-02); a value typed into an
+  ON cheat is put back when it couldn't be written (BUG-03); a hook that couldn't come
+  out stays recorded for the next try (m5).
+- `cheatmaker/busy.py` holds `MAIN_THREAD_WAIT`, `BUSY_MESSAGE` and `held(lock)`; the
+  Tracker's lock uses it, so the UI thread never waits long behind the freezer thread
+  inside `Tracker.current()` (M1).
+- A TURBOSCAN_END the UI thread couldn't send (busy) is sent before the next command on
+  that socket (m2). A new search on an idle link that had died is retried once on a new
+  link when the failed call got no answer at all (BUG-07). The cancel left for after a
+  pointer pass now holds `_cancelling` like `scan_cancel` (BUG-08).
+- The live list keeps its last match rows only while a search runs on the link
+  (`search_running()`), not during any task (m3). Pointer passes run from modal dialogs
+  (Pointer scan, Find it next time), so Find's Search buttons can't start a search
+  during one (m4).
+- `previous_run_ended_unexpectedly` reads the whole log when the tail has neither a start
+  nor an exit line (BUG-05). The watchdog's sleep skip moves only its own baseline, not
+  the heartbeat, so it never logs a false `ui_unfrozen` (BUG-06).
+
+
+Review round 4:
+
+- Start over during a search answers at once but counts the stopped search as
+  "stopping" until its worker's done/failed arrives: Search, I don't know, the compare
+  buttons and Full stay off meanwhile (Start over stays on); the late callback always
+  resets the scanner and clears the count. Progress carries the scan's generation, so a
+  stopped search can't move the bar.
+- `search_running()` is true for any job (search or pointer pass) on the link, and for a
+  search running on the main connection when no link could open (QA BUG-09).
+- A failed TURBOSCAN_END is no longer swallowed: ConnectionLost goes up from `_locked()`
+  before the next command, so a late END answer can't be read as that command's.
+- Find it again keeps the player's moved?-answer when applying it was busy: it shows the
+  busy message and applies it on the next tick without asking again.
+- The watchdog's `ui_frozen seconds=` counts from the wake-up after a sleep.
+
+Review round 5:
+
+- Start over (or a game change, prefill, trace result) during Check which is real
+  doesn't count as stopping a search: it sets the check's cancel and the check puts its
+  test values back and ends through `_after_check` / `_check_failed`, so the buttons come
+  back.
+- Find it again drops a kept answer once its object's pending place is gone or another,
+  shows the busy message once per kept answer, and finishes a Yes whose carry-over save
+  (`carried_yes`) was busy on a later tick.

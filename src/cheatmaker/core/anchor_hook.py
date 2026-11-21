@@ -35,7 +35,7 @@ from cheatmaker.core.locker import MAX_INSN, instruction_before, touches_memory,
 from cheatmaker.core.project import HookAnchor, HookFilter, ObjectSpec, Role
 from cheatmaker.core.session import Session
 from cheatmaker.core.values import ValueType
-from cheatmaker.errors import FindFailed, LockFailed, ReadFailed, ScanCancelled
+from cheatmaker.errors import ConsoleBusy, FindFailed, LockFailed, ReadFailed, ScanCancelled
 
 log = logging.getLogger(__name__)
 
@@ -86,6 +86,8 @@ def candidates_from_hits(hits: list[WatchHit], address: int, read: Read) -> list
     for rip, group in by_rip.items():
         try:
             before = read(rip - MAX_INSN, MAX_INSN)
+        except ConsoleBusy:  # the UI thread may try again; nothing is gone
+            raise
         except ReadFailed:
             log.warning("action=hook_pick can't read code before rip=%#x", rip)
             continue
@@ -168,6 +170,8 @@ def object_vtable(session: Session, obj: int) -> int | None:
     game = session.require_game()
     try:
         (vt,) = struct.unpack("<Q", session.require_client().read(game.pid, obj, 8))
+    except ConsoleBusy:  # the UI thread may try again; nothing is gone
+        raise
     except ReadFailed:
         return None
     if game.module_base <= vt < game.module_end:
@@ -208,6 +212,8 @@ def plan_hook(
     slot = cv.find_slot(session, rooms)
     try:
         sig = up.make_signature(read(cand.address, up.SIG_MAX + MAX_INSN), cand.address).text()
+    except ConsoleBusy:  # the UI thread may try again; nothing is gone
+        raise
     except (ReadFailed, ValueError):  # near the end of the code: no signature, still usable
         sig = ""
     anchor = HookAnchor(

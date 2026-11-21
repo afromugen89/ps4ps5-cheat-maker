@@ -107,6 +107,10 @@ SEARCH_LOST = (
     "Your search was ended because Cheat Maker searched memory to find a value again. "
     "Press Search to start it again."
 )
+SEARCH_DROPPED = (
+    "The PS5 dropped the connection your search ran on, so the search is gone. Your "
+    "cheats are still on. Press Search to start it again."
+)
 OLD_NOTES = (
     "These notes come from an older Cheat Maker, so the game's code no longer helps "
     "find your values. Press Find it next time once more to make it fast again."

@@ -29,7 +29,7 @@ from cheatmaker.core import updater as up
 from cheatmaker.core.cheats import Cheat, Location, LocationKind, combine, versions_differ
 from cheatmaker.core.locker import NOP
 from cheatmaker.core.values import parse_number
-from cheatmaker.errors import CheatMakerError, ProjectFileError
+from cheatmaker.errors import CheatMakerError, ConsoleBusy, ProjectFileError
 from cheatmaker.ui import hints
 from cheatmaker.ui.controller import Controller
 from cheatmaker.ui.find_again import FindAgain, LearnDialog
@@ -325,8 +325,13 @@ class CheatsView(QWidget):
                 if old != name:
                     self.finder.renamed(c, old)
             elif item.column() == COL_VALUE:
+                saved = _value_bytes(c)
                 c.set_value(parse_number(item.text()))
-                self.ctl.live.refresh(c)
+                try:
+                    self.ctl.live.refresh(c)
+                except ConsoleBusy:  # the game still holds the old value: show that
+                    _restore_value_bytes(c, saved)
+                    raise
                 self.finder.cheat_changed(c)
         except Exception as exc:
             self.ctl.fail(exc, "toggle" if item.column() == COL_ON else "edit")
@@ -362,6 +367,9 @@ class CheatsView(QWidget):
             if c.enabled:
                 try:
                     self.ctl.live.turn_off(c)
+                except ConsoleBusy as exc:  # still on in the game: keep its row
+                    self.ctl.fail(exc, "toggle")
+                    continue
                 except Exception as exc:
                     self.ctl.fail(exc, "toggle")
             self.cheats.remove(c)
@@ -381,7 +389,7 @@ class CheatsView(QWidget):
                 addr_of=self._part_address,
                 module_base=game.module_base if game is not None else None,
             )
-        except ValueError as exc:
+        except (ValueError, ConsoleBusy) as exc:
             self.ctl.fail(exc, "combine")
             return
         was_on = any(c.enabled for c in picked)
@@ -421,6 +429,8 @@ class CheatsView(QWidget):
         tracker = self.ctl.live.trackers.get(loc.anchor[0])
         try:
             return tracker.field_address(loc.anchor[1]) if tracker is not None else None
+        except ConsoleBusy:  # the UI thread may try again; nothing is gone
+            raise
         except (CheatMakerError, KeyError):
             return None
 
@@ -576,3 +586,20 @@ class CheatsView(QWidget):
         self._update_buttons()
         self.fill()
         self.ctl.fail(exc, "update_version")
+
+
+_ValueBytes = tuple[list[tuple[bytes, bytes]], tuple[bytes, bytes] | None]
+
+
+def _value_bytes(c: Cheat) -> _ValueBytes:
+    """What ``set_value`` changes, to put back when the new value couldn't be written."""
+    locked = (c.locked.on, c.locked.off) if c.locked is not None else None
+    return [(loc.on, loc.off) for loc in c.locations], locked
+
+
+def _restore_value_bytes(c: Cheat, saved: _ValueBytes) -> None:
+    locs, locked = saved
+    for loc, (on, off) in zip(c.locations, locs, strict=True):
+        loc.on, loc.off = on, off
+    if locked is not None and c.locked is not None:
+        c.locked.on, c.locked.off = locked

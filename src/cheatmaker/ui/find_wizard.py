@@ -46,7 +46,15 @@ from cheatmaker.core.real_check import (
     targets_from_list,
 )
 from cheatmaker.core.scan_log import way_label
-from cheatmaker.core.scanner import ABOUT, FEW_MATCHES, MAX_SHOW, NOTED, TOO_MANY, Match
+from cheatmaker.core.scanner import (
+    ABOUT,
+    FEW_MATCHES,
+    LOST_LINK,
+    MAX_SHOW,
+    NOTED,
+    TOO_MANY,
+    Match,
+)
 from cheatmaker.core.templates import TEMPLATES, make_cheat
 from cheatmaker.core.trace_way import Way
 from cheatmaker.core.tracer import TraceResult
@@ -63,7 +71,7 @@ from cheatmaker.core.values import (
     parse_number,
     parse_percent,
 )
-from cheatmaker.errors import ReadFailed
+from cheatmaker.errors import ConsoleBusy, ReadFailed
 from cheatmaker.ui import hints
 from cheatmaker.ui.controller import Controller
 from cheatmaker.ui.hit_test_dialog import HitTestDialog
@@ -139,6 +147,12 @@ class FindWizard(QWidget):
         self.open_build: Callable[..., None] = lambda **kw: None  # MainWindow.open_build
         self.open_trace: Callable[..., None] = lambda **kw: None  # MainWindow.open_trace
         self._search_gen = 0  # bumped when the search ends: a running check's results drop
+        self._scan_gen = 0  # bumped by Start over: a running scan's late answer is dropped
+        # Searches stopped by Start over whose worker hasn't ended yet: no new search may
+        # start until it has (it still uses the Scanner).
+        self._stopping = 0
+        self._scan_progress = _Signals()
+        self._scan_progress.done.connect(self._on_scan_progress)
         self._checking = False
         self.pointers: dict[Chain, ValueType] = {}  # chains followed on every refresh
         self.row_chains: list[Chain | None] = []
@@ -416,7 +430,8 @@ class FindWizard(QWidget):
         return self.ctl.session.connected and self.ctl.session.game is not None
 
     def _update_buttons(self) -> None:
-        busy = self._cancel is not None
+        running = self._cancel is not None
+        busy = running or self._stopping > 0
         ready = self._ready() and not busy
         active = self.ctl.scanner.active
         self.search_btn.setEnabled(ready)
@@ -427,7 +442,11 @@ class FindWizard(QWidget):
         for b in self.about_btns.values():
             b.setVisible(full)
             b.setEnabled(ready and full)
-        self.new_btn.setEnabled(ready and active)
+        # Start over also stops a running search at once (C24b); not a check, which
+        # must put its test values back first (its Cancel does that).
+        scanning = running and not self._checking
+        stopping = self._stopping > 0
+        self.new_btn.setEnabled(self._ready() and ((active and not busy) or scanning or stopping))
         self.files_btn.setVisible(self.ctl.scanner.scan_log.enabled)
         for b in (
             self.up_btn,
@@ -439,7 +458,7 @@ class FindWizard(QWidget):
             self.still_btn,
         ):
             b.setEnabled(ready and active)
-        self.cancel_btn.setEnabled(busy)
+        self.cancel_btn.setEnabled(running)
         count = self.ctl.scanner.count or 0
         self.test_btn.setEnabled(ready and active and 2 <= count <= TEST_LIMIT)
         self.check_btn.setEnabled(ready and active and self._n_matches > 0)
@@ -483,6 +502,11 @@ class FindWizard(QWidget):
     def selected(self) -> Match | None:
         i = self._selected_row()
         return None if i is None else self.rows[i]
+
+    def _on_scan_progress(self, item: tuple[int, float]) -> None:
+        gen, fraction = item
+        if gen == self._scan_gen:  # a search stopped by Start over doesn't move the bar
+            self._on_progress(fraction)
 
     def _on_progress(self, fraction: float) -> None:
         self.progress.setValue(int(fraction * 100))
@@ -616,9 +640,35 @@ class FindWizard(QWidget):
         self.progress.setFormat("%p%")
         self._started = time.monotonic()
         self._update_buttons()
-        self.ctl.tasks.run(
-            lambda: fn(self._progress.done.emit, cancel), self._after_scan, self._scan_failed
-        )
+        gen = self._scan_gen
+
+        def done(count: int) -> None:
+            if gen == self._scan_gen:
+                self._after_scan(count)
+            else:
+                self._late_scan(f"count={count}")
+
+        def failed(exc: BaseException) -> None:
+            if gen == self._scan_gen:
+                self._scan_failed(exc)
+            else:
+                self._late_scan(f"reason={exc}")
+
+        def progress(fraction: float) -> None:
+            self._scan_progress.done.emit((gen, fraction))
+
+        self.ctl.tasks.run(lambda: fn(progress, cancel), done, failed)
+
+    def _late_scan(self, what: str) -> None:
+        """A search stopped by Start over has ended: drop whatever it left in the
+        Scanner (no new search could start meanwhile) and allow searching again."""
+        log.info("action=scan_late %s: stopped by Start over, dropped", what)
+        self._stopping -= 1
+        try:
+            self.ctl.scanner.reset()
+        except Exception as exc:  # a dropped session must not stop the clean-up
+            log.debug("action=scan_late reset failed: %s", exc)
+        self._update_buttons()
 
     # -- actions --------------------------------------------------------------
     def do_search(self) -> None:
@@ -765,7 +815,17 @@ class FindWizard(QWidget):
 
     def do_reset(self) -> None:
         try:
-            self.ctl.scanner.reset()
+            if self._cancel is not None and not self._checking:  # a search: stop it now
+                self._cancel.set()
+                self._cancel = None
+                self._scan_gen += 1
+                self._stopping += 1  # until its worker has ended (_late_scan)
+                self.progress.setValue(0)
+                self.ctl.scanner.stop()
+            else:
+                if self._cancel is not None:  # a check: it puts its test values back and
+                    self._cancel.set()  # _after_check / _check_failed end it
+                self.ctl.scanner.reset()
         except Exception as exc:
             self.ctl.fail(exc, "scan")
         self.unknown_mode = False
@@ -800,8 +860,16 @@ class FindWizard(QWidget):
             self._fill_table()
             return
         try:
-            rows = (sc.matches(sc.count) if groups else sc.matches()) if show_matches else []
-            self._n_matches = len(rows)
+            searching = getattr(self.ctl.session.client, "search_running", None)
+            if show_matches and searching is not None and searching():
+                # A search is running on the console's search connection: keep the last
+                # match rows instead of waiting for it (typed-in rows still update).
+                rows = list(self.rows[: self._n_matches])
+            elif show_matches:
+                rows = sc.matches(sc.count) if groups else sc.matches()
+            else:
+                rows = []
+            n_matches = len(rows)
             types = [m.vtype or self._vtype() for m in rows]
             # by address and type: a match read as another type doesn't hide a typed-in
             # (or traced) row, which converts screen units with its own type
@@ -816,16 +884,24 @@ class FindWizard(QWidget):
                 addr = ptr.resolve_live(self.ctl.session, chain)
                 try:
                     m = self._read_match(addr, vt) if addr else Match(0, 0, b"")
+                except ConsoleBusy:  # the UI thread may try again; nothing is gone
+                    raise
                 except ReadFailed:
                     m = Match(0, 0, b"")
                 rows.append(m)
                 types.append(vt)
                 chains.append(chain)
+        except ConsoleBusy:  # keep the last values; the next tick reads again
+            log.info("action=live_refresh busy: kept the last values")
+            if not self.timer.isActive():
+                self.timer.start()
+            return
         except Exception as exc:
             self.timer.stop()
             self.ctl.fail(exc, "read")
             return
         self.rows, self.row_types, self.row_chains = rows, types, chains
+        self._n_matches = n_matches
         self._read_trace_maxes()
         self._show_groups(groups)
         self._fill_table()
@@ -1148,7 +1224,8 @@ class FindWizard(QWidget):
         self.count.setText("")
         self.table.setRowCount(0)
         self.timer.stop()
-        self.hint.setText(hints.SEARCH_LOST)
+        dropped = self.ctl.scanner.lost_why == LOST_LINK
+        self.hint.setText(hints.SEARCH_DROPPED if dropped else hints.SEARCH_LOST)
         self._update_buttons()
 
     def _new_game(self, game=None) -> None:
@@ -1326,7 +1403,7 @@ class FindWizard(QWidget):
         the head there is nothing to test it against: then the most common way is used
         (the first candidate's on a tie). Raises ValueError when fewer than 2 are left."""
         sc = self.ctl.scanner
-        hits = self.ctl.session.require_client().scan_results(TEST_LIMIT)
+        hits = sc.results(TEST_LIMIT)
         # (address, way), in the order they are offered: first group first
         if not self.grouped:
             cands = [(h.address, h.way) for h in hits]
