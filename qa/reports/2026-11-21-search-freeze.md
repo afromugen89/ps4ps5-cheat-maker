@@ -5,8 +5,10 @@
 - Design: docs/architecture-scan-link.md. Notes: docs/implementation-notes.md ("Searches on their own connection" and the PR #36 review fixes). Console tests: C24 in docs/console-tests.md.
 - Code: console/ps5debug_ng.py (scan link, `_locked`, `batch`, cancel and discard), core/freezer.py (turn_off, the freezer hold), core/scanner.py (ScanLinkLost), the `ConsoleBusy` re-raises in core/*, ui/find_wizard.py, ui/find_again.py, ui/cheats_view.py, ui/watchdog.py, logs.py (crash recorder), app.py
 - Environment: Linux 6.18, Python 3.13.18, PySide6 6.12.0, Qt offscreen. Uses the real `Ps5DebugNgClient` against `FakeNgServer` (with gated snapshot, narrow-down, value scan and auth), and `FakeConsole` for UI flows.
-- Automated tests: `tests/qa/test_search_freeze_qa.py` (13 pass, 8 strict xfail = open bugs)
-- Full suite: baseline 2421 passed, 3 skipped. With the QA file: **2434 passed, 3 skipped, 8 xfailed**
+- Automated tests: `tests/qa/test_search_freeze_qa.py` (first round: 13 pass, 8 strict xfail; re-test: 23 pass, 1 strict xfail)
+- Full suite: baseline 2421 passed, 3 skipped. First round: 2434 passed, 3 skipped, 8 xfailed. **Re-test on 16b8499: 2450 passed, 3 skipped, 1 xfailed**
+
+> **Re-test 2026-11-21 on `16b8499`:** all 8 bugs are fixed and verified. One new bug was found in the fix (BUG-09, Medium). See "Re-test of 16b8499" at the end.
 
 ## Product owner summary
 
@@ -40,7 +42,7 @@ The weak spot is the new **"PS5 is busy"** answer. A few screens don't expect it
 - BUG-07 (Low): after the search connection drops while idle, the next new search fails once with "The PS5 dropped the search". Pressing Search again works.
 - BUG-08 (Low): a race. A Start over held back during a pointer pass can wipe a search started at the moment the pass ends.
 
-**Release recommendation: Ready with known issues.** The freeze fix itself is sound and much better than before. BUG-01 and BUG-02 should be fixed before release. They only happen while the main connection is busy for more than 1.5 s, which is now rare: the fallback when the scan link can't open, a Lock it attach, or a large read. But when they happen, a cheat is left on in the game.
+**Release recommendation (first round): Ready with known issues.** Superseded by the re-test below. The freeze fix itself is sound and much better than before. BUG-01 and BUG-02 should be fixed before release. They only happen while the main connection is busy for more than 1.5 s, which is now rare: the fallback when the scan link can't open, a Lock it attach, or a large read. But when they happen, a cheat is left on in the game.
 
 ## Scope
 
@@ -230,3 +232,64 @@ Full run: `QT_QPA_PLATFORM=offscreen pytest -q -p no:cacheprovider` gave **2434 
 - R4. **Cancel button during a snapshot** only reacts on the next progress word from the console (unchanged behaviour). The fake's gated snapshot sends none, so this was not timed.
 - R5. Windows faulthandler "handled exception" dumps and Qt message volume: only covered by unit tests, not tested on Windows.
 - R6. Class search (Find it again) during a player's search: they share the link. The "taken" semantics are the same as before; there is no new defect, but the timing changed.
+
+## Re-test of 16b8499 (2026-11-21)
+
+Commit `16b8499` ("Fix QA BUG-01..08 and re-review leftovers") was re-tested.
+- The implementor only removed the xfail markers from my tests. The test bodies are unchanged, so each test now checks its bug's fix exactly as it was written.
+- The new production code was also reviewed:
+  - `busy.py` `held()` on the Tracker locks
+  - `_end_pending` / `_send_end`
+  - `search_running()`
+  - `take_out(raise_busy=True)`
+  - the BUG-07 retry (`ScanLinkLost.unanswered`)
+  - the BUG-05 whole-file read
+  - the watchdog `_woke_at`
+  - Start over during a search (`_scan_gen`, `_late_scan`, `Scanner.stop`)
+
+### Fix verification
+
+| Bug | Fix | Verified by | Result |
+|---|---|---|---|
+| BUG-01 | `do_delete` keeps the row on ConsoleBusy | `test_bug01_...` | Fixed |
+| BUG-02 | `_untest` returns False on busy and keeps `candidate`. Test, Test all, Player only and close stop there. | `test_bug02_...` | Fixed. The dialog can't be closed while the PS5 stays busy; the busy message explains why. |
+| BUG-03 | the value bytes are rolled back on ConsoleBusy | `test_bug03_...` | Fixed |
+| BUG-04 | Start over is enabled during a running Find search, but not during Check which is real. It cancels, calls `scan_cancel` (discarding the link) and drops the late answer (`_scan_gen`). | `test_bug04_...`, RT-01, RT-02 | Fixed |
+| BUG-05 | the whole file is read when the tail has neither marker | `test_bug05_...` | Fixed |
+| BUG-06 | after a sleep, only the wake time moves; the heartbeat is untouched | `test_bug06_...`, TC-25 | Fixed |
+| BUG-07 | one retry on a new link when nothing came back on the dead one | `test_bug07_...`; the existing mid-search drop tests still get ScanLinkLost with no retry | Fixed |
+| BUG-08 | the catch-up cancel in `_end_job` sets `_cancelling` | `test_bug08_...` | Fixed |
+
+### Regression tests added (re-test)
+
+| TC-ID | Title | Priority | Result |
+|---|---|---|---|
+| RT-01 | Start over during a running first unknown search: the window answers in under 0.5 s, no error message, the scanner is not active; the next search keeps its 2 matches | High | Pass |
+| RT-02 | Start over is greyed out while Check which is real runs, and enabled again after it | Medium | Pass |
+| RT-03 | Live list during a pointer pass on the scan link | Medium | **Fail: BUG-09** |
+| RT-04 | Full suite, and every earlier TC | High | Pass (2450 passed, 3 skipped, 1 xfailed) |
+
+### BUG-09: The live list waits on the scan link during a pointer pass (window hangs about 1.5 s per tick)
+- Severity: Medium
+- Priority: P2
+- Related test case: RT-03 | Automated test: `tests/qa/test_search_freeze_qa.py::test_bug09_live_list_does_not_wait_on_the_link_during_a_pointer_pass`
+- Environment: `16b8499`, Linux, Python 3.13.18, PySide6 6.12.0 offscreen
+- Steps to reproduce:
+  1. Run an unknown search with few matches (FakeNgServer), so the live list shows the matches.
+  2. Start a pointer pass on the link and hold its slice with `scan_gate`.
+  3. Run one live-list tick (`refresh_live()`).
+- Expected result: under 0.5 s. Review MAJOR 3 said the UI thread doesn't ask for matches while the link is busy. Before 16b8499, `tasks.busy` skipped this, and a pointer pass runs on `ctl.tasks`.
+- Actual result: `the window waited 1.5 s`. The tick waits `MAIN_THREAD_WAIT` on the link's lock and then gets ConsoleBusy, which is caught, so the last values stay. Later ticks wait 0.1 s during `BUSY_HOLD_S` and then 1.5 s again, so the window stutters for as long as the pointer pass runs.
+- Suspected cause: `ui/find_wizard.py` `refresh_live` now uses `client.search_running()`. `ps5debug_ng.py` `search_running()` only counts `_jobs[SEARCH]`. A pointer pass is a `POINTERS` job.
+  - By code reading, the same applies when no link could be opened (`_link is None`, so the search runs on main and `search_running()` returns False). Each tick then waits 1.5 s behind the search on the main connection. The old `tasks.busy` check covered that case too.
+  - Possible fix: count any job on the link, plus a search kept on main.
+- Impact for the product owner: while "Find a memory path" runs, the window briefly freezes again every couple of seconds if the Find view is showing live matches.
+
+### Observations (not filed)
+- **R7.** `Tracker.accept_pending` / `reject_pending` now give up after 1.5 s on the UI thread. If that happens after the player answers the "it moved" question, `check_pending` catches ConsoleBusy without showing a message, and the same question is asked again on the next tick. This is rare: the Tracker lock is only held long while main is busy. It is acceptable "try again" behaviour, but a short busy message would be clearer.
+- **R8.** `_send_end` suppresses ConnectionLost, which includes a 4 s receive timeout. If a big snapshot takes longer than 4 s to free, the late END status could stay queued ahead of the next answer on that socket. The old `_end_resident` already suppressed every error, so this risk is not new. Worth watching in C24 (`action=snapshot_end`).
+- **R9.** BUG-02's fix means Lock it / Player only can't be closed while the PS5 stays busy (fallback mode, a long attach). The busy message is shown each time. That was the intended trade-off.
+
+### Final recommendation (re-test)
+
+**Ready with known issues.** All eight first-round bugs are fixed and stay covered by tests, and the two High bugs (cheats left on with no row or reference) are gone. BUG-09 is a Medium performance regression that only shows during pointer passes, or when the link can't be opened. It should be fixed soon, but it doesn't change any game state.

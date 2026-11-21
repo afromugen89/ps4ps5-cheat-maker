@@ -273,6 +273,7 @@ def test_tc10_refresh_during_a_first_search_answers_at_once_and_leaves_no_search
     server.snapshot_gate.set()
     bg.join()
     assert bg.error is not None and not sc.active and session.connected
+    _wait(lambda: LINK in server.closed, timeout=2.0)  # the fake's thread has ended
     session.disconnect()
 
 
@@ -509,3 +510,92 @@ def test_bug08_deferred_cancel_after_a_pointer_pass_does_not_wipe_a_new_search()
         assert cl.scan_counts() == {ValueType.INT32: 2}, "the new search was wiped"
     finally:
         cl.close()
+
+
+# --- Re-test of 16b8499 -----------------------------------------------------------------
+def _ng_win(qtbot, server, **kw):
+    ctl = Controller(
+        lambda ip, port: Ps5DebugNgClient.connect("127.0.0.1", server.port, timeout=3, **kw),
+        Settings.load(),
+        TaskRunner(),
+    )
+    w = MainWindow(ctl)
+    qtbot.addWidget(w)
+    w.connect_view.ip.setText("127.0.0.1")
+    w.connect_view.connect_btn.click()
+    qtbot.waitUntil(lambda: ctl.session.game is not None and not ctl.tasks.busy, timeout=5000)
+    qtbot.wait(50)
+    return w, ctl
+
+
+def test_rt01_start_over_stops_a_running_first_search_at_once_and_a_new_one_works(qtbot):
+    """RT-01 (BUG-04 decision): Start over during a running first unknown search answers
+    at once, leaves no search and no error, and the next search keeps its result."""
+    server = FakeNgServer(snapshot=True)
+    w, ctl = _ng_win(qtbot, server)
+    said: list[str] = []
+    ctl.message.connect(said.append)
+    try:
+        server.snapshot_gate.clear()
+        w.find.do_unknown()
+        qtbot.waitUntil(lambda: _sent(server, LINK, {Cmd.TURBOSCAN_START}), timeout=5000)
+        assert w.find.new_btn.isEnabled()
+        t0 = time.monotonic()
+        w.find.new_btn.click()
+        assert time.monotonic() - t0 < FAST
+        assert not ctl.scanner.active and w.find.search_btn.isEnabled()
+        qtbot.waitUntil(lambda: not ctl.tasks.busy, timeout=5000)  # ScanCancelled, dropped
+        server.snapshot_gate.set()
+        assert not ctl.scanner.active and said == [], said
+        w.find.number.setText("100")
+        w.find.search_btn.click()
+        qtbot.waitUntil(lambda: not ctl.tasks.busy and ctl.scanner.active, timeout=5000)
+        assert ctl.scanner.count == 2
+    finally:
+        server.snapshot_gate.set()
+        ctl.shutdown()
+
+
+def test_rt02_start_over_is_not_offered_during_check_which_is_real(qtbot):
+    """RT-02 (BUG-04 decision): a running check must put its test values back first."""
+    fake = build_fake()
+    w, ctl = _fake_win(qtbot, fake)
+    w.find.number.setText("100")
+    w.find.search_btn.click()
+    assert ctl.scanner.active
+    w.find._cancel, w.find._checking = threading.Event(), True  # a check is running
+    w.find._update_buttons()
+    assert not w.find.new_btn.isEnabled()
+    w.find._cancel, w.find._checking = None, False
+    w.find._update_buttons()
+    assert w.find.new_btn.isEnabled()
+    ctl.shutdown()
+
+
+@pytest.mark.xfail(
+    reason="BUG-09: the live list asks the scan link for matches during a pointer pass "
+    "(search_running() only counts searches), so each tick can hang the window 1.5 s",
+    strict=True,
+)
+def test_bug09_live_list_does_not_wait_on_the_link_during_a_pointer_pass(qtbot):
+    server = FakeNgServer(snapshot=True)
+    w, ctl = _ng_win(qtbot, server, scan_connections=1)
+    try:
+        w.find.do_unknown()  # few matches on the fake game: the live list shows them
+        qtbot.waitUntil(lambda: not ctl.tasks.busy and ctl.scanner.active, timeout=5000)
+        assert ctl.scanner.few_left
+        cl = ctl.session.client
+        regions = _regions(cl)
+        server.scan_gate.clear()
+        lo, hi = HEALTH_ADDR - 0x1000, HEALTH_ADDR
+        bg = _Bg(lambda: cl.find_pointers(PID, regions, lo, hi, lambda v: True))
+        _wait(lambda: server.conn_commands[LINK].count(Cmd.TURBOSCAN_START) >= 2)
+        t0 = time.monotonic()
+        w.find.refresh_live()  # one live-list tick while the pointer pass runs
+        took = time.monotonic() - t0
+        server.scan_gate.set()
+        bg.join()
+        assert took < FAST, f"the window waited {took:.1f} s"
+    finally:
+        server.scan_gate.set()
+        ctl.shutdown()
