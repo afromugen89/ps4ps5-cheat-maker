@@ -43,6 +43,9 @@ from cheatmaker.core import refind as rf
 from cheatmaker.core import updater as up
 from cheatmaker.core.cheats import Cheat, CheatFile, Location, LocationKind
 from cheatmaker.core.locker import MAX_INSN, Writer, insn_text, writes_memory
+from cheatmaker.core.pro import refpoints
+from cheatmaker.core.pro.asm import Assembler, AssemblerNotFound, default_assembler
+from cheatmaker.core.pro.model import ProCheat, new_cheat_id
 from cheatmaker.core.project import (
     ChainAnchor,
     HookAnchor,
@@ -333,6 +336,8 @@ class Plan:
     parts: dict[int, list[ProjectPart] | str] = field(default_factory=dict)
     reserved: list[tuple[int, int]] = field(default_factory=list)
     guessed_parts: set[int] = field(default_factory=set)  # moved by original bytes only
+    pro: list[ProCheat] = field(default_factory=list)  # Pro cheats moved (re-assembled)
+    pro_report: refpoints.BringReport = field(default_factory=refpoints.BringReport)
 
     def item(self, obj_id: str) -> Item:
         for it in self.items:
@@ -473,7 +478,13 @@ def assemble(
         cheats,
         history=[],
         carried_from=old.version,
+        pro_cheats=list(plan.pro),
     )
+    pro = plan.pro_report  # Pro cheats: re-found by their AOBs (AC-9.2)
+    report.carried += pro.moved
+    report.check += pro.moved  # moved code: test before trusting it
+    report.guessed += pro.guessed
+    report.failed.update(pro.failed)
     return project, report
 
 
@@ -547,7 +558,25 @@ def for_merge(
         cheats,
         history=[],
         carried_from=source.carried_from,
+        pro_cheats=_merge_pro(source, into),
     )
+
+
+def _merge_pro(source: Project, into: Project) -> list[ProCheat]:
+    """``source``'s Pro cheats whose name ``into`` doesn't have, with ids that don't
+    clash with ``into``'s."""
+    names = {c.name for c in [*into.cheats, *into.pro_cheats]}
+    taken = list(into.pro_cheats)
+    out = []
+    for pc in source.pro_cheats:
+        if pc.name in names:
+            continue
+        copy = ProCheat.from_json(pc.to_json())
+        if any(c.id == copy.id for c in taken):
+            copy.id = new_cheat_id(taken)
+        taken.append(copy)
+        out.append(copy)
+    return out
 
 
 def _has_field(obj: ObjectSpec, name: str) -> bool:
@@ -582,11 +611,14 @@ def prepare(
     reserved: Iterable[tuple[int, int]] = (),
     progress: ProgressFn | None = None,
     cancel: threading.Event | None = None,
+    assembler: Assembler | None = None,
 ) -> Plan:
     """Everything that needs no writing: the new copies of the objects, each hook's
-    new place, and the fixed code parts moved. Reads the game's code only when there
-    are hooks or code parts. ``reserved``: rooms kept by others right now (the
-    session's and the open cheats' code lines). Raises ScanCancelled."""
+    new place, the fixed code parts moved, and the Pro cheats re-found and their caves
+    re-assembled (``assembler``, else the one the app finds). Reads the game's code
+    only when there are hooks, code parts or Pro cheats. ``reserved``: rooms kept by
+    others right now (the session's and the open cheats' code lines). Raises
+    ScanCancelled."""
     game = session.require_game()
     items = [Item(carried_object(o), o, item_kind(o)) for o in order_items(old.objects)]
     plan = Plan(
@@ -596,7 +628,7 @@ def prepare(
         items,
         reserved=[*reserved, *ah.reserved_rooms(old.objects), *part_rooms(old)],
     )
-    if any(it.kind == "hook" for it in items) or has_code_parts(old):
+    if any(it.kind == "hook" for it in items) or has_code_parts(old) or old.pro_cheats:
         plan.image = up.read_code_image(session, progress, cancel)
     for it in items:
         hook = it.old.hook
@@ -622,7 +654,27 @@ def prepare(
             drop_hook(it, FIELDS_MOVED)
             it.obj.anchors = []
     _carry_parts(plan, plan.image)
+    if old.pro_cheats:
+        assert plan.image is not None
+        _carry_pro(plan, plan.image, assembler)
     return plan
+
+
+def _carry_pro(plan: Plan, image: up.CodeImage, assembler: Assembler | None) -> None:
+    if assembler is None and any(
+        e.kind == "cave" for pc in plan.old.pro_cheats for e in pc.entries
+    ):
+        try:
+            assembler = default_assembler()
+        except AssemblerNotFound:
+            assembler = None  # their caves fail with "Assembler not found"
+    plan.pro, plan.pro_report = refpoints.bring_over(
+        plan.old.pro_cheats, image, assembler, reserved=plan.reserved
+    )
+    for pc in plan.pro:  # the new caves: no hook room or slot goes there
+        plan.reserved += [
+            (e.cave, e.cave + len(e.cave_bytes)) for e in pc.entries if e.cave is not None
+        ]
 
 
 def _part_log(name: str, part: ProjectPart, new: int | None, result: str) -> None:
@@ -1180,6 +1232,7 @@ def _clean_overlay(project: Project, extra=()) -> list[tuple[int, bytes]]:
             out.append((a.hook, a.orig))
             out.append((ah.keep_cave(a), bytes(2 * cv.CAVE_ROOM)))  # both routines
     out += [(p.offset, p.off) for p in _code_parts(project)]
+    out += refpoints.overlay(project.pro_cheats)
     out += list(extra)
     return out
 
@@ -1209,14 +1262,20 @@ def learn_note_signatures(
 ) -> tuple[int, dict[int, up.Signature]]:
     """Learn fingerprints for the notes while their version runs (AC-U2, AC-U7), from
     ``image`` with the game's own bytes laid over ours (works with cheats on or off).
-    Hooks get ``signature`` and ``sig_unique`` set in place; returns how many changed,
-    and the fixed code parts' fingerprints that ``have`` (the signatures file, read
-    if not given) lacks, for ``up.save_signatures``."""
+    Hooks get ``signature`` and ``sig_unique`` set in place, Pro entries their ``aob``
+    (AC-9.1); returns how many changed, and the fixed code parts' fingerprints that
+    ``have`` (the signatures file, read if not given) lacks, for ``up.save_signatures``."""
     clean = image.overlay(_clean_overlay(project, extra))
+    before = [e.aob for pc in project.pro_cheats for e in pc.entries]
+    refpoints.learn(project.pro_cheats, clean)
+    pro_changed = sum(
+        a != e.aob
+        for a, e in zip(before, (e for pc in project.pro_cheats for e in pc.entries), strict=True)
+    )
     by_hook: dict[int, str] = {
         a.hook: o.id for o in project.objects for a in o.anchors_of(HookAnchor)
     }
-    changed = 0
+    changed = pro_changed
     for a in hooks_to_learn(project, clean):
         sigs = up.learn_at(clean, [(a.hook, max(up.SIG_MIN, len(a.orig)))])
         sig = sigs.get(a.hook)

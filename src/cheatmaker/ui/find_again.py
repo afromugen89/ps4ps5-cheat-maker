@@ -576,12 +576,14 @@ class FindAgain(QObject):
             merge_into.objects = [new.pop(o.id, o) for o in merge_into.objects]
             merge_into.objects += new.values()
             merge_into.cheats += project.cheats
+            merge_into.pro_cheats += project.pro_cheats
             if merge_into.carried_from is None:
                 merge_into.carried_from = project.carried_from
             self.ctl.project = merge_into
         else:
             self.ctl.project = project
         self.ensure_cheats()
+        pro_compile.restore(self.ctl.project, self.ctl.ensure_file().cheats)
         for obj in project.objects:
             addr = found.get(obj.id)
             if not addr:

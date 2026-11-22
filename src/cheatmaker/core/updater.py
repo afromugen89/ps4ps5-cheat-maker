@@ -408,7 +408,7 @@ def _find_patch(
     return hits[0], "", guessed
 
 
-def _reaim(data: bytes, old_ip: int, new_ip: int, move: Callable[[int], int | None]) -> bytes:
+def reaim(data: bytes, old_ip: int, new_ip: int, move: Callable[[int], int | None]) -> bytes:
     """Re-aim jumps / RIP-relative operands in ``data`` (code moved from old_ip to
     new_ip). Raises UpdateError when a target can't be followed."""
     out = bytearray(data)
@@ -499,8 +499,8 @@ def update_file(
             continue
         dest = new_off[loc.offset]
         try:
-            on = _reaim(loc.on, loc.offset, dest, move)
-            off = new_orig.get(loc.offset) or _reaim(loc.off, loc.offset, dest, move)
+            on = reaim(loc.on, loc.offset, dest, move)
+            off = new_orig.get(loc.offset) or reaim(loc.off, loc.offset, dest, move)
         except UpdateError as exc:
             problems[loc.offset] = str(exc)
             continue
@@ -593,6 +593,7 @@ __all__ = [
     "make_signature",
     "patch_lines",
     "read_code_image",
+    "reaim",
     "save_signatures",
     "signatures_path",
     "update_file",

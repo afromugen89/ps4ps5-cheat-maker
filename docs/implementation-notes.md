@@ -784,3 +784,21 @@ Built from docs/architecture-pro.md (spec docs/spec-pro.md), implementation step
   cheat leaves the project only through `compile.forget`), `on_game` compiles them back
   into My cheats, and `keep_rooms` reserves Pro caves from guided caves. The UI that
   calls `build`/`enable`/`set_variable` is step 12.
+- **Step 9 (reference points).** `core/pro/refpoints.py`. AOBs use the updater's rules
+  unchanged (`updater.learn_at` / `make_signature`, 16-96 bytes, rel32/disp32 as `??`,
+  must match exactly once at the entry's site), learned from the code with every Pro
+  entry's off-bytes laid back (zeros over caves), so cheats may be on. An AOB that still
+  matches once is kept (the player may have edited it); otherwise it is replaced, or
+  cleared with status "not unique" (AC-9.1). `bring_over` moves each Pro cheat whole:
+  every entry re-found by its AOB (or by its off-bytes alone, >= 6 bytes, reported as
+  "found from original bytes only"), caves placed again with `CodeImage.zero_run`
+  (asking for 256 bytes when there) and their sources **re-assembled** at the new place
+  with the new hook and covered bytes; Bytes entries re-aimed with `updater.reaim`
+  (made public). A re-assembled cave whose jumps or RIP-relative operands point outside
+  the cheat (other than what the covered instructions themselves use) fails its cheat,
+  as the updater does; so do a missing assembler and an assemble error (AC-9.2). Wired
+  into Bring them over: `carry.prepare` (reads the code when there are Pro cheats,
+  new `assembler` argument, default: the app's NASM), `carry.assemble` (moved Pro
+  cheats go into the new notes and are listed "check"), `for_merge` (Pro cheats with a
+  new name, fresh ids), `learn_note_signatures` (AOBs learned with the other
+  fingerprints), `ui/carry.apply_signatures` and `find_again.adopt_carried`.
