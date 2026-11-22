@@ -715,11 +715,6 @@ def test_rt2_bring_over_records_the_new_layout():  # TC-41b
     assert home.layout == (("mult", "float", len(home.cave_bytes) - 4),)
 
 
-@pytest.mark.xfail(
-    reason="BUG-13: a saved layout whose variable runs past the cave's end is accepted, "
-    "and set_variable then makes the cave longer",
-    strict=True,
-)
 def test_bug13_layout_must_fit_inside_the_cave(s):  # TC-26e
     entry = built_cheat(s).entries[0]
     d = entry.to_json()

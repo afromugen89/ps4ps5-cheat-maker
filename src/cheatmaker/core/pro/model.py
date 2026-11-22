@@ -12,6 +12,7 @@ All offsets are from the main module's base.
 
 from __future__ import annotations
 
+import itertools
 import math
 import re
 from dataclasses import dataclass, field
@@ -275,9 +276,18 @@ class ProEntry:
                 raise ValueError("a compiled cave needs the jump at its hook")
         elif self.stale or self.layout:
             raise ValueError("only a cave entry can be stale or hold variables")
+        spans: list[tuple[int, int, str]] = []
         for name, vtype, at in self.layout:
-            if vtype.upper() not in ValueType.__members__ or not 0 <= at < len(self.cave_bytes):
+            if vtype.upper() not in ValueType.__members__:
                 raise ValueError(f"variable {name!r} isn't inside the built cave")
+            end = at + ValueType[vtype.upper()].size
+            if at < 0 or end > len(self.cave_bytes):
+                raise ValueError(f"variable {name!r} isn't inside the built cave")
+            spans.append((at, end, name))
+        spans.sort()
+        for (_, end, a), (start, _, b) in itertools.pairwise(spans):
+            if start < end:
+                raise ValueError(f"variables {a!r} and {b!r} overlap in the built cave")
 
     @property
     def nop_default(self) -> bool:

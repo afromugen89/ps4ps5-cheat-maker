@@ -243,3 +243,20 @@ def test_offsets_past_2_48_are_refused():
         ProEntry("bytes", 1 << 48, b"\x01", b"\x02")
     with pytest.raises(ValueError, match="below"):
         ProEntry("cave", 0x10, b"\x01" * 5, cave=1 << 60)
+
+
+def test_layout_entries_must_not_overlap():
+    import pytest as _pt
+
+    from cheatmaker.core.pro.model import ProEntry
+
+    with _pt.raises(ValueError, match="overlap"):
+        ProEntry(
+            kind="cave",
+            offset=0x100,
+            off=b"\x90" * 5,
+            on=b"\xe9\x00\x00\x00\x00",
+            cave=0x2000,
+            cave_bytes=b"\x00" * 16,
+            layout=(("a", "int32", 8), ("b", "int32", 10)),
+        )
