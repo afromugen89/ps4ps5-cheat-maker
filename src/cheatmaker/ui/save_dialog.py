@@ -22,6 +22,7 @@ from cheatmaker import formats
 from cheatmaker.console.uploader import Uploader, remote_path, save_to_pc
 from cheatmaker.core import anchor_hook as ah
 from cheatmaker.core.cheats import CheatFile
+from cheatmaker.core.pro.badge import pc_only
 from cheatmaker.paths import default_save_dir
 from cheatmaker.ui import hints
 from cheatmaker.ui.controller import Controller
@@ -107,8 +108,19 @@ class SaveDialog(QDialog):
         if found:  # AC-13.2
             lines.append(hints.SAVE_APP_ONLY.format(n=found))
         self.skipped.setText("\n".join(lines))
+        self.skipped.setToolTip(self._left_out_text(cf))
         self.with_hook.setHidden(not self.hook_objects())
         self.send_btn.setEnabled(self.ctl.session.connected)
+
+    def _left_out_text(self, cf: CheatFile) -> str:
+        """Each cheat the file leaves out and why it needs the PC (spec-pro AC-S2)."""
+        saved = {id(c) for c in cf.saveable_cheats()}
+        rows = [
+            f"{c.name}: {', '.join(b.reasons)}"
+            for c, b in pc_only(cf.cheats, self.ctl.project)
+            if id(c) not in saved
+        ]
+        return hints.SAVE_LEFT_OUT + "\n" + "\n".join(rows) if rows else ""
 
     def _browse(self) -> None:
         d = QFileDialog.getExistingDirectory(self, "Save cheats to", self.folder.text())

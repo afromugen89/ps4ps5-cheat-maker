@@ -133,6 +133,7 @@ SAVE_APP_ONLY = (
     "{n} cheat(s) work only while Cheat Maker is connected. They're kept in Cheat Maker's "
     "notes for this game and come back next time."
 )
+SAVE_LEFT_OUT = "Not in the file (they need Cheat Maker running):"
 SAVE_HOOK = "Also put the find-it-again hook in the file (ready before the PC connects)"
 PC_OFF_TIP = (
     "Makes a cheat from the same place in the game's code that keeps your value (only "

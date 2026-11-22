@@ -680,3 +680,14 @@ Built from docs/architecture-pro.md (spec docs/spec-pro.md), implementation step
   only when it differs. Variable names can't be `hook`, `return` or `original` (the
   cave wrapper's symbols). `Cheat.pro` (compare=False) links a compiled cheat to its
   source; compiling comes in step 8.
+- **Step 4 (badge).** `core/pro/badge.py`: `badge(cheat, project=None)` with the AC-S2
+  reasons (heap address, freeze, pointer path, found again each run; plus "nothing to
+  write" for an empty cheat). "Pointer path" needs the `.cmproj` to see that every
+  object is reached by memory paths only; without it the reason is "found again".
+  The save dialog's skipped-line tooltip lists each left-out cheat with its reasons.
+  **Open (architect):** the export filter still uses `Cheat.saveable`. The doc's rule
+  (CheatRunner = saveable and not freeze) would drop frozen values in the game's module
+  (guided "Infinite Health/Money/Ammo" on static data) from cheat files, which
+  spec-restart-combined TC-60 pins as written once, and spec-pro §1 says guided mode
+  stays as it is. `badge.runner_cheats` is ready for when it is decided. The full
+  export dialog (AC-12.1, "make a cave at its writer") is step 12.
