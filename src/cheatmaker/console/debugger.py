@@ -83,9 +83,9 @@ ALREADY_DEBUG_WAIT = 2.0
 """After an "already debugged" answer: detach, wait this long, attach once more."""
 POLL_S = 0.5  # the back-channel reader checks for the end this often
 ACCEPT_POLL_S = 0.2
+"""The accept thread checks this often whether the session is closing (m-D)."""
 STOP_LOG_INFO = 20
 """Stops per session logged at INFO (their raw status, C-P3d); later ones at DEBUG."""
-"""The accept thread checks this often whether the session is closing (m-D)."""
 FPU_OFFSET = 0xE0
 FPU_SIZE = 832
 DBREGS_OFFSET = 0x420

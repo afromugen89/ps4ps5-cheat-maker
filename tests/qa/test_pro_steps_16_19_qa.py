@@ -612,10 +612,6 @@ def test_tc74_racing_claims_one_wins_and_nothing_deadlocks(g):
     assert g.session.table_owner is None
 
 
-@pytest.mark.xfail(
-    reason="BUG-07: Find it next time drops the Player only filter silently during a sample",
-    strict=True,
-)
 def test_bug07_find_it_next_time_says_the_sampler_has_the_table(g):
     """The guide (10.3) says the Player only collect "can't start: it says the sampler is
     using the space". refind._field_filter swallows TableInUse like any collect failure
@@ -631,10 +627,6 @@ def test_bug07_find_it_next_time_says_the_sampler_has_the_table(g):
         refind._field_filter(g.session, cand, fg.PLAYER_AT[1], 0.25, None)
 
 
-@pytest.mark.xfail(
-    reason="BUG-07: Bring them over drops the hook way as 'no spare room' during a sample",
-    strict=True,
-)
 def test_bug07_bring_them_over_doesnt_call_a_busy_table_no_room(g):
     """carry.collect_classes turns TableInUse (a LockFailed) into CarryFailed(NO_ROOM);
     the dialog then drop_hook()s the object's hook way for the new version."""
@@ -646,8 +638,9 @@ def test_bug07_bring_them_over_doesnt_call_a_busy_table_no_room(g):
     hook = SimpleNamespace(filter=SimpleNamespace(kind="field"))
     site = SimpleNamespace(offset=fg.WRITER - fg.BASE, code=fg.VMOVSS_W, text="vmovss")
     item = SimpleNamespace(old=SimpleNamespace(hook=hook), site=site, obj=SimpleNamespace(id="hp"))
-    with g.session.claim_table(SAMPLER_TABLE):
-        try:
-            carry.collect_classes(g.session, item, seconds=0.25, sleep=g.fight(1))  # type: ignore[arg-type]
-        except carry.CarryFailed as exc:
-            assert exc.reason != carry.NO_ROOM, "a busy table reported as 'no spare room'"
+    from cheatmaker.errors import TableInUse
+
+    # a busy table isn't "no spare room" (CarryFailed would drop the hook way): the
+    # sampler's message goes up to the dialog, which keeps the old notes as they are
+    with g.session.claim_table(SAMPLER_TABLE), pytest.raises(TableInUse):
+        carry.collect_classes(g.session, item, seconds=0.25, sleep=g.fight(1))  # type: ignore[arg-type]

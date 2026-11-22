@@ -1262,3 +1262,12 @@ Built from docs/architecture-pro.md (spec docs/spec-pro.md), implementation step
   of a session, and at DEBUG after that.
 - Console test C-P3a2: a second watch right after the first (Windows TIME_WAIT on
   port 755).
+- **BUG-07.** Two guided collects swallowed `TableInUse`. Both now re-raise it before
+  their broad excepts, and the screen shows the sampler's message:
+  - Find it next time's `refind._field_filter` used to learn the hook with no Player
+    only filter.
+  - Bring them over's `carry.collect_classes` reported "no spare room", and the
+    dialog then dropped the hook way. Now the run rolls back with the old notes (and
+    their hook way) untouched.
+- **BUG-08.** `ACCEPT_POLL_S`'s docstring is back under it. Console test C-P3a3 is new:
+  a PS5 on both cable and Wi-Fi may dial back from its other address.

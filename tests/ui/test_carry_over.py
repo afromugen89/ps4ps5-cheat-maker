@@ -416,6 +416,24 @@ def test_dropped_link_saves_nothing_and_the_offer_comes_back(make, monkeypatch):
     assert app.bar.mode == "offer"
 
 
+def test_a_pro_sample_holding_the_table_says_so_and_keeps_the_hook_way(make):  # BUG-07
+    from cheatmaker.core.session import SAMPLER_TABLE
+
+    tc.learned_v1(3)
+    before = old_files()
+    app = make(Console(run=3))
+    app.connect()
+    texts: list[str] = []
+    app.ctl.message.connect(texts.append)
+    with app.ctl.session.claim_table(SAMPLER_TABLE):
+        app.bring()
+    assert any(t.startswith("The sampler (Pro's What does it access?) is using") for t in texts)
+    # nothing saved and the old notes (with their hook way) untouched: try again later
+    assert not new_path().exists() and old_files() == before
+    assert app.bar.mode == "offer" and app.w.carry.run is None
+    assert app.console.game.fake.peek(fg.PID, fg.V2.reader, 10) == fg.V2.vmovss_r
+
+
 def test_another_game_process_cancels_the_run(make):
     tc.learned_v1(3)
     app = make(Console(run=3))

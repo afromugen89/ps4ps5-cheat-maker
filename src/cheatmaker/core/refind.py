@@ -56,6 +56,7 @@ from cheatmaker.errors import (
     LockFailed,
     ReadFailed,
     ScanCancelled,
+    TableInUse,
 )
 
 log = logging.getLogger(__name__)
@@ -455,6 +456,8 @@ def _field_filter(
         if not others:
             return HookFilter("none")
         guesses = cv.compare_objects(session, obj_addr, objs)
+    except TableInUse:  # a Pro sample has the table: say so, don't learn without a filter
+        raise
     except CheatMakerError as exc:
         log.info("action=learn collect failed: %s", exc)
         return HookFilter("none")
