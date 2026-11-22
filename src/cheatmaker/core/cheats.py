@@ -12,6 +12,7 @@ from cheatmaker.errors import CheatMakerError
 
 if TYPE_CHECKING:
     from cheatmaker.core.linked import LinkedGroup
+    from cheatmaker.core.pro.model import ProCheat
 
 MAIN_MODULE = "eboot.bin"
 MAX_MOVING = 4  # parts that move (session or learned) in one combined cheat
@@ -94,6 +95,9 @@ class Cheat:
     number it holds, as a SESSION_ADDRESS line with ``vtype`` set. Turning the cheat on
     writes it once after the code patch, so the value stays at the number the player
     typed. In memory only (the address moves every run); never saved, Combine drops it."""
+    pro: ProCheat | None = field(default=None, compare=False)
+    """The Pro source this cheat was compiled from (architecture-pro decision 3), or
+    None for a guided cheat. Saved in the .cmproj, never in cheat files."""
 
     @property
     def session_only(self) -> bool:

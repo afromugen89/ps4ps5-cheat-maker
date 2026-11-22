@@ -672,3 +672,11 @@ Built from docs/architecture-pro.md (spec docs/spec-pro.md), implementation step
   filled from NG snapshot rows (2-value: previous; 3-value: previous + first; order
   unverified). `scan_results(limit, offset=0)` pages; NG sends the offset in the first
   `TURBOSCAN_GET` field (unverified, C-P2d).
+- **Step 3 (format 5).** `core/pro/model.py` (`ProCheat`, `ProEntry`, `Variable`) with
+  JSON (de)serialisation and validation (bad files raise ValueError, so `project.load`
+  reports ProjectFileError as before). `pro_cheats` is written only when there are any,
+  so a format 4 file saves as format 5 with only its version changed (AC-S3; the golden
+  `.cmproj` fixture is now format 5). NOP entries imply 0x90 on-bytes and store `on`
+  only when it differs. Variable names can't be `hook`, `return` or `original` (the
+  cave wrapper's symbols). `Cheat.pro` (compare=False) links a compiled cheat to its
+  source; compiling comes in step 8.
