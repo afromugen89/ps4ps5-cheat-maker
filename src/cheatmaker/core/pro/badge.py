@@ -20,6 +20,9 @@ Target = Literal["CheatRunner", "PC only"]
 
 HEAP_ADDRESS = "heap address"
 FREEZE = "freeze"
+WRITTEN_ONCE = "written once (CheatRunner can't freeze)"
+"""Note on a CheatRunner cheat that freezes a value in the game's module: CheatRunner
+writes it once when turned on (decision: option C, keeps guided TC-60 unchanged)."""
 POINTER_PATH = "pointer path"
 FOUND_AGAIN = "found again each run"
 NOTHING = "nothing to write"
@@ -30,6 +33,8 @@ class Badge:
     target: Target
     reasons: tuple[str, ...] = ()
     """Why a cheat is PC only, in a fixed order; empty for CheatRunner."""
+    notes: tuple[str, ...] = ()
+    """What changes when CheatRunner runs a CheatRunner cheat (e.g. ``WRITTEN_ONCE``)."""
 
     @property
     def runs_on_console(self) -> bool:
@@ -38,23 +43,32 @@ class Badge:
     @property
     def tooltip(self) -> str:
         if self.runs_on_console:
-            return "Fixed bytes in the game's code or data: CheatRunner runs it with the PC off."
+            text = "Fixed bytes in the game's code or data: CheatRunner runs it with the PC off."
+            return text + "".join(f"\nNote: {n}." for n in self.notes)
         return "Needs Cheat Maker running: " + ", ".join(self.reasons) + "."
 
 
 def badge(cheat: Cheat, project: Project | None = None) -> Badge:
     """The cheat's badge. ``project`` (the game's .cmproj) tells a pointer path from
-    the other ways a value is found again; without it they all say "found again"."""
+    the other ways a value is found again; without it they all say "found again".
+
+    CheatRunner = ``saveable and not found_again``. A freeze alone doesn't make a cheat
+    PC only: a frozen value in the game's module is written once by CheatRunner (noted);
+    a freeze is listed as a reason only when the cheat is PC only anyway."""
     reasons = []
     if not cheat.locations:
         reasons.append(NOTHING)
     if cheat.anchor is None and any(loc.moving for loc in cheat.locations):
         reasons.append(HEAP_ADDRESS)
-    if cheat.freeze:
-        reasons.append(FREEZE)
     if cheat.anchor is not None or cheat.learned_parts:
         reasons.append(POINTER_PATH if _only_chains(cheat, project) else FOUND_AGAIN)
-    return Badge(PC_ONLY, tuple(reasons)) if reasons else Badge(CHEATRUNNER)
+    if reasons:
+        if cheat.freeze:
+            reasons.insert(
+                reasons.index(HEAP_ADDRESS) + 1 if HEAP_ADDRESS in reasons else 0, FREEZE
+            )
+        return Badge(PC_ONLY, tuple(reasons))
+    return Badge(CHEATRUNNER, notes=(WRITTEN_ONCE,) if cheat.freeze else ())
 
 
 def _only_chains(cheat: Cheat, project: Project | None) -> bool:

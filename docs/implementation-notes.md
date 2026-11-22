@@ -704,3 +704,8 @@ Built from docs/architecture-pro.md (spec docs/spec-pro.md), implementation step
   mc4 fixture is not included (running ReaperPy here was not allowed); a test reads
   ReaperPy's plaintext layout instead. The save dialog doesn't offer mc4 yet (the
   CheatRunner folder for mc4 is unknown; export dialog in step 12).
+- **Badge decision (2026-11-22, option C).** A frozen value at a game-module address
+  keeps the CheatRunner badge with the note "written once (CheatRunner can't freeze)"
+  (`Badge.notes`); "freeze" is a reason only on a cheat that is PC only anyway. Export
+  (`CheatFile.saveable_cheats`) now uses `badge.runner_cheats`, which for guided cheats
+  is the same set as `Cheat.saveable` (tested), so TC-60 is unchanged.

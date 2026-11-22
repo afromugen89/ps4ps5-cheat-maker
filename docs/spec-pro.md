@@ -60,7 +60,7 @@ can't recreate.
   variables (name, type, value, comment), AOB signature, and a comment. Format 4 files load
   unchanged. A format 5 file opened by an older app is set aside (existing `set_aside` rule).
 - Each cheat has a **target** badge: `CheatRunner` (only fixed byte patches inside the module) or
-  `PC only` (any heap address, freeze, pointer path, found-again anchor), computed from the
+  `PC only` (any heap address, pointer path, found-again anchor), computed from the
   existing `Cheat.saveable` / `session_only` / `anchor`.
 - Guided cheats show up in Pro. Caves built by cave.py are stored with their assembly text
   (formatted by iced from the instructions that built them).
@@ -68,7 +68,7 @@ can't recreate.
   Lock it options) no longer offer to rebuild it, and say so.
 
 AC-S1. Given a cheat made by Lock it (player only), When Kein opens the Pro window, Then the cheat is listed with two entries (cave, jump), the cave shows assembly text that assembles to the exact saved bytes, and the badge says CheatRunner.
-AC-S2. Given a cheat holding a heap address or a freeze, Then its badge says PC only, and hovering it names the reason ("heap address", "freeze", "pointer path", "found again each run").
+AC-S2. Given a cheat holding a heap address, a pointer path or a found-again anchor, Then its badge says PC only, and hovering it names the reason ("heap address", "pointer path", "found again each run"; plus "freeze" when such a cheat also freezes). Given a frozen value at a game-module (static) address, Then its badge says CheatRunner with the note "written once (CheatRunner can't freeze)", and it is exported (decided 2026-11-22, option C: guided behaviour and TC-60 unchanged).
 AC-S3. Given a format 4 `.cmproj`, When the app loads and saves it, Then the objects, anchors and cheats are unchanged and `format_version` becomes 5.
 
 ## 6. Requirements

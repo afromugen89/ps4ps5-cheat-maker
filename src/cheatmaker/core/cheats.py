@@ -362,7 +362,11 @@ class CheatFile:
         return f"{self.title_id.upper()}_{safe_version}.{fmt}"
 
     def saveable_cheats(self) -> list[Cheat]:
-        return [c for c in self.cheats if c.saveable]
+        """The cheats a cheat file holds: those badged CheatRunner (spec-pro AC-S2). For
+        guided cheats this is the same set as ``Cheat.saveable``."""
+        from cheatmaker.core.pro.badge import runner_cheats  # badge builds on this module
+
+        return runner_cheats(self.cheats)
 
 
 def normalize_version(version: str) -> str:

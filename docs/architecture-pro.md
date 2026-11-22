@@ -170,11 +170,11 @@ Rules:
 - `Cheat.pro: ProCheat | None = field(default=None, compare=False)`. It links the runtime cheat to its source. It is never written to cheat files.
 - `Badge` is computed by `core/pro/badge.py: badge(cheat) -> Badge(target: Literal["CheatRunner", "PC only"], reasons: tuple[str, ...])`:
   - "heap address": `session_only` / SESSION_ADDRESS line;
-  - "freeze": `freeze`;
+  - "freeze": `freeze`, listed only when the cheat is PC only for another reason;
   - "pointer path": the cheat's object has only a `ChainAnchor`;
   - "found again each run": `anchor` / `found_again`.
   
-  CheatRunner = `saveable and not freeze and not found_again`.
+  CheatRunner = `saveable and not found_again` (decided 2026-11-22, option C). A frozen value at a game-module (static) address stays CheatRunner with the note "written once (CheatRunner can't freeze)" in `Badge.notes`, so guided exports and TC-60 are unchanged; for every guided cheat this is the same set as `Cheat.saveable`.
 
 ### `core/pro/model.py`
 
