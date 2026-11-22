@@ -12,13 +12,16 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QLabel, QMainWindow, QMessageBox, QTabWidget, QVBoxLayout, QWidget
 
+from cheatmaker.core.pro.asm import Assembler, AssemblerNotFound, default_assembler
 from cheatmaker.core.session import GameInfo
 from cheatmaker.ui.controller import Controller
 from cheatmaker.ui.pro import hints
+from cheatmaker.ui.pro.cheats_tab import CheatsTab
 from cheatmaker.ui.pro.tab import ProTab, game_text
 from cheatmaker.ui.tasks import TaskRunner
 
@@ -38,10 +41,21 @@ class _Placeholder(ProTab):
 
 
 class ProWindow(QMainWindow):
-    def __init__(self, ctl: Controller, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        ctl: Controller,
+        parent: QWidget | None = None,
+        *,
+        save: Callable[[], None] | None = None,
+        assembler_factory: Callable[[], Assembler] | None = None,
+    ) -> None:
+        """``save`` keeps Pro sources in the game's notes (My cheats' FindAgain.save);
+        ``assembler_factory`` defaults to NASM from the settings (``nasm_path``)."""
         super().__init__(parent)
         self.ctl = ctl
         self.tasks = TaskRunner(sync=ctl.tasks.sync, parent=self)
+        self.save = save or (lambda: None)
+        self.assembler = self._make_assembler(assembler_factory)
         self.setWindowTitle(hints.WINDOW_TITLE)
         self.resize(1100, 720)
         self.header = QLabel()
@@ -65,11 +79,20 @@ class ProWindow(QMainWindow):
         self._show_state()
         self.timer.start()
 
+    def _make_assembler(self, factory: Callable[[], Assembler] | None) -> Assembler | None:
+        """The assembler, or None: the Cheats tab then says "Assembler not found"."""
+        try:
+            return (factory or (lambda: default_assembler(self.ctl.settings.nasm_path)))()
+        except AssemblerNotFound as exc:
+            log.warning("action=pro_assembler result=missing reason=%s", exc)
+            return None
+
     def _build_tabs(self) -> None:
         for title in (hints.TAB_SCANNER, hints.TAB_ADDRESSES, hints.TAB_CODE, hints.TAB_MEMORY):
             self.add_tab(_Placeholder(self.ctl, self.tasks, ""), title)
         self.add_tab(_Placeholder(self.ctl, self.tasks, hints.WATCH_LATER), hints.TAB_WATCH)
-        self.add_tab(_Placeholder(self.ctl, self.tasks, ""), hints.TAB_CHEATS)
+        self.cheats = CheatsTab(self.ctl, self.tasks, self.assembler, self.save)
+        self.add_tab(self.cheats, hints.TAB_CHEATS)
 
     def add_tab(self, tab: ProTab, title: str) -> None:
         self.pro_tabs.append(tab)

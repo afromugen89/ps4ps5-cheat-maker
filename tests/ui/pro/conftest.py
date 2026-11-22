@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 from PySide6.QtWidgets import QMessageBox
 
+from cheatmaker.core.pro.asm import FakeAssembler
 from cheatmaker.settings import Settings
 from cheatmaker.ui.controller import Controller
 from cheatmaker.ui.main_window import MainWindow
@@ -29,6 +30,7 @@ def game():
 def win(qtbot, game, notices):
     ctl = Controller(lambda ip, port: game.fake, Settings.load(), TaskRunner(sync=True))
     w = MainWindow(ctl)
+    w.pro_assembler_factory = FakeAssembler
     qtbot.addWidget(w)
     w.connect_view.ip.setText("192.168.1.50")
     w.connect_view.connect_btn.click()
@@ -43,3 +45,11 @@ def pro(win, qtbot):
     win.open_pro()
     qtbot.addWidget(win.pro)
     return win.pro
+
+
+@pytest.fixture
+def tab(pro):
+    """The Cheats tab, with no waiting between a jump and its cave going (DISABLE_WAIT)."""
+    t = pro.cheats
+    t.sleep = lambda _s: None
+    return t

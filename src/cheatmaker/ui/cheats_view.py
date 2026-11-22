@@ -340,6 +340,9 @@ class CheatsView(QWidget):
 
     def do_build(self, c: Cheat) -> None:
         """Make it work on this cheat's value; the result replaces it."""
+        if c.pro is not None:  # edited in Pro: the main window says so
+            self.open_build(source=c)
+            return
         if not single_value(c):
             self.ctl.message.emit(hints.BUILD_PICK_SINGLE)
             return

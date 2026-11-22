@@ -4,10 +4,28 @@ from __future__ import annotations
 
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
+from cheatmaker.core.pro.asm_text import CantConvert
+from cheatmaker.core.pro.compile import SiteChanged
+from cheatmaker.core.pro.sites import Overlap
 from cheatmaker.core.session import GameInfo
+from cheatmaker.errors import LockFailed
 from cheatmaker.ui.controller import Controller
+from cheatmaker.ui.messages import report
 from cheatmaker.ui.pro import hints
 from cheatmaker.ui.tasks import TaskRunner
+
+PRO_ERRORS = (SiteChanged, Overlap, LockFailed, CantConvert)
+"""Errors whose own text is the message in Pro (they name the site, the bytes, the other
+cheat or the room); the guided wording ("Couldn't lock this value") would mislead."""
+
+
+def fail(ctl: Controller, exc: BaseException, action: str) -> None:
+    """``Controller.fail`` with Pro's own errors shown as they read."""
+    if isinstance(exc, PRO_ERRORS):
+        ctl.message.emit(str(exc))
+        report(exc, action)
+        return
+    ctl.fail(exc, action)
 
 
 def game_text(game: GameInfo | None, connected: bool, alive: bool) -> str:

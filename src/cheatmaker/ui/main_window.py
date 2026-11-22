@@ -57,6 +57,7 @@ class MainWindow(QMainWindow):
         self.pro_btn = QPushButton(pro_hints.OPEN_BUTTON)
         self.pro_btn.setToolTip(pro_hints.OPEN_BUTTON_TIP)
         self.pro = None  # the Pro window, made when first opened
+        self.pro_assembler_factory = None  # tests: an assembler instead of NASM
         bottom = QHBoxLayout()
         bottom.addWidget(self.status, 1)
         bottom.addWidget(self.pro_btn)
@@ -103,14 +104,21 @@ class MainWindow(QMainWindow):
             return True
         return False
 
+    def _edited_in_pro(self, cheat: Cheat | None) -> bool:
+        """A cheat edited in Pro is changed only there (its source would be lost)."""
+        if cheat is not None and cheat.pro is not None:
+            self.ctl.message.emit(pro_hints.EDITED_IN_PRO.format(name=cheat.name))
+            return True
+        return False
+
     def open_lock(self, cheat: Cheat) -> None:
-        if self._carry_busy():
+        if self._carry_busy() or self._edited_in_pro(cheat):
             return
         LockWizard(self.ctl, cheat, self).exec()
 
     def open_build(self, **kw) -> None:
         """Make it work (spec-cheat-builder) from Find or My cheats."""
-        if self._carry_busy():
+        if self._carry_busy() or self._edited_in_pro(kw.get("source")):
             return
         self.make_build_dialog(**kw).exec()
 
@@ -132,7 +140,11 @@ class MainWindow(QMainWindow):
         from cheatmaker.ui.pro.pro_window import ProWindow  # Pro loads only when used
 
         if self.pro is None:
-            self.pro = ProWindow(self.ctl)
+            self.pro = ProWindow(
+                self.ctl,
+                save=self.cheats.finder.save,
+                assembler_factory=self.pro_assembler_factory,
+            )
         self.pro.show()
         self.pro.raise_()
         self.pro.activateWindow()
