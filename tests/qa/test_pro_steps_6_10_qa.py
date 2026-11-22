@@ -469,3 +469,187 @@ def test_variables_are_placed_after_align_4(nasm_or_fake):  # TC-54
     assert result.code[offs["a"]] == 7
     assert result.code[offs["b"] : offs["b"] + 8] == struct.pack("<d", 1.5)
     assert offs["a"] % 4 == 0
+
+
+# == Re-test of 6c7c726 / e885877 ======================================================
+def _refused(result) -> bool:
+    return not result.ok and "abs" in result.error[1]
+
+
+@pytest.mark.needs_nasm
+@pytest.mark.parametrize(
+    "src",
+    [
+        "times 1 mov eax, [dword 0x2010]",
+        "%macro m 0\nmov eax, [0x2010+rcx*4]\n%endmacro\nnop\nm",
+        "%define X [0x2010+rcx*4]\nmov eax, X",
+        "L: mov eax, [0x2010+rcx*4]",
+        "X equ 0x2010\nmov eax, [X+rcx*4]",
+        "mov eax, [ds:0x2010]",
+        "mov eax, es: [0x2010]",
+        "lea rax, [0x2010+rcx*4]",
+        "jmp [0x2010+rcx*8]",
+        "mov eax, [0x2000+0x10] ; abs value",
+    ],
+)
+def test_rt_absolute_operands_refused_in_every_spelling(nasm, src):  # TC-03b
+    assert _refused(nasm.assemble(src, CTX))
+
+
+@pytest.mark.needs_nasm
+@pytest.mark.parametrize(
+    "src",
+    [
+        "mov eax, [abs 0x2010]",
+        "mov rax, fs: [0x28]",
+        "mov rax, [gs:0x28+rcx*8]",
+        "mov eax, [rcx*4]",
+    ],
+)
+def test_rt_explicit_fixed_addresses_still_assemble(nasm, src):  # TC-03c
+    assert nasm.assemble(src, CTX).ok
+
+
+@pytest.mark.needs_nasm
+@pytest.mark.parametrize(
+    "hexcode", ["8b048d00200000", "64488b042528000000", "65488b04cd28000000", "8b048d00000000"]
+)
+def test_rt_no_base_operands_round_trip_as_abs(nasm, hexcode):  # TC-10b
+    code = bytes.fromhex(hexcode)
+    ctx = dataclasses.replace(CTX, original=b"\x8b\x4b\x08\x89\xc8")
+    source = to_source(code, ctx, nasm)
+    assert "[abs " in source and nasm.assemble(source, ctx).code == code
+
+
+@pytest.mark.needs_nasm
+@pytest.mark.parametrize(
+    "src",
+    [
+        "mov eax, [0x2010+rcx*4] ; take abs",
+        "times 1 mov eax, [0x2010+rcx*4]",
+        "%line 0+1 other\nmov eax, [0x2010+rcx*4]",
+    ],
+    ids=["abs-in-comment", "times-prefix", "user-line-directive"],
+)
+@pytest.mark.xfail(
+    reason="BUG-10: the absolute-operand check is skipped for a line whose comment says "
+    "'abs', a times-prefixed line, or after a %line in the user's source",
+    strict=True,
+)
+def test_bug10_absolute_operand_check_cant_be_skipped(nasm, src):  # TC-03d
+    assert _refused(nasm.assemble(src, CTX))
+
+
+@pytest.mark.needs_nasm
+@pytest.mark.parametrize(
+    "src",
+    [
+        'incbin "/etc/hostname"',
+        '%  include "/etc/hostname"',
+        "%define X inc %+ bin",
+        "db %!HOME",
+        '%strcat F "/etc/", "x"\nincbin F',
+    ],
+)
+def test_rt_file_reading_directives_are_refused(nasm, src):  # TC-05b
+    result = nasm.assemble(src, CTX)
+    assert not result.ok and "isn't allowed" in result.error[1]
+
+
+@pytest.mark.needs_nasm
+def test_rt_words_inside_strings_are_not_refused(nasm):  # TC-05c
+    assert nasm.assemble('db "incbin %include", 0', CTX).ok
+
+
+@pytest.mark.needs_nasm
+@pytest.mark.xfail(
+    reason="BUG-11: incbin built from pieces with %[...] still reads a PC file", strict=True
+)
+def test_bug11_incbin_built_with_token_pasting_is_refused(nasm, tmp_path):  # TC-05d
+    secret = tmp_path / "secret.txt"
+    secret.write_text("password", encoding="utf-8")
+    result = nasm.assemble(f'%define IB incb\n%[IB]in "{secret.as_posix()}"', CTX)
+    assert b"password" not in result.code
+
+
+def test_rt_stale_cheat_compiles_to_nothing_and_isnt_exported(s):  # TC-25b
+    from cheatmaker.core.pro.badge import badge
+
+    pc = _two_caves(s)
+    home, second = pc.entries
+    home.source = "nop\nnop\nnop\nnop\noriginal\njmp return\n"
+    pc_.build(s, pc, home, _FailOn("jmp mult\n"))
+    cheat = pc_.compile_cheat(pc)
+    assert cheat.locations == [] and not badge(cheat).runs_on_console
+    pc_.build(s, pc, second, FakeAssembler())  # rebuilt: back to normal
+    assert pc_.compile_cheat(pc).locations
+
+
+def test_rt_set_variable_patches_only_the_variable_bytes(s):  # TC-26b
+    pc = built_cheat(s)
+    entry = pc.entries[0]
+    before = entry.cave_bytes
+    assert pc_.set_variable(pc, "mult", 0.25) == pc_.SAVED
+    assert entry.cave_bytes[:-4] == before[:-4]
+    assert entry.cave_bytes[-4:] == struct.pack("<f", 0.25)
+    with pytest.raises(ValueError):
+        pc_.set_variable(pc, "mult", 1e39)
+    assert entry.cave_bytes[-4:] == struct.pack("<f", 0.25)
+
+
+@pytest.mark.xfail(
+    reason="BUG-12: after a variable is added (or retyped) and the build fails, "
+    "set_variable writes the value into the cave's code (live)",
+    strict=True,
+)
+def test_bug12_set_variable_uses_the_built_layout(s):  # TC-26c
+    pc = built_cheat(s)
+    entry = pc.entries[0]
+    writer = pc_.ProWriter(s)
+    pc_.enable(s, pc, writer)
+    built = entry.cave_bytes
+    pc.variables.append(Variable("n", ValueType.INT32, 1))  # the editor adds one ...
+    broken = FakeAssembler()
+    broken.fail = (1, "typo")
+    assert not pc_.build(s, pc, entry, broken).ok  # ... and its build is refused
+    with contextlib.suppress(pc_.LockFailed):
+        pc_.set_variable(pc, "mult", 5.0, session=s, writer=writer, on=True)
+    live = s.fake.peek(PID, BASE + entry.cave, len(built))
+    assert live[:-4] == built[:-4], "the cave's code must not change"
+
+
+def test_rt_update_moves_a_cave_less_pro_cheat_and_refuses_one_with_a_cave():  # TC-33b
+    full = carry_cheat()
+    nop_only = carry_cheat()
+    nop_only.id, nop_only.name = "p2", "Nop only"
+    nop_only.entries, nop_only.variables, nop_only.editable = nop_only.entries[1:], [], None
+    cf = CheatFile("T", "PPSA01234", "01.000", [pc_.compile_cheat(nop_only)])
+    new, report = up.update_file(cf, up.learn(cf, _image()), _image(SHIFT), "01.001")
+    (moved,) = new.cheats
+    assert [e.offset for e in moved.pro.entries] == [loc.offset for loc in moved.locations]
+    assert moved.pro is not nop_only and nop_only.entries[0].offset == NOP_SITE
+    cf = CheatFile("T", "PPSA01234", "01.000", [pc_.compile_cheat(full)])
+    _new, report = up.update_file(cf, up.learn(cf, _image()), _image(SHIFT), "01.001")
+    assert report.failed == {"Health": up.PRO_CAVE}
+
+
+def test_rt_bring_over_keeps_this_versions_own_pro_cheat(pwin):  # TC-32b
+    """A merge: the notes already hold their own p1; the old version's p1 comes as p2."""
+    own = carry_cheat()
+    own.name = "Own"
+    old_pc = carry_cheat()
+    rp.learn([old_pc], _image())
+    cheats = pwin.ctl.ensure_file().cheats
+    cheats.append(pc_.compile_cheat(own))
+    pwin.cheats.finder.save()
+    cheats.append(pc_.compile_cheat(old_pc))  # the old version's row, same id
+    (moved,), _report = rp.bring_over([old_pc], _image(SHIFT), FakeAssembler())
+    moved.id = "p2"
+    g = pwin.ctl.session.require_game()
+    carried = pj.Project(g.title_id, g.version, "eboot.bin", pro_cheats=[moved])
+    pwin.cheats.finder.adopt_carried(carried, {}, merge_into=pwin.ctl.project, old_pro_ids=["p1"])
+    saved = {pc.id: pc for pc in _saved(pwin).pro_cheats}
+    assert saved["p1"].name == "Own"
+    assert [e.offset for e in saved["p2"].entries] == [e.offset for e in moved.entries]
+    rows = [(c.pro.id, c.name) for c in cheats if c.pro is not None]
+    assert sorted(rows) == [("p1", "Own"), ("p2", "Health")]
