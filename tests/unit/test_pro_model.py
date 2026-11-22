@@ -212,3 +212,34 @@ def test_variable_bytes_and_lookup():
 def test_new_cheat_id_fills_the_first_gap():
     assert new_cheat_id([]) == "p1"
     assert new_cheat_id([ProCheat("p1", "a"), ProCheat("p3", "b")]) == "p2"
+
+
+# -- QA round (2026-11-22) ----------------------------------------------------------------
+@pytest.mark.parametrize(
+    "name", ["rax", "R12d", "xmm0", "ymm15", "al", "rip", "byte", "DWORD", "ptr", "rel", "qword"]
+)
+def test_register_and_nasm_word_names_are_refused(name):
+    with pytest.raises(ValueError, match="register or assembler word"):
+        Variable(name, ValueType.INT32, 1)
+
+
+@pytest.mark.parametrize("name", ["mult", "rax2", "my_byte", "xmm", "health"])
+def test_ordinary_names_are_fine(name):
+    assert Variable(name, ValueType.INT32, 1).name == name
+
+
+@pytest.mark.parametrize(
+    ("vtype", "value"),
+    [(ValueType.FLOAT, 1e39), (ValueType.FLOAT, -5e38), (ValueType.INT64, 10**400)],
+)
+def test_out_of_range_values_are_value_errors(vtype, value):
+    with pytest.raises(ValueError, match="doesn't fit"):
+        Variable("v", vtype, value)
+
+
+def test_offsets_past_2_48_are_refused():
+    assert ProEntry("bytes", (1 << 48) - 1, b"\x01", b"\x02").offset == (1 << 48) - 1
+    with pytest.raises(ValueError, match="below"):
+        ProEntry("bytes", 1 << 48, b"\x01", b"\x02")
+    with pytest.raises(ValueError, match="below"):
+        ProEntry("cave", 0x10, b"\x01" * 5, cave=1 << 60)

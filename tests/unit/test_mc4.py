@@ -269,3 +269,11 @@ def test_wrong_extension_is_read_by_its_content(tmp_path, caplog):
 )
 def test_sniff(data, fmt):
     assert formats.sniff(data) == fmt
+
+
+def test_mc4_with_a_utf8_bom_and_utf16_json_sniffing(tmp_path):
+    cf = _project_file()
+    assert mc4.loads(b"\xef\xbb\xbf" + mc4.dumps(cf)).title_id == "PPSA01234"
+    assert formats.sniff('{"mods": []}'.encode("utf-16")) == "json"
+    assert formats.sniff("  <Trainer".encode("utf-16")) == "shn"
+    assert formats.sniff("hello".encode("utf-16")) is None

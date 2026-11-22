@@ -610,7 +610,15 @@ def load(path: Path) -> Project | None:
         return None
     try:
         return Project.from_json(json.loads(path.read_text(encoding="utf-8")))
-    except (OSError, ValueError, KeyError, TypeError, IndexError, AttributeError) as exc:
+    except (
+        OSError,
+        ValueError,
+        OverflowError,  # a number too large for its type: an unreadable file, set aside
+        KeyError,
+        TypeError,
+        IndexError,
+        AttributeError,
+    ) as exc:
         raise ProjectFileError(f"{path.name}: {exc}") from exc
 
 

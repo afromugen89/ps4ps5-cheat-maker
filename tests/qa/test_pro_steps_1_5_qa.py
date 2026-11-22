@@ -342,10 +342,6 @@ def test_paging_covers_every_match_once():  # TC-10
         cl.close()
 
 
-@pytest.mark.xfail(
-    reason="BUG-02: as_between/value_for raise OverflowError for a number past float range",
-    strict=True,
-)
 @pytest.mark.parametrize(
     ("vt", "cmp", "value", "expected"),
     [
@@ -419,11 +415,6 @@ def test_bad_variables_make_a_project_file_error(tmp_path, var):  # TC-22
         pj.load(_with_variable(tmp_path, var))
 
 
-@pytest.mark.xfail(
-    reason="BUG-01: a variable past its type's range raises OverflowError, not "
-    "ProjectFileError / ValueError",
-    strict=True,
-)
 @pytest.mark.parametrize(
     "var",
     [
@@ -437,10 +428,6 @@ def test_bug01_out_of_range_variable_is_a_project_file_error(tmp_path, var):  # 
         pj.load(_with_variable(tmp_path, var))
 
 
-@pytest.mark.xfail(
-    reason="BUG-01: Variable() raises OverflowError for a 4-byte decimal past 3.4e38",
-    strict=True,
-)
 def test_bug01_variable_constructor_raises_value_error():  # TC-23
     with pytest.raises(ValueError):
         Variable("mult", V.FLOAT, 5e38)
@@ -597,9 +584,6 @@ def test_aes_round_trip_every_length():  # TC-57
         assert _aes.pkcs7_unpad(_aes.cbc_decrypt(mc4.KEY, mc4.IV, enc)) == data
 
 
-@pytest.mark.xfail(
-    reason="BUG-03: an .mc4 saved with a UTF-8 BOM (e.g. by Notepad) is refused", strict=True
-)
 def test_bug03_mc4_with_a_utf8_bom_is_read(tmp_path):  # TC-58
     cf = formats.load_path(GOLDEN / "CUSA02396_01.01.json")
     path = tmp_path / "CUSA02396_01.01.mc4"
@@ -607,10 +591,6 @@ def test_bug03_mc4_with_a_utf8_bom_is_read(tmp_path):  # TC-58
     assert len(formats.load_path(path).cheats) == len(cf.cheats)
 
 
-@pytest.mark.xfail(
-    reason="BUG-04: a UTF-16 .json is read as XML and reported as 'not valid XML'",
-    strict=True,
-)
 def test_bug04_utf16_json_error_names_json(tmp_path):  # TC-59
     text = (GOLDEN / "CUSA02396_01.01.json").read_bytes().decode("utf-8-sig")
     path = tmp_path / "CUSA02396_01.01.json"
@@ -690,11 +670,6 @@ def test_verified_but_broken_zip_is_reported(monkeypatch, tmp_path, capsys):  # 
     assert capsys.readouterr().err.startswith("fetch_nasm:")
 
 
-@pytest.mark.xfail(
-    reason="BUG-01: an OverflowError escapes the notes load, so the file isn't kept aside "
-    "and is overwritten by the next save",
-    strict=True,
-)
 def test_bug01_notes_with_an_out_of_range_variable_survive_in_the_app(win, console, qtbot):
     """TC-24: like find-again TC-28, but the file is unreadable because of a Pro variable."""
     from tests import fakegame as fg

@@ -12,7 +12,6 @@ from cheatmaker.formats import goldhen_json, mc4, shn
 log = logging.getLogger(__name__)
 
 FORMATS = {"json": goldhen_json, "shn": shn, "mc4": mc4}
-_BOMS = (b"\xef\xbb\xbf", b"\xff\xfe", b"\xfe\xff")
 
 
 def dumps(cf: CheatFile, fmt: str) -> bytes:
@@ -26,14 +25,13 @@ def sniff(data: bytes) -> str | None:
     """ "shn" for XML, "json" for a JSON object, None when the content doesn't say (an
     .mc4 is base64 text, which looks like neither)."""
     head = data[:4096]
-    if head.startswith((b"\xff\xfe", b"\xfe\xff")):  # real UTF-16 is only ever .shn
+    if head.startswith((b"\xff\xfe", b"\xfe\xff")):  # UTF-16: look at the text itself
+        start = head[: len(head) // 2 * 2].decode("utf-16", "replace").lstrip()
+    else:
+        start = head.removeprefix(b"\xef\xbb\xbf").lstrip().decode("latin-1")
+    if start.startswith("<"):
         return "shn"
-    for bom in _BOMS:
-        head = head.removeprefix(bom)
-    head = head.lstrip()
-    if head.startswith(b"<"):
-        return "shn"
-    if head.startswith(b"{"):
+    if start.startswith("{"):
         return "json"
     return None
 

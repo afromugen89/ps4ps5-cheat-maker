@@ -28,6 +28,88 @@ JMP_REL32_SIZE = 5
 _NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 RESERVED_NAMES = frozenset({"hook", "return", "original"})
 """Symbols the cave wrapper defines itself; a variable can't take them."""
+_REGS = (
+    ["rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rsp", "rbp", "rip"]
+    + ["eax", "ebx", "ecx", "edx", "esi", "edi", "esp", "ebp", "eip"]
+    + ["ax", "bx", "cx", "dx", "si", "di", "sp", "bp", "ip"]
+    + ["al", "bl", "cl", "dl", "ah", "bh", "ch", "dh", "sil", "dil", "spl", "bpl"]
+    + [f"r{n}{s}" for n in range(8, 16) for s in ("", "d", "w", "b", "l")]
+    + [f"{k}mm{n}" for k in ("x", "y", "z") for n in range(32)]
+    + [f"mm{n}" for n in range(8)]
+    + [f"st{n}" for n in range(8)]
+    + [f"k{n}" for n in range(8)]
+    + [f"cr{n}" for n in range(16)]
+    + [f"dr{n}" for n in range(16)]
+    + ["cs", "ds", "es", "fs", "gs", "ss", "st", "flags", "rflags", "eflags"]
+)
+_NASM_WORDS = [
+    "byte",
+    "word",
+    "dword",
+    "qword",
+    "tword",
+    "oword",
+    "yword",
+    "zword",
+    "ptr",
+    "rel",
+    "abs",
+    "near",
+    "far",
+    "short",
+    "strict",
+    "nosplit",
+    "default",
+    "bits",
+    "org",
+    "section",
+    "segment",
+    "align",
+    "alignb",
+    "times",
+    "equ",
+    "db",
+    "dw",
+    "dd",
+    "dq",
+    "dt",
+    "do",
+    "dy",
+    "dz",
+    "resb",
+    "resw",
+    "resd",
+    "resq",
+    "rest",
+    "reso",
+    "resy",
+    "resz",
+    "incbin",
+    "seg",
+    "wrt",
+    "global",
+    "extern",
+    "common",
+    "static",
+    "macro",
+    "endmacro",
+    "struc",
+    "endstruc",
+    "istruc",
+    "iend",
+    "at",
+    "to",
+    "float",
+    "__float32__",
+    "__float64__",
+    "__utf16__",
+    "__utf32__",
+]
+ASM_NAMES = frozenset(n.lower() for n in (*_REGS, *_NASM_WORDS))
+"""x86 register names and NASM keywords: a variable named like one wouldn't assemble
+(or would silently mean the register)."""
+MAX_OFFSET = 1 << 48
+"""Module offsets are user-space addresses on the PS5: anything at or past 2^48 is a typo."""
 
 
 def _hex(v: int) -> str:
@@ -81,14 +163,24 @@ class Variable:
             raise ValueError(f"variable name {self.name!r}: use letters, digits and _")
         if self.name.lower() in RESERVED_NAMES:
             raise ValueError(f"{self.name!r} is a name the cave already uses")
+        if self.name.lower() in ASM_NAMES:
+            raise ValueError(f"{self.name!r} is a register or assembler word; pick another name")
         if isinstance(self.value, bool) or not isinstance(self.value, (int, float)):
             raise ValueError(f"variable {self.name}: value is not a number")
-        if self.vtype.is_float:
-            if not math.isfinite(self.value):
-                raise ValueError(f"variable {self.name}: value must be a finite number")
-        elif not float(self.value).is_integer():
+        if isinstance(self.value, float) and not math.isfinite(self.value):
+            raise ValueError(f"variable {self.name}: value must be a finite number")
+        if (
+            not self.vtype.is_float
+            and isinstance(self.value, float)
+            and not self.value.is_integer()
+        ):
             raise ValueError(f"variable {self.name}: {self.vtype.label} needs a whole number")
-        self.encoded()  # raises ValueError when the value doesn't fit the type
+        try:
+            self.encoded()  # raises ValueError when the value doesn't fit the type
+        except OverflowError:  # e.g. 1e39 as a 4-byte decimal, or a 400-digit whole number
+            raise ValueError(
+                f"variable {self.name}: {self.value!r} doesn't fit in {self.vtype.label.lower()}"
+            ) from None
 
     def encoded(self) -> bytes:
         """The value's bytes as placed in the cave."""
@@ -137,6 +229,8 @@ class ProEntry:
             raise ValueError(f"unknown entry kind {self.kind!r}")
         if self.offset < 0 or (self.cave is not None and self.cave < 0):
             raise ValueError("an offset can't be negative")
+        if self.offset >= MAX_OFFSET or (self.cave is not None and self.cave >= MAX_OFFSET):
+            raise ValueError(f"an offset must be below {MAX_OFFSET:#x}")
         if not self.off:
             raise ValueError(f"a {self.kind} entry needs its original bytes")
         if self.kind == "nop" and not self.on:

@@ -40,7 +40,8 @@ def encrypt(plain: bytes) -> bytes:
 def decrypt(data: bytes) -> bytes:
     """The .shn bytes inside an mc4 file. Raises CheatFileError when it isn't one."""
     try:
-        raw = base64.b64decode(_SPACE.sub(b"", bytes(data)), validate=True)
+        text = bytes(data).lstrip().removeprefix(b"\xef\xbb\xbf")  # e.g. Notepad's BOM
+        raw = base64.b64decode(_SPACE.sub(b"", text), validate=True)
     except (binascii.Error, ValueError) as exc:
         raise CheatFileError(f"not an mc4 file (base64): {exc}") from None
     if not raw or len(raw) % _aes.BLOCK:

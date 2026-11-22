@@ -712,3 +712,10 @@ Built from docs/architecture-pro.md (spec docs/spec-pro.md), implementation step
   (`Badge.notes`); "freeze" is a reason only on a cheat that is PC only anyway. Export
   (`CheatFile.saveable_cheats`) now uses `badge.runner_cheats`, which for guided cheats
   is the same set as `Cheat.saveable` (tested), so TC-60 is unchanged.
+- **QA round (2026-11-22, BUG-01..04).** A Pro variable too large for its type is a
+  ValueError (and `project.load` also treats OverflowError as an unreadable file, so it
+  is set aside, not overwritten). `as_between` maps a whole number past the float range
+  to an infinity (LESS keeps every finite value, GREATER none). `.mc4` skips a leading
+  UTF-8 BOM. `formats.sniff` decodes a UTF-16 start and looks for `<` / `{` (a UTF-16
+  `.json` is again refused as "not valid JSON"). Also: entry and cave offsets must be
+  below 2^48, and variable names can't be x86 registers or NASM keywords.

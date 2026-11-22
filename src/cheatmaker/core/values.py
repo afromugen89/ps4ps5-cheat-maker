@@ -227,7 +227,10 @@ def as_between(
     up = cmp is Compare.GREATER
     if vtype.is_float:
         top = F32_MAX if vtype is ValueType.FLOAT else sys.float_info.max
-        v = float(value)
+        try:
+            v = float(value)
+        except OverflowError:  # a whole number past the float range: an infinity here
+            v = math.inf if value > 0 else -math.inf
         if math.isnan(v) or (v >= top if up else v <= -top):
             return None
         if (v < -top) if up else (v > top):
