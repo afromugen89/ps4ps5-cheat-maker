@@ -35,6 +35,7 @@ import iced_x86 as ix
 
 from cheatmaker.console.client import ProgressFn
 from cheatmaker.core.cheats import Cheat, CheatFile, Location, LocationKind
+from cheatmaker.core.pro.model import ProCheat, ProEntry
 from cheatmaker.core.session import Session
 from cheatmaker.errors import ScanCancelled
 
@@ -408,7 +409,7 @@ def _find_patch(
     return hits[0], "", guessed
 
 
-def _reaim(data: bytes, old_ip: int, new_ip: int, move: Callable[[int], int | None]) -> bytes:
+def reaim(data: bytes, old_ip: int, new_ip: int, move: Callable[[int], int | None]) -> bytes:
     """Re-aim jumps / RIP-relative operands in ``data`` (code moved from old_ip to
     new_ip). Raises UpdateError when a target can't be followed."""
     out = bytearray(data)
@@ -433,6 +434,22 @@ def _reaim(data: bytes, old_ip: int, new_ip: int, move: Callable[[int], int | No
             pos = ins.ip - old_ip + off
             out[pos : pos + size] = rel.to_bytes(size, "little", signed=True)
     return bytes(out)
+
+
+PRO_CAVE = "a Pro cheat with a cave: use Bring them over"
+
+
+def _moved_pro(pc: ProCheat, lines: list[Location]) -> ProCheat:
+    """A Pro cheat without caves (one line per entry, as compiled) moved with its
+    lines, so its source and its lines agree in the new version (QA BUG-08). Its AOBs
+    are for the old version: they are learned again for the new one."""
+    entries = [
+        ProEntry(e.kind, loc.offset, loc.off, loc.on, comment=e.comment)
+        for e, loc in zip(pc.entries, lines, strict=True)
+    ]
+    moved = ProCheat.from_json(pc.to_json())
+    moved.entries = entries
+    return moved
 
 
 def update_file(
@@ -499,8 +516,8 @@ def update_file(
             continue
         dest = new_off[loc.offset]
         try:
-            on = _reaim(loc.on, loc.offset, dest, move)
-            off = new_orig.get(loc.offset) or _reaim(loc.off, loc.offset, dest, move)
+            on = reaim(loc.on, loc.offset, dest, move)
+            off = new_orig.get(loc.offset) or reaim(loc.off, loc.offset, dest, move)
         except UpdateError as exc:
             problems[loc.offset] = str(exc)
             continue
@@ -518,6 +535,11 @@ def update_file(
             if c.locations:
                 report.failed_at[c.name] = c.locations[0].offset
             continue
+        if c.pro is not None and any(e.kind == "cave" for e in c.pro.entries):
+            report.failed[c.name] = PRO_CAVE  # its source must be re-assembled there
+            if c.locations:
+                report.failed_at[c.name] = c.locations[0].offset
+            continue
         # report the root cause first: a patch not found, before the cave that jumps to it
         first = sorted(c.locations, key=lambda loc: loc not in lay.patches)
         bad = [problems[loc.offset] for loc in first if loc.offset in problems]
@@ -532,12 +554,14 @@ def update_file(
             first_bad = [loc for loc in first if loc.offset in problems] or missing or others
             report.failed_at[c.name] = first_bad[0].offset
             continue
+        moved = [lines[loc.offset] for loc in c.locations]
         cheats.append(
             replace(
                 c,
-                locations=[lines[loc.offset] for loc in c.locations],
+                locations=moved,
                 enabled=False,
                 locked=None,  # a Lock it value's address is the old run's only
+                pro=None if c.pro is None else _moved_pro(c.pro, moved),
             )
         )
         report.moved.append(c.name)
@@ -593,6 +617,7 @@ __all__ = [
     "make_signature",
     "patch_lines",
     "read_code_image",
+    "reaim",
     "save_signatures",
     "signatures_path",
     "update_file",

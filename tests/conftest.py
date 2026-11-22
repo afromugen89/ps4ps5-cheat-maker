@@ -68,3 +68,14 @@ def session(fake) -> Session:
     s.connect("192.168.1.50")
     s.refresh_game()
     return s
+
+
+@pytest.fixture
+def nasm():
+    """The real assembler; use with ``@pytest.mark.needs_nasm``."""
+    from cheatmaker.core.pro.asm import NasmAssembler
+
+    exe = nasm_exe()
+    if exe is None:  # pragma: no cover - the marker skips first
+        pytest.skip("NASM not found")
+    return NasmAssembler(exe)

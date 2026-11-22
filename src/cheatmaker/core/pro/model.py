@@ -4,7 +4,7 @@ A Pro cheat is a name plus entries: Bytes (on/off bytes at a site), NOP (the sit
 instructions replaced by NOPs) or Cave (assembly source, placed in the module's spare
 code and reached by a jump at the hook). Compiled bytes are stored next to the source,
 so a project loads, turns on and exports with no assembler on the PC. Saved in the
-``.cmproj`` (format 5) ``pro_cheats`` list; ``compile.py`` (later step) turns one into
+``.cmproj`` (format 5) ``pro_cheats`` list; ``compile.compile_cheat`` turns one into
 an ordinary ``Cheat``.
 
 All offsets are from the main module's base.
@@ -12,6 +12,7 @@ All offsets are from the main module's base.
 
 from __future__ import annotations
 
+import itertools
 import math
 import re
 from dataclasses import dataclass, field
@@ -137,6 +138,22 @@ def _blob(d: dict, key: str) -> bytes:
     return bytes.fromhex(_text(d, key, ""))
 
 
+def _layout(v: object) -> tuple[tuple[str, str, int], ...]:
+    out = []
+    for item in _list(v, "layout"):
+        if (
+            not isinstance(item, list)
+            or len(item) != 3
+            or not isinstance(item[0], str)
+            or not isinstance(item[1], str)
+            or isinstance(item[2], bool)
+            or not isinstance(item[2], int)
+        ):
+            raise ValueError("a variable layout entry is not [name, type, offset]")
+        out.append((item[0], item[1], item[2]))
+    return tuple(out)
+
+
 def _dict(v: object, what: str) -> dict:
     if not isinstance(v, dict):
         raise ValueError(f"{what} is not an object")
@@ -223,6 +240,13 @@ class ProEntry:
     cave_bytes: bytes = b""
     aob: str = ""
     comment: str = ""
+    layout: tuple[tuple[str, str, int], ...] = ()
+    """Home cave only: the variables as the cave was last built, (name, type, offset in
+    ``cave_bytes``). Values are patched and read through this, never through the
+    current variable list (which the editor may have changed since; QA BUG-12)."""
+    stale: bool = False
+    """Cave only: its bytes no longer match its source (another cave's variables
+    moved and it couldn't be re-assembled). It can't be turned on until rebuilt."""
 
     def __post_init__(self) -> None:
         if self.kind not in ENTRY_KINDS:
@@ -248,6 +272,22 @@ class ProEntry:
                 raise ValueError(f"a cave hook covers at least {JMP_REL32_SIZE} bytes")
             if self.cave_bytes and self.cave is None:
                 raise ValueError("compiled cave bytes need the cave's place")
+            if self.cave_bytes and len(self.on) < JMP_REL32_SIZE:
+                raise ValueError("a compiled cave needs the jump at its hook")
+        elif self.stale or self.layout:
+            raise ValueError("only a cave entry can be stale or hold variables")
+        spans: list[tuple[int, int, str]] = []
+        for name, vtype, at in self.layout:
+            if vtype.upper() not in ValueType.__members__:
+                raise ValueError(f"variable {name!r} isn't inside the built cave")
+            end = at + ValueType[vtype.upper()].size
+            if at < 0 or end > len(self.cave_bytes):
+                raise ValueError(f"variable {name!r} isn't inside the built cave")
+            spans.append((at, end, name))
+        spans.sort()
+        for (_, end, a), (start, _, b) in itertools.pairwise(spans):
+            if start < end:
+                raise ValueError(f"variables {a!r} and {b!r} overlap in the built cave")
 
     @property
     def nop_default(self) -> bool:
@@ -255,7 +295,7 @@ class ProEntry:
 
     def to_json(self) -> dict:
         if self.kind == "cave":
-            return {
+            d = {
                 "kind": "cave",
                 "hook": _hex(self.offset),
                 "cave": None if self.cave is None else _hex(self.cave),
@@ -266,6 +306,11 @@ class ProEntry:
                 "aob": self.aob,
                 "comment": self.comment,
             }
+            if self.stale:  # optional keys, still format 5
+                d["stale"] = True
+            if self.layout:
+                d["layout"] = [list(item) for item in self.layout]
+            return d
         d: dict = {"kind": self.kind, "offset": _hex(self.offset), "off": self.off.hex()}
         if not self.nop_default:  # plain NOPs are implied by the kind
             d["on"] = self.on.hex()
@@ -287,6 +332,8 @@ class ProEntry:
                 source=_text(d, "source", ""),
                 cave=None if cave is None else _offset(cave, "a cave offset"),
                 cave_bytes=_blob(d, "cave_bytes"),
+                stale=d.get("stale", False) is True,
+                layout=_layout(d.get("layout", [])),
                 **common,
             )
         if kind not in ENTRY_KINDS:

@@ -719,3 +719,161 @@ Built from docs/architecture-pro.md (spec docs/spec-pro.md), implementation step
   UTF-8 BOM. `formats.sniff` decodes a UTF-16 start and looks for `<` / `{` (a UTF-16
   `.json` is again refused as "not valid JSON"). Also: entry and cave offsets must be
   below 2^48, and variable names can't be x86 registers or NASM keywords.
+
+## Cheat Maker Pro, R1 steps 6-10 (2026-11-22)
+
+- **Step 6 (assembler).** `core/pro/asm.py`. Interface (local choice, same content as the
+  doc sketch): `Assembler.assemble(source, ctx: CaveContext, variables) -> AsmResult`,
+  where `CaveContext(org, hook, original: bytes, symbols)` carries the cave address, the
+  hook, the bytes the jump covers and extra `equ` names; `return` is derived. The
+  `original` macro is iced NASM text of those bytes. NASM can't make a bare number
+  RIP-relative (`[rel 0x400116]` assembles as an absolute address), so the shim writes
+  `[rel $$+(N-org)]`, which NASM does encode RIP-relative; the same rule turns a user's
+  `[0x...]` (Reaper/ReaperPy meaning) RIP-relative, and iced text for a true absolute
+  operand is written `[abs N]`. `%line 0+1 user` makes NASM report the user's own line
+  numbers (no header subtraction). Variables are `db` bytes of `Variable.encoded()`
+  after `align 4` (exact for every type). Labels and variable addresses come from
+  `[map symbols]`. NASM runs with cwd = a fresh temp folder (relative file names, so no
+  quoting of paths), `timeout=2` (reported as an error line 0), `CREATE_NO_WINDOW`;
+  a missing exe raises `AssemblerNotFound`. `FakeAssembler` (in `asm.py`, like
+  `console/fake.py`) handles `label:`, `db`, `nop`, `ret`, `int3`, `jmp` (rel32),
+  `original`, and agrees byte for byte with NASM on that subset (tested).
+  **AC-8.1 measured** (NASM 2.16.01 on the Linux build container, 50 runs of a
+  102-line cave with one variable, 816 bytes): min 3.3 ms, median 4.3 ms, max 7.0 ms;
+  an error comes back in 2.7 ms. The 0.5 s budget is >60x away; Windows process start
+  and a first antivirus scan of `nasm.exe` are not measured here (C-P console tests).
+- **Step 7 (bytes to text).** `core/pro/asm_text.py`. Sources are assembled at module
+  offsets (`org` = cave offset, `hook`/`return` offsets): the caves are RIP-relative,
+  so the bytes don't depend on the module base and the text shows the same
+  `+0x...` offsets as the rest of the app. `to_source` labels branch and RIP-relative
+  targets that are instruction starts (`L1`...), names the hook and `return`, writes
+  `near` on rel32 branches and `[dword reg+d]` when a 1-byte-sized displacement was
+  encoded long (so NASM keeps the guided encoder's form), then checks line by line with
+  marker labels: a line whose bytes differ becomes `db ... ; <text>`. Lines before the
+  first length change that refer to labels are only judged once the addresses settle.
+  On the 119 guided cave variants tested (sampler, player only, capture x filter x keep,
+  effect x type x filter x counter x flags_fix) everything round-trips; the only `db`
+  lines left are register-to-register moves in the other encoding direction
+  (`mov rax, r12` as 49 8B C4). `adopt(cheat, id, assembler)` pairs a `jmp rel32`+NOPs
+  line with the line it jumps to as one cave entry (the cave's off-bytes are not kept;
+  compile decides them), other lines become Bytes/NOP entries; PC-only cheats and
+  lines outside `eboot.bin` section 0 are refused. The guided `value_at` (editable
+  value) is not carried into the Pro cheat (it is an immediate in the code, not a
+  variable); follow-up for step 12.
+- **Step 8 (compile, on/off).** `core/pro/compile.py` + `core/pro/sites.py`.
+  `compile_cheat` emits per entry a cave line then its jump line (Bytes/NOP entries as
+  one line each). Local choice: the cave line is the same on and off, like the guided
+  builder's routines, so a cheat file turned off never zeroes code a game thread may be
+  inside; the Pro window's own `disable` still zeroes caves after 0.5 s (AC-8.5), and
+  `enable` accepts a cave site holding either zeros or exactly that cave (left by a
+  file). Variables end the first cave entry (`variable_offsets` is deterministic, so
+  no map is needed to compile); other caves get them as `equ` symbols. The editable
+  variable becomes `value_type`/`value_at`, and `take_value` copies a value changed
+  in My cheats back into the source. New caves ask `find_cave` for `CAVE_ROOM` (256)
+  when it is there so later edits can grow in place; `room_at` limits growth to the
+  free zeros after the cave (16-byte spacer), `free_room` is the editor's budget; both
+  refuse with "The cave needs N bytes, M free." (AC-8.2). `enable`: overlap with any
+  enabled cheat refused by name (AC-8.8), every site read first (`SiteChanged` lists
+  address/expected/found, nothing written), then caves, jumps, other entries, each read
+  back (AC-8.4). `disable`: jumps and entries back, wait, caves zeroed, read back.
+  `ProWriter` logs `action=pro_write` and warns once per writer about a write that
+  continues past an address ending in 0xFF (`action=pro_write_ff`, AC-8.6).
+  `set_variable` returns saved / written (only the variable's bytes differ: written
+  live and read back) / restart (AC-8.7). Persistence: `find_again.save` stores
+  every `Cheat.pro` into `project.pro_cheats` (creating the `.cmproj` if needed; a Pro
+  cheat leaves the project only through `compile.forget`), `on_game` compiles them back
+  into My cheats, and `keep_rooms` reserves Pro caves from guided caves. The UI that
+  calls `build`/`enable`/`set_variable` is step 12.
+- **Step 9 (reference points).** `core/pro/refpoints.py`. AOBs use the updater's rules
+  unchanged (`updater.learn_at` / `make_signature`, 16-96 bytes, rel32/disp32 as `??`,
+  must match exactly once at the entry's site), learned from the code with every Pro
+  entry's off-bytes laid back (zeros over caves), so cheats may be on. An AOB that still
+  matches once is kept (the player may have edited it); otherwise it is replaced, or
+  cleared with status "not unique" (AC-9.1). `bring_over` moves each Pro cheat whole:
+  every entry re-found by its AOB (or by its off-bytes alone, >= 6 bytes, reported as
+  "found from original bytes only"), caves placed again with `CodeImage.zero_run`
+  (asking for 256 bytes when there) and their sources **re-assembled** at the new place
+  with the new hook and covered bytes; Bytes entries re-aimed with `updater.reaim`
+  (made public). A re-assembled cave whose jumps or RIP-relative operands point outside
+  the cheat (other than what the covered instructions themselves use) fails its cheat,
+  as the updater does; so do a missing assembler and an assemble error (AC-9.2). Wired
+  into Bring them over: `carry.prepare` (reads the code when there are Pro cheats,
+  new `assembler` argument, default: the app's NASM), `carry.assemble` (moved Pro
+  cheats go into the new notes and are listed "check"), `for_merge` (Pro cheats with a
+  new name, fresh ids), `learn_note_signatures` (AOBs learned with the other
+  fingerprints), `ui/carry.apply_signatures` and `find_again.adopt_carried`.
+- **Step 10 (import).** `core/pro/importer.py`. `import_cheats(cf, existing)` /
+  `import_path(path)` (format sniffed by `formats.load_path`, so json, shn and mc4)
+  give one Pro cheat per file cheat (origin "import", ids after `existing`), one Bytes
+  entry per line, bytes exactly as in the file. A cheat with any line in section != 0,
+  another module or not a code patch is refused with a message naming the section.
+  `is_cave` uses `updater.is_cave`; `disassembly` shows a cave as NASM lines (unchecked,
+  `db` for bytes that don't decode). `convert` ("Convert to assembly") pairs each cave
+  with its jump line through `asm_text.cave_entries` and replaces both with one Cave
+  entry whose source re-assembles to the same bytes; bytes that don't decode refuse
+  the whole conversion naming their offset and leave the cheat unchanged (AC-14.1);
+  a cave no jump reaches stays Bytes. Note: after conversion the compiled cave line is
+  the same on and off (step 8 rule) where the imported file had zeros as off-bytes.
+  The import dialog itself is step 12.
+- **Review round, steps 6-10 (2026-11-22).**
+  - B1: a jump line pairs with its target as a Cave entry only when the target is a
+    real cave (off-bytes all zero, `updater.is_cave`) or a routine left in place
+    (on == off); a jump into patched game code stays two Bytes entries (adopt and
+    Convert to assembly).
+  - M1 (architect): bare numbers in cave source are module offsets. `CaveContext`
+    carries `module_size`; `[N]`, `[rel N]` and jmp/jcc/call/loop number targets
+    outside `[0, module size)` are refused with a line error, segment-prefixed operands
+    (`fs:[0x28]`) are left alone, and NASM runs with `-Werror=number-overflow`.
+    Converting Reaper's absolute addresses (subtract the module base) is left to the UI.
+  - M2: when building the home cave moves the variables, the cheat's other caves are
+    re-assembled; one that fails or no longer fits is marked `stale` (optional
+    `"stale": true` key in format 5) and `enable` refuses it until it is rebuilt.
+  - M3: deleting or Combining a Pro cheat forgets its source in the `.cmproj`;
+    renaming it in My cheats renames the source.
+  - M4: `take_value` compares encoded bytes, so a float 2.1 isn't rewritten as
+    2.0999999.
+  - Minors: a failed read-back during `enable` puts back every write already made, last
+    first; `restore` skips (and logs) a damaged Pro cheat; a compiled cave entry must
+    have its jump; `build` keeps out of the code lines of cheats in My cheats
+    (`sites.open_rooms`, as `build_dialog._open_rooms`). **Imported caves not converted
+    to assembly are refused by Bring them over** ("isn't converted to assembly"): convert
+    them first, then their source is re-assembled like any Pro cave.
+- **QA round, steps 6-10 (2026-11-22, BUG-01..09).**
+  - BUG-01 (architect's call): besides the `[N]` -> `[rel N]` shim, NASM runs with
+    `-Werror=ea-absolute` and writes a listing. After a successful assemble, every
+    instruction row of the user's code (data rows such as `db`/`times` skipped) is
+    decoded with iced. A memory operand with no base register, no RIP base and a
+    non-zero displacement is refused, unless the row says `abs` or uses fs/gs. The
+    error is on the listing's user line, or, for a macro expansion, on the first source
+    line with a bracket. `insn_text` writes every base-less operand as `[abs ...]`, so
+    converted caves keep round-tripping.
+  - BUG-02: the shim works on code pieces only (strings and comments are left alone),
+    and a segment prefix may have spaces (`fs: [0x28]`).
+  - BUG-03: `incbin`, `%include`, `%pathsearch`, `%depend`, `%use`, `%!`, and the
+    word-building `%deftok` / `%+` are refused as line errors in both assemblers.
+  - BUG-04: NASM output is decoded as UTF-8 with `errors="replace"`.
+  - BUG-05: a Pro cheat with a stale cave compiles to no lines (hint "A cave needs
+    assembling again..."), so it can't be turned on or exported.
+  - BUG-06: `set_variable` patches the variable's bytes in the built cave instead of
+    re-assembling. Variables sit at fixed offsets at its end, so the size never
+    changes and an unbuilt source is never used. The assembler argument is ignored,
+    and the "restart" result is gone.
+  - BUG-07: `adopt_carried` drops the old version's My cheats rows of the
+    brought-over Pro cheats (same id) before restoring the moved ones.
+  - BUG-08: `update_file` moves a cave-less Pro source with its lines, clearing its
+    AOBs so they are learned again. A Pro cheat with a cave fails there with "a Pro
+    cheat with a cave: use Bring them over".
+  - BUG-09: `refpoints._place` clears `stale`.
+- **QA re-test, BUG-10..12 (2026-11-22).**
+  - BUG-10: the `abs` exemption looks only at code (comments and strings are
+    stripped). `times` rows are decoded unless they repeat data. `%line` in user
+    source is refused.
+  - BUG-11 (architect's call): the wrapped source is first run through `nasm -E`. A
+    `%line` naming any other file (an include) or an `incbin` / `%include` /
+    `%pathsearch` / `%depend` / `%use` token in the code of the output is refused. The
+    text deny-list stays, plus `%[`.
+  - BUG-12: the home cave records the variables as built in `ProEntry.layout`, as
+    (name, type, offset), saved as an optional `"layout"` key in format 5. `compile`
+    (the editable value), `take_value`, `set_variable` and `variable_addresses` use
+    only that. `set_variable` refuses with "build the cave first" when the variable
+    list differs from it.

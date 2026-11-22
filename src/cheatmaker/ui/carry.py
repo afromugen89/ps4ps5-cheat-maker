@@ -29,6 +29,7 @@ from cheatmaker.core import project as pj
 from cheatmaker.core import refind as rf
 from cheatmaker.core import updater as up
 from cheatmaker.core.cheats import LocationKind, versions_differ
+from cheatmaker.core.pro import refpoints
 from cheatmaker.core.session import GameInfo
 from cheatmaker.errors import CheatMakerError, ConnectionLost, ScanCancelled
 from cheatmaker.ui import hints
@@ -55,7 +56,7 @@ def apply_signatures(into: pj.Project, learned: pj.Project) -> int:
     """Copy the hooks' fingerprints learned on a copy of ``into`` back (by object and
     hook place). Returns how many changed."""
     by_place = {(o.id, a.hook): a for o in learned.objects for a in o.anchors_of(pj.HookAnchor)}
-    n = 0
+    n = refpoints.copy_aobs(into.pro_cheats, learned.pro_cheats)
     for o in into.objects:
         for a in o.anchors_of(pj.HookAnchor):
             got = by_place.get((o.id, a.hook))
@@ -92,7 +93,7 @@ class NoteFingerprints(QObject):
     def _needs_learning(self, p: pj.Project) -> bool:
         """Decided without reading the game: an unchecked hook fingerprint, or a fixed
         code part missing from the signatures file."""
-        if cr.hooks_to_learn(p):
+        if cr.hooks_to_learn(p) or refpoints.needs_learning(p.pro_cheats):
             return True
         try:
             have = up.load_signatures(up.signatures_path(p.title_id, p.version))
@@ -221,6 +222,7 @@ class _Run:
     done: int = 0
     reading: bool = False  # holds the one code read (ctl.code_reading) for prepare
     left_out: dict[str, str] = field(default_factory=dict)  # merge: cheat -> why not
+    pro_ids: dict[str, str] = field(default_factory=dict)  # Pro cheats: old id -> new id
 
 
 def decline_key(title_id: str, old: str, new: str) -> str:
@@ -381,18 +383,23 @@ class CarryOver(QObject):
             self.ctl.message.emit(hints.CARRY_NEEDS_GAME)
             return
         p = self.ctl.project
-        if p is not None and (p.objects or p.cheats):
+        if p is not None and (p.objects or p.cheats or p.pro_cheats):
             merge = True  # notes that hold values are never overwritten (AC-U7)
         into = p if merge else None
         # object ids the notes or a hook still in the game use stay theirs
         empty = pj.Project(source.title_id, source.version, source.process)
         left_out: dict[str, str] = {}
+        pro_ids: dict[str, str] = {}
         project = cr.for_merge(
-            source, into or empty, avoid=self.finder.installed_ids(), left_out=left_out
+            source,
+            into or empty,
+            avoid=self.finder.installed_ids(),
+            left_out=left_out,
+            pro_ids=pro_ids,
         )
-        run = self.run = _Run(source, project, into, game.pid, left_out=left_out)
+        run = self.run = _Run(source, project, into, game.pid, left_out=left_out, pro_ids=pro_ids)
         hooked = sum(1 for o in project.objects if o.hook is not None)
-        parts = cr.has_code_parts(project)
+        parts = cr.has_code_parts(project) or bool(project.pro_cheats)
         run.total = (
             (W_READ if hooked or parts else 0)
             + hooked * (W_COLLECT + W_PROVE + W_LOCATE)
@@ -677,7 +684,9 @@ class CarryOver(QObject):
         took = learning and not self.ctl.code_reading
         if took:
             self.ctl.code_reading = True
-        self.finder.adopt_carried(new, run.found, merge_into=run.merge_into)
+        self.finder.adopt_carried(
+            new, run.found, merge_into=run.merge_into, old_pro_ids=run.pro_ids
+        )
         version = new.version
         for name in report.carried:
             log.info("action=carry_cheat name=%s result=carried", name)

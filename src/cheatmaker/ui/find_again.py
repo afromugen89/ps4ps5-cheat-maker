@@ -11,7 +11,7 @@ import contextlib
 import logging
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -33,6 +33,8 @@ from cheatmaker.core import carry as cr
 from cheatmaker.core import project as pj
 from cheatmaker.core import refind as rf
 from cheatmaker.core.cheats import Cheat, Location, LocationKind
+from cheatmaker.core.pro import compile as pro_compile
+from cheatmaker.core.pro import sites as pro_sites
 from cheatmaker.core.session import GameInfo
 from cheatmaker.core.values import ValueType
 from cheatmaker.errors import (
@@ -230,18 +232,21 @@ class FindAgain(QObject):
         """New caves and slots never go where the notes' hooks live (even unused), nor
         where a hook of ours still is that the notes don't hold (one that couldn't be
         taken out after a failed Find it next time), nor where the notes' combined
-        cheats keep new code over spare zeros."""
+        cheats keep new code over spare zeros, nor where Pro cheats keep their caves."""
         p = self.ctl.project
         objects = list(p.objects) if p else []
         in_notes = {o.id for o in objects}
         with self._lock:
             objects += [o for i, o in self.installed.items() if i not in in_notes]
-        parts = cr.part_rooms(p) if p else []
+        parts = cr.part_rooms(p) + pro_sites.cave_rooms(p.pro_cheats) if p else []
         self.ctl.session.reserved_rooms = ah.reserved_rooms(objects) + parts
 
     def save(self) -> None:
-        self.keep_rooms()
+        cf = self.ctl.cheat_file
+        if cf is not None and any(c.pro is not None for c in cf.cheats):
+            pro_compile.store(self.ensure_project(), cf.cheats)  # Cheat.pro -> format 5
         p = self.ctl.project
+        self.keep_rooms()
         if p is None:
             return
         path = pj.project_path(p.title_id, p.version)
@@ -283,6 +288,9 @@ class FindAgain(QObject):
             return
         finally:
             self.keep_rooms()
+        p = self.ctl.project
+        if p is not None and p.pro_cheats and pro_compile.restore(p, self.ctl.ensure_file().cheats):
+            self.ctl.cheats_changed.emit()
         if self.ctl.project is not None and self.ctl.project.objects:
             self.ensure_cheats()
             self.ctl.cheats_changed.emit()
@@ -558,22 +566,37 @@ class FindAgain(QObject):
         project: pj.Project,
         found: dict[str, int | None],
         merge_into: pj.Project | None = None,
+        old_pro_ids: Iterable[str] = (),
     ) -> None:
         """Notes brought over from another version become this version's notes (or,
         with ``merge_into``, are added to them): their cheats come back in My cheats
         (unticked, "check it"), found objects are followed unconfirmed, and the notes
-        are saved. Hooks put in during the bring-over were recorded with note_install."""
+        are saved. Hooks put in during the bring-over were recorded with note_install.
+        ``old_pro_ids``: the brought-over Pro cheats' ids in the old notes (a merge may
+        have given them new ids; see ``carry.for_merge``)."""
+        # the notes' own Pro cheats (kept as they are) before the brought-over ones join
+        kept = [pc.to_json() for pc in merge_into.pro_cheats] if merge_into is not None else []
         if merge_into is not None:  # an object with the same id replaces its lost copy
             new = {o.id: o for o in project.objects}
             merge_into.objects = [new.pop(o.id, o) for o in merge_into.objects]
             merge_into.objects += new.values()
             merge_into.cheats += project.cheats
+            merge_into.pro_cheats += project.pro_cheats
             if merge_into.carried_from is None:
                 merge_into.carried_from = project.carried_from
             self.ctl.project = merge_into
         else:
             self.ctl.project = project
         self.ensure_cheats()
+        cheats = self.ctl.ensure_file().cheats
+        gone = {pc.id for pc in project.pro_cheats} | set(old_pro_ids)
+        # the old version's rows of the brought-over Pro cheats go (by their new or old
+        # id; a row of these notes' own Pro cheat stays): the next save would otherwise
+        # put their old offsets back into these notes (QA BUG-07)
+        cheats[:] = [
+            c for c in cheats if c.pro is None or c.pro.id not in gone or c.pro.to_json() in kept
+        ]
+        pro_compile.restore(self.ctl.project, cheats)
         for obj in project.objects:
             addr = found.get(obj.id)
             if not addr:
@@ -987,7 +1010,9 @@ class FindAgain(QObject):
         p = self.ctl.project
         if p is None:
             return
-        if cheat.learned_parts:
+        if cheat.pro is not None:  # its Pro source goes too (delete, Combine)
+            pro_compile.forget(p, cheat.pro.id)
+        elif cheat.learned_parts:
             self._drop_entry(p, cheat.name, self._anchors(cheat))
         elif cheat.anchor is not None:
             p.cheats = [c for c in p.cheats if c.parts or (c.object, c.field) != cheat.anchor]
@@ -997,8 +1022,13 @@ class FindAgain(QObject):
             self.save()
 
     def renamed(self, cheat: Cheat, old: str) -> None:
-        """A combined cheat's new name is kept in its notes entry (its key)."""
+        """A combined cheat's new name is kept in its notes entry (its key); a Pro
+        cheat's in its source."""
         p = self.ctl.project
+        if cheat.pro is not None:
+            cheat.pro.name = cheat.name
+            self.save()
+            return
         if p is None or not cheat.learned_parts:
             return
         key = self._key(old, self._anchors(cheat))
