@@ -104,3 +104,42 @@ def test_renaming_a_pro_cheat_renames_its_source(win):
     assert cheat.pro is not None and cheat.pro.name == "Never hurt"
     p = win.ctl.project
     assert pj.load(pj.project_path(p.title_id, p.version)).pro_cheats[0].name == "Never hurt"
+
+
+def test_merged_bring_over_drops_the_old_rows_and_saves_only_moved_offsets(win):
+    """QA BUG-07, merge case: the notes already hold a Pro cheat with the same id, so
+    the brought-over one is re-id'd; the old version's row must still go."""
+    from cheatmaker.core import carry as cr
+    from cheatmaker.core.pro import refpoints as rp
+    from cheatmaker.core.pro.asm import FakeAssembler
+    from tests.unit.test_pro_refpoints import SHIFT, _image
+    from tests.unit.test_pro_refpoints import _cheat as carry_cheat
+
+    finder, cf = win.cheats.finder, win.ctl.ensure_file()
+    own = ProCheat("p1", "Ammo", [ProEntry("bytes", 0x500, b"\x01", b"\x90")])
+    cf.cheats.append(pro_compile.compile_cheat(own))
+    finder.save()  # these notes: the new version's, holding their own p1
+    into = win.ctl.project
+
+    old_pc = carry_cheat()  # the old version's p1 "Health", still listed
+    rp.learn([old_pc], _image())
+    cf.cheats.append(pro_compile.compile_cheat(old_pc))
+    source = pj.Project(into.title_id, "00.900", "eboot.bin", pro_cheats=[old_pc])
+
+    ids: dict[str, str] = {}
+    merged = cr.for_merge(source, into, pro_ids=ids)
+    assert ids == {"p1": "p2"}
+    (moved,), _report = rp.bring_over(merged.pro_cheats, _image(SHIFT), FakeAssembler())
+    carried = pj.Project(into.title_id, into.version, "eboot.bin", pro_cheats=[moved])
+    finder.adopt_carried(carried, {}, merge_into=into, old_pro_ids=ids)
+
+    saved = {pc.id: pc for pc in _load(win).pro_cheats}
+    assert sorted(saved) == ["p1", "p2"] and saved["p1"].name == "Ammo"
+    assert [e.offset for e in saved["p2"].entries] == [e.offset for e in moved.entries]
+    rows = [(c.pro.id, c.name) for c in cf.cheats if c.pro is not None]
+    assert sorted(rows) == [("p1", "Ammo"), ("p2", "Health")]
+
+
+def _load(win) -> pj.Project:
+    p = win.ctl.project
+    return pj.load(pj.project_path(p.title_id, p.version))

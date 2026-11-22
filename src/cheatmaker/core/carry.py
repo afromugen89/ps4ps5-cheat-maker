@@ -493,6 +493,7 @@ def for_merge(
     into: Project,
     avoid: Iterable[str] = (),
     left_out: dict[str, str] | None = None,
+    pro_ids: dict[str, str] | None = None,
 ) -> Project:
     """``source`` with only what ``into`` doesn't have yet (Advanced, AC-U7): objects
     whose label is new, and cheats whose name is new. A cheat on a value ``into``
@@ -558,13 +559,13 @@ def for_merge(
         cheats,
         history=[],
         carried_from=source.carried_from,
-        pro_cheats=_merge_pro(source, into),
+        pro_cheats=_merge_pro(source, into, pro_ids),
     )
 
 
-def _merge_pro(source: Project, into: Project) -> list[ProCheat]:
+def _merge_pro(source: Project, into: Project, ids: dict[str, str] | None = None) -> list[ProCheat]:
     """``source``'s Pro cheats whose name ``into`` doesn't have, with ids that don't
-    clash with ``into``'s."""
+    clash with ``into``'s. ``ids`` gets old id -> new id for each one taken."""
     names = {c.name for c in [*into.cheats, *into.pro_cheats]}
     taken = list(into.pro_cheats)
     out = []
@@ -576,6 +577,8 @@ def _merge_pro(source: Project, into: Project) -> list[ProCheat]:
             copy.id = new_cheat_id(taken)
         taken.append(copy)
         out.append(copy)
+        if ids is not None:
+            ids[pc.id] = copy.id
     return out
 
 

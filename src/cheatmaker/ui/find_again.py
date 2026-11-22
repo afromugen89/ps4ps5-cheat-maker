@@ -11,7 +11,7 @@ import contextlib
 import logging
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -566,11 +566,16 @@ class FindAgain(QObject):
         project: pj.Project,
         found: dict[str, int | None],
         merge_into: pj.Project | None = None,
+        old_pro_ids: Iterable[str] = (),
     ) -> None:
         """Notes brought over from another version become this version's notes (or,
         with ``merge_into``, are added to them): their cheats come back in My cheats
         (unticked, "check it"), found objects are followed unconfirmed, and the notes
-        are saved. Hooks put in during the bring-over were recorded with note_install."""
+        are saved. Hooks put in during the bring-over were recorded with note_install.
+        ``old_pro_ids``: the brought-over Pro cheats' ids in the old notes (a merge may
+        have given them new ids; see ``carry.for_merge``)."""
+        # the notes' own Pro cheats (kept as they are) before the brought-over ones join
+        kept = [pc.to_json() for pc in merge_into.pro_cheats] if merge_into is not None else []
         if merge_into is not None:  # an object with the same id replaces its lost copy
             new = {o.id: o for o in project.objects}
             merge_into.objects = [new.pop(o.id, o) for o in merge_into.objects]
@@ -584,10 +589,13 @@ class FindAgain(QObject):
             self.ctl.project = project
         self.ensure_cheats()
         cheats = self.ctl.ensure_file().cheats
-        moved = {pc.id for pc in project.pro_cheats}
-        # the old version's rows of the brought-over Pro cheats go: the next save would
-        # otherwise put their old offsets back into these notes (QA BUG-07)
-        cheats[:] = [c for c in cheats if c.pro is None or c.pro.id not in moved]
+        gone = {pc.id for pc in project.pro_cheats} | set(old_pro_ids)
+        # the old version's rows of the brought-over Pro cheats go (by their new or old
+        # id; a row of these notes' own Pro cheat stays): the next save would otherwise
+        # put their old offsets back into these notes (QA BUG-07)
+        cheats[:] = [
+            c for c in cheats if c.pro is None or c.pro.id not in gone or c.pro.to_json() in kept
+        ]
         pro_compile.restore(self.ctl.project, cheats)
         for obj in project.objects:
             addr = found.get(obj.id)
