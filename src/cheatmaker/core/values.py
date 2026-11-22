@@ -17,6 +17,11 @@ class ValueType(Enum):
     INT64 = ("Whole number (8 bytes)", "q", 8, False)
     FLOAT = ("Decimal (4 bytes)", "f", 4, True)
     DOUBLE = ("Decimal (8 bytes)", "d", 8, True)
+    # Pro scanner only (GUIDED_TYPES leaves them out of the guided screens).
+    UINT8 = ("Unsigned whole number (1 byte)", "B", 1, False)
+    UINT16 = ("Unsigned whole number (2 bytes)", "H", 2, False)
+    UINT32 = ("Unsigned whole number (4 bytes)", "I", 4, False)
+    UINT64 = ("Unsigned whole number (8 bytes)", "Q", 8, False)
 
     def __init__(self, label: str, code: str, size: int, is_float: bool) -> None:
         self.label = label
@@ -53,8 +58,15 @@ class ValueType(Enum):
                 return t
         return repr(float(value))
 
+    @property
+    def signed(self) -> bool:
+        """Whole numbers that can be negative (struct codes are lower case for those)."""
+        return not self.is_float and self.code.islower()
+
     def int_range(self) -> tuple[int, int]:
         bits = self.size * 8
+        if not self.is_float and not self.signed:
+            return 0, (1 << bits) - 1
         return -(1 << (bits - 1)), (1 << (bits - 1)) - 1
 
     def clamp(self, value: float | int) -> float | int:
@@ -62,6 +74,17 @@ class ValueType(Enum):
             return float(value)
         lo, hi = self.int_range()
         return max(lo, min(hi, int(value)))
+
+
+GUIDED_TYPES = (
+    ValueType.INT8,
+    ValueType.INT16,
+    ValueType.INT32,
+    ValueType.INT64,
+    ValueType.FLOAT,
+    ValueType.DOUBLE,
+)
+"""The number types the guided screens offer, in their order (Pro offers every type)."""
 
 
 class Compare(Enum):
@@ -74,10 +97,19 @@ class Compare(Enum):
     BETWEEN = "between"  # value is (low, high), both included
     INCREASED_BY = "increased by"  # value is (amount, tolerance), AC-H1
     DECREASED_BY = "decreased by"
+    GREATER = "greater than"  # Pro scanner: value now > the typed number
+    LESS = "less than"
 
     @property
     def needs_value(self) -> bool:
-        return self in (Compare.EXACT, Compare.BETWEEN, Compare.INCREASED_BY, Compare.DECREASED_BY)
+        return self in (
+            Compare.EXACT,
+            Compare.BETWEEN,
+            Compare.INCREASED_BY,
+            Compare.DECREASED_BY,
+            Compare.GREATER,
+            Compare.LESS,
+        )
 
     @property
     def needs_previous(self) -> bool:
@@ -123,6 +155,10 @@ def matches(
     if cmp is Compare.BETWEEN:
         lo, hi = target  # type: ignore[misc]
         return lo <= cur <= hi
+    if cmp in (Compare.GREATER, Compare.LESS):
+        if target is None:
+            raise ValueError(f"{cmp.value} needs a number")
+        return cur > target if cmp is Compare.GREATER else cur < target
     if previous is None:
         raise ValueError(f"{cmp.value} needs a previous scan")
     prev = vtype.decode(previous)
@@ -168,7 +204,27 @@ def value_for(vtype: ValueType, cmp: Compare, value):
         if not float(amount).is_integer() or not 0 < int(amount) <= hi_t:
             return None
         return (int(amount), tol)
+    if cmp is Compare.GREATER:
+        return None if value >= hi_t else value
+    if cmp is Compare.LESS:
+        return None if value <= lo_t else value
     return value
+
+
+def as_between(vtype: ValueType, cmp: Compare, value: float | int) -> tuple[float, float]:
+    """A GREATER / LESS search as the inclusive (low, high) range that keeps the same
+    values, so the console can run it as a proven ValueBetween scan. Whole numbers get
+    whole bounds inside the type; decimals open-ended bounds up to infinity."""
+    if cmp not in (Compare.GREATER, Compare.LESS):
+        raise ValueError(f"{cmp.value} isn't greater/less than")
+    if vtype.is_float:
+        if cmp is Compare.GREATER:
+            return (math.nextafter(float(value), math.inf), math.inf)
+        return (-math.inf, math.nextafter(float(value), -math.inf))
+    lo_t, hi_t = vtype.int_range()
+    if cmp is Compare.GREATER:
+        return (max(lo_t, math.floor(value) + 1), hi_t)
+    return (lo_t, min(hi_t, math.ceil(value) - 1))
 
 
 def parse_number(text: str) -> float | int:

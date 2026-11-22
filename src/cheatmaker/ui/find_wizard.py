@@ -59,6 +59,7 @@ from cheatmaker.core.templates import TEMPLATES, make_cheat
 from cheatmaker.core.trace_way import Way
 from cheatmaker.core.tracer import TraceResult
 from cheatmaker.core.values import (
+    GUIDED_TYPES,
     OF_FULL,
     SHOWN,
     Compare,
@@ -234,7 +235,7 @@ class FindWizard(QWidget):
         self.advanced.setChecked(False)
         self.vtype = QComboBox()
         self.vtype.addItem("Pick for me", None)
-        for vt in ValueType:
+        for vt in GUIDED_TYPES:
             self.vtype.addItem(vt.label, vt)
         adv_box = QVBoxLayout(self.advanced)
         adv = QHBoxLayout()
@@ -276,9 +277,9 @@ class FindWizard(QWidget):
         self.add_addr = QLineEdit()
         self.add_addr.setPlaceholderText("Address, e.g. 0x12e0ea60ac")
         self.add_type = QComboBox()
-        for vt in ValueType:
+        for vt in GUIDED_TYPES:
             self.add_type.addItem(vt.label, vt)
-        self.add_type.setCurrentIndex(list(ValueType).index(ValueType.FLOAT))
+        self.add_type.setCurrentIndex(GUIDED_TYPES.index(ValueType.FLOAT))
         self.add_btn = QPushButton("Add address")
         self.remove_btn = QPushButton("Remove")
         self.pointer_btn = QPushButton("Pointer scan")

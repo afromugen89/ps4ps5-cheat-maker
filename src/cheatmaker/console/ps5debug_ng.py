@@ -40,6 +40,7 @@ from cheatmaker.console.local_scan import (
     check_ways,
     drop_empty,
     merge_results,
+    moved_on,
     one_way_each,
     restrict,
     way_parts,
@@ -49,6 +50,7 @@ from cheatmaker.core.values import (
     Compare,
     Scale,
     ValueType,
+    as_between,
     matches,
     part_value,
     value_for,
@@ -171,11 +173,16 @@ class Cmd(IntEnum):
     CONSOLE_FOREGROUND_APP = 0xBDDD0006
 
 
-# Server value-type ids (scan_compare.c) for our signed types.
+# Server value-type ids (scan_compare.c, ps4debug order). The unsigned ids are
+# UNVERIFIED on the console until test C-P2; the guided screens never send them.
 _NG_VTYPE = {
+    ValueType.UINT8: 0,
     ValueType.INT8: 1,
+    ValueType.UINT16: 2,
     ValueType.INT16: 3,
+    ValueType.UINT32: 4,
     ValueType.INT32: 5,
+    ValueType.UINT64: 6,
     ValueType.INT64: 7,
     ValueType.FLOAT: 8,
     ValueType.DOUBLE: 9,
@@ -191,6 +198,10 @@ _NG_COMPARE = {
     Compare.BETWEEN: 4,  # server keeps low <= value <= high (both included)
     Compare.INCREASED_BY: 6,  # IncreasedBy / DecreasedBy: UNVERIFIED on console (C11a)
     Compare.DECREASED_BY: 8,
+    # BiggerThan / SmallerThan (ps4debug order): UNVERIFIED on console (C-P2). Only a
+    # narrow-down of a console snapshot sends them; a first scan sends ValueBetween.
+    Compare.GREATER: 2,
+    Compare.LESS: 3,
 }
 _NG_FUZZY = 1
 """FuzzyValue: |typed - memory| < 1.0, float/double only. Legacy ExactValue on floats
@@ -950,7 +961,7 @@ class Ps5DebugNgClient:
                 block = self._w.recv(block_len)
                 usable = len(block) - len(block) % rec.size
                 hits.extend(
-                    ScanHit(start + rel, raw)
+                    ScanHit(start + rel, raw, first=raw)
                     for rel, raw in rec.iter_unpack(memoryview(block)[:usable])
                 )
             self._w.ok("scan end", ReadFailed)
@@ -1200,8 +1211,8 @@ class Ps5DebugNgClient:
     ) -> int:
         return self._run_search(lambda c: c._rebase(progress, cancel))
 
-    def scan_results(self, limit: int) -> list[ScanHit]:
-        return self._run_search(lambda c: c._results(limit))
+    def scan_results(self, limit: int, offset: int = 0) -> list[ScanHit]:
+        return self._run_search(lambda c: c._results(limit, offset))
 
     def scan_restrict(self, hits: list[ScanHit]) -> int:
         return self._run_search(lambda c: c._restrict(hits))
@@ -1271,6 +1282,9 @@ class Ps5DebugNgClient:
             if len(vtype) > 1:
                 return self._multi_start(pid, ranges, vtype, progress, cancel)
             vtype = vtype[0]
+        if cmp in (Compare.GREATER, Compare.LESS) and value is not None:
+            # A proven ValueBetween scan instead of the unverified BiggerThan/SmallerThan.
+            cmp, value = Compare.BETWEEN, as_between(vtype, cmp, value)
         if cmp not in (Compare.EXACT, Compare.BETWEEN) or value is None:
             return self._snapshot_start(pid, ranges, vtype, progress, cancel)
         hits = self._scan_ranges(pid, ranges, vtype, value, progress, cancel)
@@ -1455,19 +1469,28 @@ class Ps5DebugNgClient:
             self.fast_scan and not self._flags_refused and bool(self._engines & TSE_RESCAN_ALIASING)
         )
 
-    def _resident_results(self, limit: int) -> list[ScanHit]:
+    def _resident_results(self, limit: int, offset: int = 0) -> list[ScanHit]:
+        """Rows of the console snapshot: address, then the value at the last scan, the
+        one before, and (when the header's top bit is set) the first. The row order
+        after the value and the request's ``offset`` field are UNVERIFIED (C-P2)."""
         assert self._resident is not None
         _pid, vtype, _ = self._resident
         n = vtype.size
         with self._locked():
-            self._w.request(Cmd.TURBOSCAN_GET, struct.pack("<III", 0, limit, 0))
+            self._w.request(Cmd.TURBOSCAN_GET, struct.pack("<III", offset, limit, 0))
             self._w.ok("get matches", ReadFailed)
             hdr = self._w.u32()
-            count, stride = hdr & 0x7FFFFFFF, 8 + n * (3 if hdr & 0x80000000 else 2)
+            three = bool(hdr & 0x80000000)
+            count, stride = hdr & 0x7FFFFFFF, 8 + n * (3 if three else 2)
             data = self._w.recv(count * stride) if count else b""
             self._w.ok("get matches end", ReadFailed)
         return [
-            ScanHit(struct.unpack_from("<Q", data, i)[0], data[i + 8 : i + 8 + n])
+            ScanHit(
+                struct.unpack_from("<Q", data, i)[0],
+                data[i + 8 : i + 8 + n],
+                previous=data[i + 8 + n : i + 8 + 2 * n],
+                first=data[i + 8 + 2 * n : i + 8 + 3 * n] if three else None,
+            )
             for i in range(0, len(data), stride)
         ]
 
@@ -1749,7 +1772,8 @@ class Ps5DebugNgClient:
 
     def _check_narrow(self, scan: LocalScanSession, cmp: Compare, value) -> None:
         """Raise before anything changes when ``scan`` can't be narrowed this way."""
-        if self._rescans(scan) and (cmp not in (Compare.EXACT, Compare.BETWEEN) or value is None):
+        ranged = (Compare.EXACT, Compare.BETWEEN, Compare.GREATER, Compare.LESS)
+        if self._rescans(scan) and (cmp not in ranged or value is None):
             raise ValueError(
                 f"{len(scan.hits):,} matches is too many to compare. Type the number you "
                 "see now to narrow it down first."
@@ -1769,20 +1793,27 @@ class Ps5DebugNgClient:
         if not self._rescans(scan):
             return scan.narrowed(cmp, value, progress, cancel)
         self._check_narrow(scan, cmp, value)
-        addrs = {h.address for h in scan.hits}
-        windows = candidate_windows(self._scan_ranges_list, sorted(addrs), scan.vtype.size)
+        if cmp in (Compare.GREATER, Compare.LESS):
+            value = as_between(scan.vtype, cmp, value)
+        old = {h.address: h for h in scan.hits}
+        windows = candidate_windows(self._scan_ranges_list, sorted(old), scan.vtype.size)
         new = self._scan_ranges(self._scan_pid, windows, scan.vtype, value, progress, cancel)
-        return [ScanHit(h.address, h.value) for h in new if h.address in addrs]
+        return [moved_on(old[h.address], h.value) for h in new if h.address in old]
 
-    def _results(self, limit: int) -> list[ScanHit]:
+    def _results(self, limit: int, offset: int = 0) -> list[ScanHit]:
         if self._multi is not None:
             return merge_results(
-                [(c._resident[1], c._resident_results(limit)) for c in self._multi if c._resident],
+                [
+                    (c._resident[1], c._resident_results(offset + limit))
+                    for c in self._multi
+                    if c._resident
+                ],
                 limit,
+                offset,
             )
         if self._resident is not None:
-            return self._resident_results(limit)
-        return [] if self._scan is None else self._scan.results(limit)
+            return self._resident_results(limit, offset)
+        return [] if self._scan is None else self._scan.results(limit, offset)
 
     def _cancel_here(self) -> None:
         """Forget the search kept on this connection (frees the console's snapshots)."""

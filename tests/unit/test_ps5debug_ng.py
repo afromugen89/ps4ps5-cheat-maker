@@ -77,6 +77,21 @@ def interrupt_packet(regs: dict[str, int]) -> bytes:
     return bytes(pkt)
 
 
+NG_FMT = {
+    0: "<B",
+    1: "<b",
+    2: "<H",
+    3: "<h",
+    4: "<I",
+    5: "<i",
+    6: "<Q",
+    7: "<q",
+    8: "<f",
+    9: "<d",
+}
+"""NG value-type id -> struct format (ps4debug order)."""
+
+
 class FakeNgServer:
     """Minimal PS5Debug-NG over a FakeConsole."""
 
@@ -91,6 +106,8 @@ class FakeNgServer:
     ) -> None:
         self.aliasing = aliasing
         self.snapshot = snapshot
+        self.three_value_rows = False  # TURBOSCAN_GET rows carry the first value too
+        self.get_requests: list[tuple[int, int]] = []  # (offset, count) per TURBOSCAN_GET
         # Per connection, like NG: {conn: {"pid","fmt","size","vals": {addr: bytes}}}
         self.residents: dict[int, dict] = {}
         self.parallel, self.refuse_flags = parallel, refuse_flags
@@ -272,10 +289,19 @@ class FakeNgServer:
             self._resident_count(c, body)
         elif cmd == Cmd.TURBOSCAN_GET:
             start, count, _flags = struct.unpack("<III", body)
+            self.get_requests.append((start, count))
             r = self.residents.get(self._local.conn) or {"vals": {}}
             items = sorted(r["vals"].items())[start : start + count]
-            recs = b"".join(struct.pack("<Q", a) + v + v for a, v in items)
-            c.sendall(OK + struct.pack("<I", len(items)) + recs + OK)
+            prev, first = r.get("prev", {}), r.get("first", {})
+            recs = b"".join(
+                struct.pack("<Q", a)
+                + v
+                + prev.get(a, v)
+                + (first.get(a, v) if self.three_value_rows else b"")
+                for a, v in items
+            )
+            hdr = len(items) | (0x80000000 if self.three_value_rows else 0)
+            c.sendall(OK + struct.pack("<I", hdr) + recs + OK)
         elif cmd == Cmd.TURBOSCAN_END:
             self.residents.pop(self._local.conn, None)
             c.sendall(OK)
@@ -301,7 +327,7 @@ class FakeNgServer:
 
             size = lv // 2 if ct == 4 else lv  # ValueBetween sends low + high
 
-            fmt1 = {1: "<b", 3: "<h", 5: "<i", 7: "<q", 8: "<f", 9: "<d"}.get(vt, "<Q")
+            fmt1 = NG_FMT.get(vt, "<Q")
 
             def hit(chunk: bytes) -> bool:
                 if ct == 4:
@@ -356,7 +382,7 @@ class FakeNgServer:
         (nseg,) = struct.unpack("<I", self._recv(c, 4))
         segs = [struct.unpack("<QI", self._recv(c, 12)) for _ in range(nseg)]
         self.snapshot_gate.wait(20)  # a long snapshot (86-156 s per type on a big game)
-        fmt = {5: "<i", 7: "<q", 8: "<f", 9: "<d"}[vt]
+        fmt = NG_FMT[vt]
         size = struct.calcsize(fmt)
         vals = {}
         for a, n in segs:
@@ -368,7 +394,14 @@ class FakeNgServer:
         total = sum(n for _, n in segs)
         c.sendall(struct.pack("<QQ", total // align, total))
         c.sendall(struct.pack("<Q", total) + struct.pack("<Q", SENTINEL_U64))
-        self.residents[self._local.conn] = {"pid": pid, "fmt": fmt, "size": size, "vals": vals}
+        self.residents[self._local.conn] = {
+            "pid": pid,
+            "fmt": fmt,
+            "size": size,
+            "vals": vals,
+            "first": dict(vals),
+            "prev": {},
+        }
         c.sendall(struct.pack("<IQ", 1, len(vals)) + OK)
 
     def _resident_count(self, c, body):
@@ -381,7 +414,7 @@ class FakeNgServer:
         self.count_gate.wait(20)
         r = self.residents[self._local.conn]
         fmt = r["fmt"]
-        keep = {}
+        keep, prev = {}, {}
         for a, old in r["vals"].items():
             now = self.fake.read(pid, a, r["size"])
             o, v = struct.unpack(fmt, old)[0], struct.unpack(fmt, now)[0]
@@ -398,11 +431,15 @@ class FakeNgServer:
             elif ct in (6, 8):
                 by = struct.unpack(fmt, needle)[0]
                 ok = (v - o if ct == 6 else o - v) == by
+            elif ct in (2, 3):  # BiggerThan / SmallerThan the typed value
+                typed = struct.unpack(fmt, needle)[0]
+                ok = v > typed if ct == 2 else v < typed
             else:
                 ok = {5: v > o, 7: v < o, 9: v != o, 10: v == o}[ct]
             if ok:
                 keep[a] = now  # baseline refreshes: next compare is since this scan
-        r["vals"] = keep
+                prev[a] = old
+        r["vals"], r["prev"] = keep, prev
         c.sendall(struct.pack("<Q", 1) + struct.pack("<Q", SENTINEL_U64))
         c.sendall(struct.pack("<Q", len(keep)) + OK)
 

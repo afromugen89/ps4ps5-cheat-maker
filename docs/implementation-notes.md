@@ -651,3 +651,24 @@ Review round 5:
 - Find it again drops a kept answer once its object's pending place is gone or another,
   shows the busy message once per kept answer, and finishes a Yes whose carry-over save
   (`carried_yes`) was busy on a later tick.
+
+## Cheat Maker Pro, R1 steps 1-5 (2026-11-22)
+
+Built from docs/architecture-pro.md (spec docs/spec-pro.md), implementation steps 1-5.
+
+- **Step 1 (tooling).** `tools/fetch_nasm.py` pins NASM 3.02 win64 by URL and SHA-256.
+  The hash could not be computed in the build container (nasm.us blocked), so
+  `NASM_ZIP_SHA256` is None with a TODO and the script refuses to run; CI runs it with
+  `continue-on-error` until the hash is pinned. `paths.nasm_exe(configured)` takes the
+  `nasm_path` setting as an argument (paths can't import settings). `needs_nasm` tests
+  skip when no assembler is found.
+- **Step 2 (scanner model).** `ValueType.UINT8..UINT64` are appended after the old six so
+  list indices into the guided order still hold; the guided Find combos use
+  `GUIDED_TYPES`. `Compare.GREATER/LESS` compare against the typed number. On the real
+  client a first scan with greater/less runs as ValueBetween (`values.as_between`), the
+  proven code path; only narrowing a console snapshot sends the unverified BiggerThan
+  2 / SmallerThan 3 (C-P2). Window re-scans of many PC-side candidates also use the
+  range. `ScanHit.previous` / `first` (compare=False) are kept by LocalScanSession and
+  filled from NG snapshot rows (2-value: previous; 3-value: previous + first; order
+  unverified). `scan_results(limit, offset=0)` pages; NG sends the offset in the first
+  `TURBOSCAN_GET` field (unverified, C-P2d).

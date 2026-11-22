@@ -158,3 +158,39 @@ def test_watch_execute_serves_exec_hits_for_one_byte(client):
     assert hit not in client.watch(PID, HEALTH_ADDR, 4, "access", 1.0)
     with pytest.raises(ValueError):
         client.watch(PID, load, 4, "execute", 1.0)
+
+
+# -- Pro scanner (spec-pro PR-2) ---------------------------------------------------------
+def test_next_greater_than_keeps_only_values_above(client):
+    """AC-2.2: "greater than 100" as a next scan keeps only results now > 100."""
+    if not hasattr(client, "peek"):
+        pytest.skip("fake only")
+    regions = [m for m in client.maps(PID) if m.writable]
+    assert client.scan_start(PID, regions, ValueType.INT32, Compare.EXACT, 100) == 2
+    client.poke(PID, HEALTH_ADDR, struct.pack("<i", 101))
+    assert client.scan_next(Compare.GREATER, 100) == 1
+    [hit] = client.scan_results(10)
+    assert hit.address == HEALTH_ADDR and struct.unpack("<i", hit.value)[0] > 100
+    assert hit.previous == struct.pack("<i", 100) and hit.first == struct.pack("<i", 100)
+
+
+def test_first_less_than_and_unsigned(client):
+    if not hasattr(client, "peek"):
+        pytest.skip("fake only")
+    regions = [m for m in client.maps(PID) if m.writable]
+    client.poke(PID, GOLD_ADDR, struct.pack("<I", 0xFFFF_FF00))
+    n = client.scan_start(PID, regions, ValueType.UINT32, Compare.GREATER, 0xFFFF_0000)
+    assert n == 1 and client.scan_results(5)[0].address == GOLD_ADDR
+    n = client.scan_start(PID, regions, ValueType.INT32, Compare.LESS, 0)
+    assert GOLD_ADDR in [h.address for h in client.scan_results(n)], "-256 as signed"
+
+
+def test_scan_results_pages(client):
+    if not hasattr(client, "peek"):
+        pytest.skip("fake only")
+    regions = [m for m in client.maps(PID) if m.writable]
+    n = client.scan_start(PID, regions, ValueType.INT32, Compare.UNKNOWN, None)
+    every = client.scan_results(n)
+    assert len(every) == n and n > 10
+    assert client.scan_results(4, 3) == every[3:7]
+    assert client.scan_results(10, n) == []

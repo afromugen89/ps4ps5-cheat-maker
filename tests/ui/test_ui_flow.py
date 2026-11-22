@@ -914,3 +914,14 @@ def test_lock_it_value_dropped_on_new_game_run(win, fake):
     assert c.locked is None and c.value is None and item.text() == ""
     assert not item.flags() & Qt.ItemFlag.ItemIsEditable
     assert item.toolTip() == hints.LOCK_NO_VALUE
+
+
+def test_guided_type_lists_have_no_unsigned_types(win):
+    """Pro step 2: the scanner gained unsigned types; the guided Find screen is unchanged."""
+    from cheatmaker.core.values import GUIDED_TYPES
+
+    vtypes = [win.find.vtype.itemData(i) for i in range(win.find.vtype.count())]
+    assert vtypes == [None, *GUIDED_TYPES]
+    added = [win.find.add_type.itemData(i) for i in range(win.find.add_type.count())]
+    assert added == list(GUIDED_TYPES)
+    assert win.find.add_type.currentData() is ValueType.FLOAT
