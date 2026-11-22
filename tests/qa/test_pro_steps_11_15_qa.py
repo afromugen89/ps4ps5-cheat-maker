@@ -559,3 +559,233 @@ def test_frozen_row_keeps_a_newly_typed_value(win, pro, game):  # TC-26
     lst.table.item(0, 3).setText("777")
     assert row.frozen == 777
     assert struct.unpack("<i", game.fake.peek(fg.PID, HP_ADDR, 4)) == (777,)
+
+
+# == Re-test of c963c4e: break-it pass on the fixes ================================================
+def test_rt_my_cheats_refuses_a_cheat_pro_is_building(win, tab, qtbot, monkeypatch):  # TC-32
+    """pro_busy: the tick is refused with a reason and nothing is written; the busy
+    mark is gone once the build ends."""
+    from cheatmaker.ui import hints as guided_hints
+
+    cheat = new_cheat(tab)
+    _threaded(tab.tasks)
+    gate, entered = _gated_build(monkeypatch)
+    tab.editor.source.setPlainText(SOURCE_A)
+    tab.editor.build_btn.click()
+    assert entered.wait(5)
+    try:
+        assert id(cheat) in win.ctl.pro_busy
+        _tick(win, cheat, True)
+        assert not cheat.enabled
+        assert win.status.text() == guided_hints.PRO_BUSY.format(name=cheat.name)
+    finally:
+        gate.set()
+        qtbot.waitUntil(lambda: not tab.tasks.busy, timeout=5000)
+    assert win.ctl.pro_busy == set()
+    _tick(win, cheat, True)
+    assert cheat.enabled
+
+
+def test_rt_build_result_dropped_when_the_cheat_went_on_another_way(
+    win, tab, game, qtbot, monkeypatch
+):  # TC-33
+    cheat = new_cheat(tab)
+    entry = cheat.pro.entries[0]
+    before = entry.cave_bytes
+    _threaded(tab.tasks)
+    gate, entered = _gated_build(monkeypatch)
+    tab.editor.source.setPlainText(SOURCE_B)
+    tab.editor.build_btn.click()
+    assert entered.wait(5)
+    pc_compile.enable(win.ctl.session, cheat.pro, pc_compile.ProWriter(win.ctl.session))
+    win.ctl.live.mark_on(cheat)  # on by a path that ignores pro_busy
+    gate.set()
+    qtbot.waitUntil(lambda: not tab.tasks.busy, timeout=5000)
+    assert entry.cave_bytes == before and entry.source == pc_compile.DEFAULT_SOURCE
+    assert tab.editor.has_draft(entry), "the dropped build's text stays a draft"
+
+
+def test_rt_build_keeps_a_newer_draft(win, tab):  # TC-34
+    cheat = new_cheat(tab)
+    entry = cheat.pro.entries[0]
+    ed = tab.editor
+    ed.source.setPlainText(SOURCE_B)  # typed after the build was started with A
+    ed.built(entry, SOURCE_A)
+    assert ed.draft_of(entry) == SOURCE_B
+    ed.built(entry, SOURCE_B)
+    assert ed.draft_of(entry) == entry.source
+
+
+def test_rt_already_on_writes_nothing_and_shows_on(win, tab, game):  # TC-35
+    cheat = new_cheat(tab)
+    tab.on_box.click()
+    win.ctl.live.turn_off(cheat, restore=False)  # the app forgot; the game didn't
+    win.ctl.cheats_changed.emit()
+    n = len(game.fake.writes)
+    _tick(win, cheat, True)
+    assert cheat.enabled and len(game.fake.writes) == n
+    assert win.status.text() == f"{cheat.name} was already on in the game."
+
+
+def test_rt_cave_left_from_a_gap_is_re_enabled_normally(win, tab, game):  # TC-36
+    """Jump back, cave still there (the QTimer gap): an ordinary enable, jump written."""
+    cheat = new_cheat(tab)
+    entry = cheat.pro.entries[0]
+    tab.on_box.click()
+    pc_compile.restore_sites(win.ctl.session, cheat.pro, pc_compile.ProWriter(win.ctl.session))
+    win.ctl.live.turn_off(cheat, restore=False)
+    assert not pc_compile.is_on(win.ctl.session, cheat.pro)
+    assert (
+        pc_compile.enable(win.ctl.session, cheat.pro, pc_compile.ProWriter(win.ctl.session))
+        is False
+    )
+    assert game.fake.peek(fg.PID, fg.WRITER, 1) == b"\xe9"
+    assert game.fake.peek(fg.PID, fg.BASE + entry.cave, len(entry.cave_bytes)) == (entry.cave_bytes)
+
+
+def test_rt_jump_on_but_cave_gone_is_refused(win, tab, game):  # TC-37
+    """Partial match the other way round: still SiteChanged, nothing written."""
+    from cheatmaker.core.pro.compile import SiteChanged
+
+    cheat = new_cheat(tab)
+    entry = cheat.pro.entries[0]
+    tab.on_box.click()
+    game.fake.poke(fg.PID, fg.BASE + entry.cave, bytes(len(entry.cave_bytes)))
+    win.ctl.live.turn_off(cheat, restore=False)
+    assert not pc_compile.is_on(win.ctl.session, cheat.pro)
+    n = len(game.fake.writes)
+    with pytest.raises(SiteChanged):
+        pc_compile.enable(win.ctl.session, cheat.pro, pc_compile.ProWriter(win.ctl.session))
+    assert len(game.fake.writes) == n
+
+
+def test_rt_refresh_probe_leaves_a_partly_on_cheat_off(win, tab, game):  # TC-38
+    cheat = new_cheat(tab)
+    entry = cheat.pro.entries[0]
+    tab.on_box.click()
+    game.fake.poke(fg.PID, fg.WRITER, entry.off)  # the jump is gone, the cave stays
+    game.fake.foreground_pid = None
+    win.ctl.session.refresh_game()
+    assert not cheat.enabled
+    tab.select_cheat(cheat)
+    tab.on_box.click()  # an ordinary enable from here
+    assert cheat.enabled and game.fake.peek(fg.PID, fg.WRITER, 1) == b"\xe9"
+
+
+def test_rt_pro_cheat_with_freeze_is_refused_before_any_write(win, tab, game):  # TC-39
+    cheat = new_cheat(tab)
+    cheat.freeze = True  # e.g. an old project
+    n = len(game.fake.writes)
+    _tick(win, cheat, True)
+    assert not cheat.enabled and len(game.fake.writes) == n
+    tab.select_cheat(cheat)
+    tab.set_on(cheat, True)
+    assert not cheat.enabled and len(game.fake.writes) == n
+
+
+def test_rt_adopt_refuses_a_freeze_cheat_and_says_why(win, pro, game):  # TC-40
+    from cheatmaker.core.pro.asm_text import FREEZE_REFUSED
+
+    tab = pro.cheats
+    c, _off = _frozen_static_cheat(win, game)
+    tab.select_cheat(c)
+    assert not tab.adopt_btn.isEnabled()
+    assert tab.editor.error.text() == FREEZE_REFUSED
+
+
+@pytest.mark.xfail(
+    reason="BUG-13: a pending cave clear from an earlier untick zeroes the cave too early "
+    "(untick, tick, untick within 0.5 s)",
+    strict=True,
+)
+def test_bug13_cave_cleared_at_least_the_wait_after_the_last_untick(
+    win, tab, qtbot, monkeypatch
+):  # TC-41
+    cheat = new_cheat(tab)
+    tab.on_box.click()
+    restores: list[float] = []
+    clears: list[float] = []
+    rs, cc = pc_compile.restore_sites, pc_compile.clear_caves
+
+    def restore(*a, **k):
+        restores.append(time.monotonic())
+        return rs(*a, **k)
+
+    def clear(*a, **k):
+        clears.append(time.monotonic())
+        return cc(*a, **k)
+
+    monkeypatch.setattr(pc_compile, "restore_sites", restore)
+    monkeypatch.setattr(pc_compile, "clear_caves", clear)
+    _tick(win, cheat, False)
+    qtbot.wait(150)
+    _tick(win, cheat, True)
+    qtbot.wait(150)
+    _tick(win, cheat, False)
+    qtbot.wait(1200)
+    assert clears
+    assert all(t - restores[-1] >= pc_compile.DISABLE_WAIT - 0.02 for t in clears)
+
+
+@pytest.mark.xfail(
+    reason="BUG-13: a pending cave clear from My cheats zeroes the cave while Pro turns "
+    "the cheat on again",
+    strict=True,
+)
+def test_bug13_pro_on_during_the_cave_clear_gap_keeps_the_cave(
+    win, tab, game, qtbot, monkeypatch
+):  # TC-42 (real threads)
+    cheat = new_cheat(tab)
+    entry = cheat.pro.entries[0]
+    tab.on_box.click()
+    _tick(win, cheat, False)  # jump back now, cave cleared 0.5 s later
+    _threaded(tab.tasks)
+    gate, wrote = threading.Event(), threading.Event()
+    real = pc_compile.enable
+
+    def slow(*a, **k):
+        result = real(*a, **k)  # cave and jump written
+        wrote.set()
+        gate.wait(5)  # the worker hasn't reported back yet
+        return result
+
+    monkeypatch.setattr(pc_compile, "enable", slow)
+    tab.set_on(cheat, True)
+    assert wrote.wait(5)
+    qtbot.wait(700)  # My cheats' timer fires meanwhile
+    gate.set()
+    qtbot.waitUntil(lambda: not tab.tasks.busy, timeout=5000)
+    cave = game.fake.peek(fg.PID, fg.BASE + entry.cave, len(entry.cave_bytes))
+    assert game.fake.peek(fg.PID, fg.WRITER, 1) == b"\xe9" and cheat.enabled
+    assert cave == entry.cave_bytes, "the jump leads into a zeroed cave"
+
+
+@pytest.mark.xfail(
+    reason="BUG-14: the Pro Cheats tab doesn't follow a tick in My cheats (On box, list "
+    "dot, read-only editor)",
+    strict=True,
+)
+def test_bug14_pro_tab_follows_a_my_cheats_tick(win, tab):  # TC-43
+    cheat = new_cheat(tab)
+    _tick(win, cheat, True)
+    assert cheat.enabled
+    assert tab.on_box.isChecked()
+    assert tab.cheat_list.item(0).text().startswith("● ")
+    assert tab.editor.source.isReadOnly() and not tab.editor.build_btn.isEnabled()
+
+
+@pytest.mark.xfail(
+    reason="BUG-15: the cave editor's bytes stay old after a variable value is patched in "
+    "(the same entry is no longer reloaded)",
+    strict=True,
+)
+def test_bug15_bytes_view_shows_a_patched_variable(win, tab):  # TC-44
+    from cheatmaker.ui.pro.cave_editor import hex_lines
+
+    cheat = new_cheat(tab)
+    tab.add_var_btn.click()
+    entry = cheat.pro.entries[0]
+    tab.editor.build_btn.click()  # builds the layout with the new variable
+    tab.vars.item(0, 2).setText("7")
+    assert entry.cave_bytes.endswith(b"\x07\x00\x00\x00")
+    assert tab.editor.bytes_view.toPlainText() == hex_lines(entry.cave_bytes)
