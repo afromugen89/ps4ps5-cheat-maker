@@ -769,3 +769,69 @@ def test_bug15_bytes_view_shows_a_patched_variable(win, tab):  # TC-44
     tab.vars.item(0, 2).setText("7")
     assert entry.cave_bytes.endswith(b"\x07\x00\x00\x00")
     assert tab.editor.bytes_view.toPlainText() == hex_lines(entry.cave_bytes)
+
+
+# == Re-test of ac50954 ===========================================================================
+def test_rt2_clear_caves_keeps_a_cave_a_jump_leads_into(win, tab, game):  # TC-45
+    cheat = new_cheat(tab)
+    entry = cheat.pro.entries[0]
+    tab.on_box.click()
+    writer = pc_compile.ProWriter(win.ctl.session)
+    n = len(game.fake.writes)
+    assert pc_compile.clear_caves(win.ctl.session, cheat.pro, writer) is False
+    assert len(game.fake.writes) == n
+    cave = game.fake.peek(fg.PID, fg.BASE + entry.cave, len(entry.cave_bytes))
+    assert cave == entry.cave_bytes
+
+
+def test_rt2_guided_ticks_do_no_console_work_or_saves_on_the_ui_thread(
+    win, pro, game, qtbot, monkeypatch, tmp_path
+):  # TC-46
+    """A My cheats tick now emits cheats_changed for every cheat. With Pro open (a
+    guided cave cheat previewed, a Code page loaded), guided ticks still only write
+    their own bytes on the UI thread; the Code view re-reads on the worker; nothing
+    is saved."""
+    from cheatmaker import formats
+    from cheatmaker.core import project as pj
+    from cheatmaker.core import updater as up
+
+    tab = pro.cheats
+    new_cheat(tab)
+    off = game.fake.peek(fg.PID, STATIC, 4)
+    nop = Cheat(
+        "NOP sub",
+        [Location(LocationKind.CODE_PATCH, fg.SUB_SITE - fg.BASE, b"\x90" * 6, fg.SUB_W)],
+    )
+    val = Cheat("Static", [Location(LocationKind.MODULE_VALUE, STATIC - fg.BASE, b"\5\0\0\0", off)])
+    cave_cheat = formats.load_path(_cave_file(tmp_path)).cheats[0]
+    win.ctl.ensure_file().cheats.extend([nop, val, cave_cheat])
+    win.ctl.cheats_changed.emit()
+    _threaded(win.ctl.tasks)
+    _threaded(pro.tasks)
+    qtbot.waitUntil(lambda: not win.ctl.tasks.busy and not pro.tasks.busy, timeout=10000)
+    tab.select_cheat(cave_cheat)
+    assert tab.preview is not None
+    pro.code.go(fg.SUB_SITE)
+    qtbot.waitUntil(lambda: not pro.tasks.busy, timeout=5000)
+    main = threading.main_thread()
+    calls: list[tuple[str, bool]] = []
+    for name in ("read", "write", "maps", "foreground_app", "scan_start"):
+        real = getattr(game.fake, name)
+
+        def spy(*a, _n=name, _r=real, **k):
+            calls.append((_n, threading.current_thread() is main))
+            return _r(*a, **k)
+
+        monkeypatch.setattr(game.fake, name, spy)
+    saves: list[str] = []
+    monkeypatch.setattr(pj, "save", lambda *a, **k: saves.append("project"))
+    monkeypatch.setattr(up, "save_signatures", lambda *a, **k: saves.append("signatures"))
+    for c in (nop, val):
+        _tick(win, c, True)
+        assert c.enabled
+        _tick(win, c, False)
+        assert not c.enabled
+    qtbot.waitUntil(lambda: not win.ctl.tasks.busy and not pro.tasks.busy, timeout=10000)
+    assert [n for n, ui in calls if ui] == ["write"] * 4, "only the ticks' own writes"
+    assert saves == []
+    assert not win.cheats._learning
