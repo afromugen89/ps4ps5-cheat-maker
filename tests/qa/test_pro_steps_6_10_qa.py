@@ -531,11 +531,6 @@ def test_rt_no_base_operands_round_trip_as_abs(nasm, hexcode):  # TC-10b
     ],
     ids=["abs-in-comment", "times-prefix", "user-line-directive"],
 )
-@pytest.mark.xfail(
-    reason="BUG-10: the absolute-operand check is skipped for a line whose comment says "
-    "'abs', a times-prefixed line, or after a %line in the user's source",
-    strict=True,
-)
 def test_bug10_absolute_operand_check_cant_be_skipped(nasm, src):  # TC-03d
     assert _refused(nasm.assemble(src, CTX))
 
@@ -562,9 +557,6 @@ def test_rt_words_inside_strings_are_not_refused(nasm):  # TC-05c
 
 
 @pytest.mark.needs_nasm
-@pytest.mark.xfail(
-    reason="BUG-11: incbin built from pieces with %[...] still reads a PC file", strict=True
-)
 def test_bug11_incbin_built_with_token_pasting_is_refused(nasm, tmp_path):  # TC-05d
     secret = tmp_path / "secret.txt"
     secret.write_text("password", encoding="utf-8")
@@ -597,11 +589,6 @@ def test_rt_set_variable_patches_only_the_variable_bytes(s):  # TC-26b
     assert entry.cave_bytes[-4:] == struct.pack("<f", 0.25)
 
 
-@pytest.mark.xfail(
-    reason="BUG-12: after a variable is added (or retyped) and the build fails, "
-    "set_variable writes the value into the cave's code (live)",
-    strict=True,
-)
 def test_bug12_set_variable_uses_the_built_layout(s):  # TC-26c
     pc = built_cheat(s)
     entry = pc.entries[0]

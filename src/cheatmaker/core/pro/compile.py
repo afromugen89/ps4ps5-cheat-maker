@@ -31,6 +31,7 @@ from cheatmaker.core.pro import sites
 from cheatmaker.core.pro.asm import AsmResult, Assembler, CaveContext
 from cheatmaker.core.pro.model import JMP_REL32_SIZE, ProCheat, ProEntry, Variable
 from cheatmaker.core.session import Session
+from cheatmaker.core.values import ValueType
 from cheatmaker.errors import CheatMakerError, LockFailed, WriteFailed
 
 log = logging.getLogger(__name__)
@@ -81,13 +82,38 @@ def variable_offsets(variables: Sequence[Variable], code_len: int) -> dict[str, 
     return out
 
 
-def variable_addresses(pc: ProCheat) -> dict[str, int]:
-    """Variable name -> module offset; empty while the home cave isn't built."""
-    entry = home(pc)
-    if entry is None or entry.cave is None or not entry.cave_bytes:
-        return {}
+def record_layout(pc: ProCheat, entry: ProEntry) -> None:
+    """Remember where the variables went when ``entry`` (just assembled with
+    ``pc.variables`` if it is the home cave) was built."""
+    if entry is not home(pc):
+        entry.layout = ()
+        return
     offs = variable_offsets(pc.variables, len(entry.cave_bytes))
-    return {name: entry.cave + off for name, off in offs.items()}
+    entry.layout = tuple((v.name, v.vtype.name.lower(), offs[v.name]) for v in pc.variables)
+
+
+def built_variables(pc: ProCheat) -> dict[str, tuple[ValueType, int]]:
+    """Variable name -> (type, offset in the home cave's bytes), as last built."""
+    entry = home(pc)
+    if entry is None or not entry.cave_bytes:
+        return {}
+    return {name: (ValueType[vtype.upper()], at) for name, vtype, at in entry.layout}
+
+
+def layout_current(pc: ProCheat) -> bool:
+    """The variable list is the one the home cave was built with (names and types)."""
+    entry = home(pc)
+    built = [(n, t) for n, t, _at in entry.layout] if entry is not None else []
+    return built == [(v.name, v.vtype.name.lower()) for v in pc.variables]
+
+
+def variable_addresses(pc: ProCheat) -> dict[str, int]:
+    """Variable name -> module offset, as the home cave was built; empty while it
+    isn't."""
+    entry = home(pc)
+    if entry is None or entry.cave is None:
+        return {}
+    return {name: entry.cave + at for name, (_t, at) in built_variables(pc).items()}
 
 
 # -- compiling ------------------------------------------------------------------------
@@ -118,11 +144,11 @@ def compile_cheat(pc: ProCheat) -> Cheat:
         else:
             lines.append(Location(LocationKind.CODE_PATCH, entry.offset, entry.on, entry.off))
     value_type = value_at = None
-    if pc.editable is not None and home_line is not None:
-        var = pc.variable(pc.editable)
-        at = variable_offsets(pc.variables, len(lines[home_line].on))[var.name]
-        value_type = var.vtype
-        value_at = [(home_line, at + i) for i in range(var.vtype.size)]
+    built = built_variables(pc)
+    if pc.editable is not None and home_line is not None and pc.editable in built:
+        vtype, at = built[pc.editable]  # where the cave really holds it
+        value_type = vtype
+        value_at = [(home_line, at + i) for i in range(vtype.size)]
     return Cheat(
         name=pc.name,
         locations=lines,
@@ -151,6 +177,9 @@ def take_value(cheat: Cheat) -> None:
     if pc is None or pc.editable is None or entry is None or cheat.value is None:
         return
     var = pc.variable(pc.editable)
+    if not layout_current(pc):  # the cave holds another layout: build it first
+        log.info("action=pro_take_value id=%s skipped=layout_changed", pc.id)
+        return
     try:
         if var.vtype.encode(cheat.value) == var.encoded():  # same bytes: 2.1 stays 2.1
             return
@@ -158,7 +187,7 @@ def take_value(cheat: Cheat) -> None:
         return
     k = pc.variables.index(var)
     pc.variables[k] = replace(var, value=cheat.value)
-    at = variable_offsets(pc.variables, len(entry.cave_bytes))[var.name]
+    at = built_variables(pc)[var.name][1]
     data = pc.variables[k].encoded()
     entry.cave_bytes = entry.cave_bytes[:at] + data + entry.cave_bytes[at + len(data) :]
 
@@ -318,6 +347,7 @@ def build(
     entry.cave_bytes = result.code
     entry.on = cv.jmp_patch(entry.offset, entry.cave, len(entry.off))
     entry.stale = False
+    record_layout(pc, entry)
     if entry is home(pc) and variable_addresses(pc) != before:
         _rebuild_users(session, pc, assembler, reserved)
     return result
@@ -502,8 +532,12 @@ def set_variable(
     entry = home(pc)
     if entry is None or entry.cave is None or not entry.cave_bytes:
         raise LockFailed(f"{pc.name}: there is no built cave for the variable")
+    if not layout_current(pc):
+        raise LockFailed(
+            f"{pc.name}: the variables changed since the cave was built; build the cave first"
+        )
     k = pc.variables.index(var)
-    at = variable_offsets(pc.variables, len(entry.cave_bytes))[name]
+    at = built_variables(pc)[name][1]
     data = new_var.encoded()
     if on and (session is None or writer is None):
         raise ValueError("a live rewrite needs the session and the writer")
@@ -529,6 +563,7 @@ __all__ = [
     "assemble",
     "build",
     "build_all",
+    "built_variables",
     "compile_cheat",
     "context",
     "crosses_ff",
@@ -536,9 +571,11 @@ __all__ = [
     "enable",
     "forget",
     "home",
+    "layout_current",
     "module_size",
     "new_cave_entry",
     "new_nop_entry",
+    "record_layout",
     "refresh",
     "restore",
     "set_variable",

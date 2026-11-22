@@ -864,3 +864,16 @@ Built from docs/architecture-pro.md (spec docs/spec-pro.md), implementation step
     AOBs so they are learned again. A Pro cheat with a cave fails there with "a Pro
     cheat with a cave: use Bring them over".
   - BUG-09: `refpoints._place` clears `stale`.
+- **QA re-test, BUG-10..12 (2026-11-22).**
+  - BUG-10: the `abs` exemption looks only at code (comments and strings are
+    stripped). `times` rows are decoded unless they repeat data. `%line` in user
+    source is refused.
+  - BUG-11 (architect's call): the wrapped source is first run through `nasm -E`. A
+    `%line` naming any other file (an include) or an `incbin` / `%include` /
+    `%pathsearch` / `%depend` / `%use` token in the code of the output is refused. The
+    text deny-list stays, plus `%[`.
+  - BUG-12: the home cave records the variables as built in `ProEntry.layout`, as
+    (name, type, offset), saved as an optional `"layout"` key in format 5. `compile`
+    (the editable value), `take_value`, `set_variable` and `variable_addresses` use
+    only that. `set_variable` refuses with "build the cave first" when the variable
+    list differs from it.

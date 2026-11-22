@@ -491,3 +491,36 @@ def test_sources_are_checked_against_the_module_size(s):
     entry = pc_.new_cave_entry(s, HOOK, "jmp 0x3000\n")
     result = pc_.build(s, ProCheat("p1", "Far", [entry]), entry, FakeAssembler())
     assert result.error is not None and "outside the game's module" in result.error[1]
+
+
+# -- QA re-test: BUG-12 -----------------------------------------------------------------
+def test_the_built_layout_is_recorded_and_saved(s):
+    pc = _cheat(s)
+    entry = pc.entries[0]
+    assert entry.layout == (("mult", "float", len(entry.cave_bytes) - 4),)
+    again = ProEntry.from_json(entry.to_json())
+    assert again.layout == entry.layout
+    assert "layout" not in pc.entries[0].__class__("cave", HOOK, HOOK_CODE).to_json()
+    with pytest.raises(ValueError, match="inside the built cave"):
+        ProEntry.from_json({**entry.to_json(), "layout": [["mult", "float", 9999]]})
+    with pytest.raises(ValueError, match="name, type, offset"):
+        ProEntry.from_json({**entry.to_json(), "layout": [["mult", "float"]]})
+    with pytest.raises(ValueError, match="hold variables"):
+        ProEntry("bytes", 1, b"\0", b"\1", layout=(("x", "float", 0),))
+
+
+def test_values_use_the_built_layout_not_the_current_list(s):
+    pc = _cheat(s)
+    entry = pc.entries[0]
+    built = entry.cave_bytes
+    pc.variables.insert(0, Variable("n", ValueType.INT32, 1))  # edited, not built
+    assert not pc_.layout_current(pc)
+    with pytest.raises(LockFailed, match="build the cave first"):
+        pc_.set_variable(pc, "mult", 5.0)
+    cheat = pc_.compile_cheat(pc)
+    assert cheat.value == 2.0, "the value is read where the cave really holds it"
+    cheat.set_value(7.0)
+    pc_.take_value(cheat)  # skipped: the source doesn't match the cave
+    assert pc.variable("mult").value == 2.0 and entry.cave_bytes == built
+    assert pc_.build(s, pc, entry, FakeAssembler()).ok
+    assert pc_.layout_current(pc) and pc_.set_variable(pc, "mult", 5.0) == pc_.SAVED

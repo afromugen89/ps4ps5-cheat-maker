@@ -52,6 +52,7 @@ USER_FILE = "user"
 """The file name NASM reports for lines of the user's source (via ``%line``)."""
 _VARS_FILE = "cheatmaker-variables"
 _SOURCE, _OUTPUT, _MAP, _LIST = "cave.asm", "cave.bin", "cave.map", "cave.lst"
+_PREPROCESSED = "cave.i"
 VARIABLE_ALIGN = 4
 
 
@@ -150,9 +151,19 @@ _BRANCH_NUMBER = re.compile(
     rf"(?:(?:short|near|strict)\s+)*({_NUM})\s*$",
     re.I,
 )
-_FORBIDDEN = re.compile(r"\bincbin\b|%\s*(?:include|pathsearch|depend|use|deftok)\b|%!|%\+", re.I)
+_FORBIDDEN = re.compile(
+    r"\bincbin\b|%\s*(?:include|pathsearch|depend|use|deftok)\b|%!|%\+|%\[", re.I
+)
 """Directives that read files or the environment on the PC (or build such a word from
-pieces): a cave is code the player writes, so none of them is allowed (QA BUG-03)."""
+pieces): a cave is code the player writes, so none of them is allowed (QA BUG-03,
+BUG-11). The preprocessed text is checked too (``preprocessed_error``)."""
+_LINE_DIRECTIVE = re.compile(r"%\s*line\b", re.I)
+LINE_DIRECTIVE = (
+    "%line isn't allowed in a cave (it would hide lines from the error lines and the "
+    "[abs N] address check)"
+)
+_PREPROCESSED_FORBIDDEN = re.compile(r"\bincbin\b|%\s*(?:include|pathsearch|depend|use)\b", re.I)
+FILE_NOT_ALLOWED = "{what} isn't allowed in a cave (it reads files on the PC)"
 
 
 def _number(text: str) -> int:
@@ -238,10 +249,38 @@ def check_source(source: str, module_size: int | None) -> tuple[int, str] | None
     """What the source may not do, as the first (line, message): read PC files or the
     environment (``incbin``, ``%include``, ...), or use an address outside the module."""
     for n, line in enumerate(source.split("\n"), 1):
-        m = _FORBIDDEN.search(_code_text(line))
+        code = _code_text(line)
+        if _LINE_DIRECTIVE.search(code):
+            return n, LINE_DIRECTIVE
+        m = _FORBIDDEN.search(code)
         if m:
-            return n, f"{m.group(0).strip()} isn't allowed in a cave (it reads files on the PC)"
+            return n, FILE_NOT_ALLOWED.format(what=m.group(0).strip())
     return check_numbers(source, module_size)
+
+
+_KNOWN_FILES = {_SOURCE, USER_FILE, _VARS_FILE}
+
+
+def preprocessed_error(text: str) -> tuple[int, str] | None:
+    """Check NASM's preprocessed output (``nasm -E``) of the wrapped source: a file
+    pulled in (a ``%line`` naming another file) or a file-reading directive built from
+    pieces is refused, on the user's line when it is known (QA BUG-11)."""
+    where, line, step = "", 0, 1
+    for raw in text.splitlines():
+        directive = raw.strip().split()
+        if directive[:1] == ["%line"] and len(directive) >= 3:
+            start, _, inc = directive[1].partition("+")
+            where = directive[2]
+            line, step = int(start or 0), int(inc or 1)
+            if where not in _KNOWN_FILES:
+                return 0, FILE_NOT_ALLOWED.format(what=f"reading {where}")
+            continue
+        m = _PREPROCESSED_FORBIDDEN.search(_code_text(raw))
+        if m:
+            at = line if where == USER_FILE else 0
+            return at, FILE_NOT_ALLOWED.format(what=m.group(0).strip())
+        line += step
+    return None
 
 
 # -- the wrapper -----------------------------------------------------------------
@@ -317,6 +356,20 @@ class NasmAssembler:
         self.exe = Path(exe)
         self.timeout = timeout
 
+    def _run(self, folder: Path, *args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [str(self.exe), *args],
+            cwd=folder,
+            capture_output=True,
+            # NASM echoes the user's names as UTF-8; never fail on its output
+            encoding="utf-8",
+            errors="replace",
+            timeout=self.timeout,
+            check=False,
+            # no console window flashing up on Windows
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+
     def assemble(
         self, source: str, ctx: CaveContext, variables: Sequence[Variable] = ()
     ) -> AsmResult:
@@ -328,30 +381,25 @@ class NasmAssembler:
             folder = Path(tmp)
             (folder / _SOURCE).write_text(wrap(source, ctx, variables), encoding="utf-8")
             try:
-                done = subprocess.run(
-                    [
-                        str(self.exe),
-                        # a number too big for its operand is an error, not a silent cut;
-                        # so is an address with no register that can't be RIP-relative
-                        "-Werror=number-overflow",
-                        "-Werror=ea-absolute",
-                        "-f",
-                        "bin",
-                        "-l",
-                        _LIST,
-                        "-o",
-                        _OUTPUT,
-                        _SOURCE,
-                    ],
-                    cwd=folder,
-                    capture_output=True,
-                    # NASM echoes the user's names as UTF-8; never fail on its output
-                    encoding="utf-8",
-                    errors="replace",
-                    timeout=self.timeout,
-                    check=False,
-                    # no console window flashing up on Windows
-                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                pre = self._run(folder, "-E", "-o", _PREPROCESSED, _SOURCE)
+                pre_out = folder / _PREPROCESSED
+                if pre.returncode == 0 and pre_out.is_file():
+                    bad = preprocessed_error(pre_out.read_text("utf-8", "replace"))
+                    if bad is not None:
+                        return AsmResult(b"", {}, bad)
+                done = self._run(
+                    folder,
+                    # a number too big for its operand is an error, not a silent cut;
+                    # so is an address with no register that can't be RIP-relative
+                    "-Werror=number-overflow",
+                    "-Werror=ea-absolute",
+                    "-f",
+                    "bin",
+                    "-l",
+                    _LIST,
+                    "-o",
+                    _OUTPUT,
+                    _SOURCE,
                 )
             except FileNotFoundError:
                 raise AssemblerNotFound(f"Assembler not found ({self.exe})") from None
@@ -383,9 +431,9 @@ class NasmAssembler:
 
 
 _LIST_ROW = re.compile(r"^\s*(\d+)\s+([0-9A-Fa-f]{8})\s+(\S+)\s+(<\d+>)?\s*(.*)$")
-_DATA_WORDS = re.compile(
-    r"^\s*(?:[A-Za-z_.][\w.]*:\s*)?(?:d[bwdqtoyz]|res[bwdqtoyz]|times|align|alignb)\b", re.I
-)
+_DATA = r"(?:d[bwdqtoyz]|res[bwdqtoyz]|align|alignb|incbin)\b"
+_DATA_WORDS = re.compile(rf"^\s*(?:[A-Za-z_.][\w.]*:\s*)?(?:{_DATA}|times\b.*?\b{_DATA})", re.I)
+"""Rows that hold data, not instructions (``times`` only when it repeats data)."""
 ABSOLUTE_ADDRESS = (
     "an address with no register must be a module offset written as one number, "
     "[0x...]; write [abs N] for a fixed address"
@@ -417,7 +465,7 @@ def parse_listing(text: str) -> list[ListRow]:
         if src.lstrip().startswith("%line"):
             region = src.split()[2] if len(src.split()) > 2 else ""
             continue
-        if region != USER_FILE:
+        if region != USER_FILE or _bytes.startswith("<"):  # "<rep 2h>": a times repeat
             continue
         rows.append(ListRow(int(offset, 16), None if macro else int(number), src))
     return rows
@@ -439,7 +487,8 @@ def absolute_operand(
     such an operand would use the number as a console address (QA BUG-01). fs/gs
     operands are allowed. Data lines (``db``, ``times``, ...) aren't decoded."""
     for row in rows:
-        if _DATA_WORDS.match(row.text) or re.search(r"\babs\b", row.text, re.I):
+        code_text = _code_text(row.text)  # an "abs" in a comment or string doesn't count
+        if _DATA_WORDS.match(code_text) or re.search(r"\babs\b", code_text, re.I):
             continue
         at = row.offset
         if not 0 <= at < len(code):
@@ -609,6 +658,7 @@ __all__ = [
     "original_text",
     "parse_error",
     "parse_map",
+    "preprocessed_error",
     "shim",
     "shim_line",
     "wrap",

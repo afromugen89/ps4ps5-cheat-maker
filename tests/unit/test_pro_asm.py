@@ -316,3 +316,40 @@ def test_parse_listing_keeps_user_rows():
     )
     rows = asm.parse_listing(text)
     assert [(r.offset, r.line) for r in rows] == [(0, 1), (1, None)]
+
+
+# -- QA re-test: BUG-10, BUG-11 -----------------------------------------------------------
+def test_line_directive_and_pasting_are_refused():
+    assert asm.check_source("nop\n%line 0+1 x\n", None) == (2, asm.LINE_DIRECTIVE)
+    err = asm.check_source("%define IB incb\n%[IB]in 'x'\n", None)
+    assert err is not None and err[0] == 2
+
+
+def test_preprocessed_output_is_checked():
+    text = "%line 1+1 cave.asm\nbits 64\n%line 1+1 user\nnop\n\nincbin 'x',0\n"
+    assert asm.preprocessed_error(text) == (3, asm.FILE_NOT_ALLOWED.format(what="incbin"))
+    pulled = "%line 1+1 user\nnop\n%line 1+1 secret.inc\ndb 1\n"
+    assert asm.preprocessed_error(pulled)[1].startswith("reading secret.inc")
+    fine = '%line 1+1 user\ndb "incbin"\n%line 1+0 cheatmaker-variables\ntimes 2 db 0\n'
+    assert asm.preprocessed_error(fine) is None
+
+
+@pytest.mark.needs_nasm
+def test_preprocess_pass_catches_what_the_text_check_misses(nasm, monkeypatch, tmp_path):
+    secret = tmp_path / "secret.txt"
+    secret.write_text("password", encoding="utf-8")
+    monkeypatch.setattr(asm, "check_source", lambda source, size: None)
+    r = nasm.assemble(f'%define IB incb\n%[IB]in "{secret.as_posix()}"', CTX)
+    assert r.error == (2, asm.FILE_NOT_ALLOWED.format(what="incbin"))
+    r = nasm.assemble(f'nop\n%include "{secret.as_posix()}"', CTX)
+    assert r.error is not None and "reading" in r.error[1]
+
+
+@pytest.mark.needs_nasm
+def test_times_rows_are_decoded_unless_they_repeat_data(nasm):
+    assert nasm.assemble("times 2 mov eax, [0x10+rcx*4]", MODULE).error == (
+        1,
+        asm.ABSOLUTE_ADDRESS,
+    )
+    assert nasm.assemble("times 2 db 0x8b, 0x04, 0x8d, 1, 0, 0, 0", MODULE).ok
+    assert nasm.assemble("mov eax, [0x10+rcx*4] ; abs", MODULE).error is not None

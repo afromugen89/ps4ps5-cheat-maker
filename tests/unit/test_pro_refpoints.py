@@ -46,6 +46,7 @@ def _cheat(source: str = "original\njmp return\n", cave: int = 0x1F00) -> ProChe
     assert result.ok, result.error
     entry.cave_bytes = result.code
     entry.on = b"\xe9" + struct.pack("<i", cave - (HOOK + 5))
+    pro_compile.record_layout(pc, entry)
     return pc
 
 
@@ -194,6 +195,7 @@ def test_bring_over_with_nasm(nasm):
     from cheatmaker.core.pro import compile as pro_compile
 
     entry.cave_bytes = pro_compile.assemble(pc, entry, nasm).code
+    pro_compile.record_layout(pc, entry)
     rp.learn([pc], _image())
     (new,), report = rp.bring_over([pc], _image(SHIFT), nasm)
     assert report.moved == ["Health"]

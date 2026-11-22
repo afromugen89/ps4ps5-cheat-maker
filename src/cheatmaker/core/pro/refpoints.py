@@ -197,6 +197,7 @@ def _place(
     entry.cave_bytes = result.code
     entry.on = cv.jmp_patch(entry.offset, cave, len(entry.off))
     entry.stale = False  # just re-assembled against the moved variables
+    pro_compile.record_layout(pc, entry)
     rooms.append((cave, cave + max(size, len(result.code))))
 
 
