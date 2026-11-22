@@ -24,11 +24,11 @@ NASM_VERSION = "3.02"
 NASM_ZIP_NAME = f"nasm-{NASM_VERSION}-win64.zip"
 NASM_URL = f"https://www.nasm.us/pub/nasm/releasebuilds/{NASM_VERSION}/win64/{NASM_ZIP_NAME}"
 
-# TODO(pro step 1): pin the SHA-256 of NASM_ZIP_NAME. It couldn't be computed when this
-# script was written (nasm.us was unreachable from the build container). Download the zip
-# on a trusted PC, check it against the release's own checksum, and paste the lowercase
-# hex digest here. Until then the script refuses to run.
-NASM_ZIP_SHA256: str | None = None
+# SHA-256 of NASM_ZIP_NAME, pinned 2026-11-22 from the zip downloaded over HTTPS from
+# nasm.us on Kein's PC (641,314 bytes; nasm -v: "NASM version 3.02 compiled on Jun 28
+# 2026"). NASM publishes no official checksums, so this is trust-on-first-use: any
+# later download that differs is refused.
+NASM_ZIP_SHA256: str | None = "161d0bfaff53c2f9e9f3e69fd0672323ebabafd1268976a5cec11be92a19aee7"
 
 WANTED = {"nasm.exe": "nasm.exe", "license": "LICENSE"}
 """Zip member base name (lower case) -> file name written to the destination."""
