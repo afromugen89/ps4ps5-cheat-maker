@@ -102,6 +102,8 @@ class CheatsTab(ProTab):
         self.ask_text: Callable[[str, str, str], str | None] = self._ask_text
         self.pick_file: Callable[[], str] = self._pick_file
         self.exec_dialog: Callable[[object], object] = lambda d: d.exec()
+        # "Make a cave at its writer" in the export dialog: the Watch tab (set by the window)
+        self.watch: Callable[[list], None] = lambda targets: None
         self.busy = False
         self.preview: ProCheat | None = None  # a guided cheat as it would be adopted
         self.preview_why = ""  # why a guided cheat can't be adopted
@@ -748,4 +750,4 @@ class CheatsTab(ProTab):
         self.msgs.say(hints.IMPORTED.format(n=added))
 
     def do_export(self) -> None:
-        self.exec_dialog(ExportDialog(self.ctl, self.msgs, self))
+        self.exec_dialog(ExportDialog(self.ctl, self.msgs, self, watch=self.watch))

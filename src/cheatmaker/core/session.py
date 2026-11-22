@@ -5,7 +5,8 @@ from __future__ import annotations
 import logging
 import re
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 
 from cheatmaker.busy import short_wait
@@ -14,6 +15,7 @@ from cheatmaker.core.cheats import MAIN_MODULE, LocationKind
 from cheatmaker.errors import (
     ConnectionLost,
     ConsoleBusy,
+    DebuggerInUse,
     GameNotFound,
     ReadFailed,
     UnsupportedServer,
@@ -31,6 +33,9 @@ TITLE_ID_RE = re.compile(r"^(PPSA|CUSA)\d{5}$", re.IGNORECASE)
 
 ClientFactory = Callable[[str, int], ConsoleClient]
 ALIVE_WAIT = 0.5
+GUIDED_DEBUGGER = "the main window (Lock it, Make it work or Find the real one)"
+"""Who holds the debugger while a guided screen watches (Session.claim_debugger)."""
+DEBUGGER_IN_USE = "The debugger is in use by {owner}. Wait until it's done, or stop it there."
 """Seconds the Pro liveness poll waits for a busy connection before it counts as alive."""
 
 
@@ -101,6 +106,10 @@ class Session:
         # Held around "is it still mine?" plus the console call, by the guided Scanner
         # and the Pro scanner (worker threads; the UI thread never takes it).
         self.search_lock = threading.RLock()
+        # One debugger user at a time (it binds port 755): the guided watches and the
+        # Pro Watch tab claim it with claim_debugger.
+        self.debug_owner: str | None = None
+        self._debug_lock = threading.Lock()
         # Module-offset ranges [start, end) that saved find-again notes keep for their
         # routines and slots (even while still zero): new caves and slots avoid them.
         self.reserved_rooms: list[tuple[int, int]] = []
@@ -143,6 +152,21 @@ class Session:
         self.search_taken_by = by
         for cb in list(self.on_search_taken):
             cb()
+
+    @contextmanager
+    def claim_debugger(self, owner: str) -> Iterator[None]:
+        """Hold the debugger for ``owner`` while the block runs. DebuggerInUse names
+        whoever has it (they would both bind port 755 and fight over the game)."""
+        with self._debug_lock:
+            if self.debug_owner is not None:
+                raise DebuggerInUse(DEBUGGER_IN_USE.format(owner=self.debug_owner))
+            self.debug_owner = owner
+        log.info("action=debug_claim owner=%s", owner)
+        try:
+            yield
+        finally:
+            with self._debug_lock:
+                self.debug_owner = None
 
     def require_client(self) -> ConsoleClient:
         if self.client is None:

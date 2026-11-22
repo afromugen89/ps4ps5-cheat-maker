@@ -24,7 +24,36 @@ TAB_CODE = "Code"
 TAB_MEMORY = "Memory"
 TAB_WATCH = "Watch"
 TAB_CHEATS = "Cheats"
-WATCH_LATER = "Find what writes or accesses an address comes in a later update."
+
+# -- Watch (PR-3) -----------------------------------------------------------------------------
+WATCH = (
+    "Add up to 4 addresses, pick Writes or Accesses, then Start and play until the value "
+    "changes. Each instruction that touched it is listed with how often. The game pauses "
+    "briefly at every hit."
+)
+WATCH_OWNER = "Pro's Watch tab"
+WATCH_KINDS = {"write": "Writes", "access": "Accesses", "execute": "Runs"}
+WATCH_FULL = "Watch at most 4 addresses at a time. Remove one first."
+WATCH_NONE = "Add an address to watch first."
+WATCH_BUSY = "A watch is running. Stop it first."
+WATCH_STARTING = "Starting the watch (the PS5 connects back on port 755)..."
+WATCH_RUNNING = "Watching: {hits} hit(s) · {left} s left"
+WATCH_ENDED = {
+    "time": "Time's up: {hits} hit(s).",
+    "hits": "Stopped at {hits} hits (the limit).",
+    "stopped": "Stopped: {hits} hit(s).",
+    "lost": "The watch ended: {reason} The list shows the hits so far.",
+}
+WATCH_GAME_GONE = "The game isn't running, so the watch ended. Nothing was written."
+WATCH_PICK_ROW = "Pick an instruction in the list first."
+WATCH_NOT_MODULE = "That instruction isn't in the game's own code, so no cheat can patch it."
+REGS_UNVERIFIED = " (unverified)"
+REGS_UNVERIFIED_TIP = (
+    "Registers other than RIP aren't proven on PS5Debug-NG yet (console test S-P1). Check "
+    "them before you rely on them."
+)
+SHOW_CODE = "Show in Code"
+WATCH_SIZE_TIP = "How many bytes to watch: the value's size."
 
 # -- Cheats tab and cave editor (PR-8) ------------------------------------------------------
 CHEATS = "Pick a cheat. Guided cheats open read-only: press Edit in Pro to change them."
@@ -64,7 +93,11 @@ EXPORT_COUNT = "{n} cheat(s) go in the file."
 EXPORT_LEFT_OUT = "These need Cheat Maker running, so they are left out:"
 EXPORT_NONE_LEFT_OUT = "Every cheat goes in the file."
 MAKE_CAVE = "Make a cave at its writer"
-MAKE_CAVE_LATER = "Needs the Watch tab, which comes in a later update."
+MAKE_CAVE_TIP = (
+    "Watch what writes this value, then pick the writer and press Make cave entry here: a "
+    "cave at the writer works in CheatRunner."
+)
+MAKE_CAVE_CANT = "Cheat Maker can't tell where this value is right now, so it can't be watched."
 EXPORT_SAVED = "Saved to {path}."
 IMPORT_TITLE = "Import a cheat file"
 IMPORT_REFUSED = "Not imported:"

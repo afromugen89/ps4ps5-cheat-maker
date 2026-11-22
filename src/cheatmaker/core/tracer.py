@@ -33,7 +33,7 @@ from cheatmaker.console.client import MemMap, WatchHit
 from cheatmaker.core import real_check as rc
 from cheatmaker.core import trace_flow as tf
 from cheatmaker.core.locker import CONTEXT, Writer
-from cheatmaker.core.session import Session
+from cheatmaker.core.session import GUIDED_DEBUGGER, Session
 from cheatmaker.core.trace_way import Kind, Way
 from cheatmaker.core.values import ValueType, unit_of
 from cheatmaker.errors import CheatMakerError, ConnectionLost, ReadFailed
@@ -393,9 +393,10 @@ class Tracer:
 
         addr, size = hop.span
         started = self.clock()
-        hits = self.client.watch(
-            self.pid, addr, size, "write", self._time_for(WATCH_S), until=until
-        )
+        with self.session.claim_debugger(GUIDED_DEBUGGER):
+            hits = self.client.watch(
+                self.pid, addr, size, "write", self._time_for(WATCH_S), until=until
+            )
         hop.hits = len(hits)
         self._waited += self.clock() - started
         log.info("action=trace_watch hop=%d addr=%#x size=%d hits=%d", hop.n, addr, size, len(hits))
@@ -617,7 +618,10 @@ class Tracer:
             return stop or len(hits) >= EXEC_HITS
 
         started = self.clock()
-        hits = self.client.watch(self.pid, ip, 1, "execute", self._time_for(EXEC_S), until=until)
+        with self.session.claim_debugger(GUIDED_DEBUGGER):
+            hits = self.client.watch(
+                self.pid, ip, 1, "execute", self._time_for(EXEC_S), until=until
+            )
         self._waited += self.clock() - started
         log.info("action=trace_watch kind=execute ip=%#x hits=%d", ip, len(hits))
         self._check_cancel()

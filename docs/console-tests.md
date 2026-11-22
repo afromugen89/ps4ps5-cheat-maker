@@ -345,3 +345,12 @@ registers "unverified" (AC-3.3).
 | C-P3c | Already debugged | Start a watch, then end Cheat Maker from Task Manager while it runs. Start Cheat Maker, connect, and start the watch again. | The watch starts (the log shows `result=already_debugged retry=1`), or the message names what the PS5 answered. | The `action=pro_debug_attach` lines. |
 | C-P3d | Four slots and DR6 | Pro > Watch: add health (**Writes**) and ammo (**Accesses**) to the watch list (slots 0 and 1), **Start**. Take a hit, then fire. | Each row's Watch column names its own address; the log's `action=pro_watch_hit` lines show `slot=0` for the health writer and `slot=1` for the ammo instructions. | The `action=pro_watch_hit` lines. |
 | C-P3e | Keep-alive and detach | Start a watch on a value nothing changes and leave it for the full 60 s. Then start one and pull the PC's network cable for 10 s. | The first ends by time with no "stopped answering" message and the game runs on. The second ends within 10 s with "The debugger's connection stopped answering"; the main window stays connected once the cable is back (or says it lost the PS5, as C6). | The `action=pro_debug_keepalive` and `action=pro_debug_lost` lines. |
+
+### C-P4 Watch tab (runnable with step 17; spikes S-P1/S-P2)
+
+| # | Test | Steps | Pass when | Send back |
+|---|---|---|---|---|
+| C-P4a | Find what writes (AC-3.1, AC-3.2) | Find your health in Pro > Scanner, add it to the address list, press **Find what writes**. Take 3 hits, then **Stop**. | Within 1 s of each hit the writer's count goes up; it ends at ≥ 3; its instruction is a write to memory (the one *before* the reported RIP). After Stop the game runs on and the list stays. | A screenshot of the list and the `action=pro_watch_*` lines. |
+| C-P4b | Registers (S-P1, AC-3.3) | In C-P4a's row, read First hit: the base register of the instruction (e.g. `r12` for `[r12+0x2ac]`) plus the displacement. | base + displacement equals the health address on 3 hits. When it does, tell us: the "(unverified)" mark can go. | The First hit text and the health address. |
+| C-P4c | Find what accesses (S-P2) | Same address, **Find what accesses**. Open the inventory or HUD, take a hit. | Readers are listed as well as the writer. | The list. |
+| C-P4d | Limits | A value the game reads every frame (e.g. your position). **Find what accesses**, Start. | It ends at 500 hits (or 60 s) by itself, the game stutters only while it runs, and the game runs on afterwards. | How long it took to reach 500 and how bad the stutter was. |

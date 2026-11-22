@@ -1031,3 +1031,38 @@ Built from docs/architecture-pro.md (spec docs/spec-pro.md), implementation step
   debugger commands and dials back.
 - Unverified on the console: the dial-back at attach, the keep-alive on the debugger
   socket, four slots and DR6 (C-P3a..e in docs/console-tests.md, spikes S-P1/S-P2).
+
+## Cheat Maker Pro, R1 step 17: Watch tab (2026-11-22)
+
+- `core/pro/watch_session.py`: `WatchSession` runs up to 4 `WatchTarget`s (one per
+  slot) on a `Debugger` until Stop, `seconds` or `max_hits`.
+  - Each stop is resumed at once, then grouped into an `InstructionRow` per
+    (instruction, slot). A row holds the count and the first and last hit.
+  - Data watches name the instruction ending at RIP (`locker.instruction_before`
+    with `touches_memory`). Execute watches name the instruction at RIP. Lookups are
+    cached per RIP. An unreadable or undecodable RIP gives "?".
+  - DR6 that names no running slot goes to the only watch, else to slot None.
+  - Every end path detaches. `DebuggerLost` ends with `LOST` and keeps the rows.
+  - `REGISTERS_VERIFIED = False` until S-P1 passes; it drives the "(unverified)"
+    headers (AC-3.3).
+  - `value_target(cheat, base)` gives the watch for "Make a cave at its writer".
+- `Session.claim_debugger(owner)`: one debugger user at a time.
+  - The guided watches (Lock it's `find_writers`, the anchor hook and slot checks, and
+    both tracer watches) claim it as `GUIDED_DEBUGGER`; the Watch tab claims it as
+    "Pro's Watch tab".
+  - A second claimant gets `DebuggerInUse` naming the holder. Guided screens show it
+    through the new `DebuggerError` entry in `ui/messages.py`; no other guided
+    behaviour changes.
+- Settings `pro_watch_seconds` (60; kept to 5-600) and `pro_watch_hits` (500; kept
+  to 1-5000).
+- `ui/pro/watch_tab.py`:
+  - a watch list of up to 4 (address, size, Writes/Accesses), Start/Stop, and live
+    counts by signal;
+  - result columns Watch, Address, Instruction, Count, First hit and Last hit;
+  - actions Show in Code, Make cave entry here and Make NOP entry here (module code
+    only);
+  - the game going away, a new game or closing Pro stops the watch.
+  - The address list's Find what writes / accesses (up to 4 picked rows) and the
+    export dialog's "Make a cave at its writer" (a write watch on the PC-only
+    cheat's value) open it.
+- Console tests C-P4a..d.

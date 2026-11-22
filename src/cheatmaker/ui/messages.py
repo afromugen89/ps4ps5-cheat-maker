@@ -43,6 +43,7 @@ _MESSAGES: list[tuple[type[BaseException], str]] = [
         "Couldn't send the file to the PS5. Load the ftpsrv payload, or copy the saved file "
         "yourself.",
     ),
+    (e.DebuggerError, "{reason}"),
     (e.FindFailed, "{reason}"),
     (e.BuildFailed, "{reason}"),
     (e.LockFailed, "Couldn't lock this value ({reason}). It still works for this session."),

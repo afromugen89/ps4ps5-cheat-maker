@@ -160,3 +160,27 @@ def test_title_falls_back_to_title_id(fake):
     s = Session(lambda ip, port: fake)
     s.connect("1.1.1.1")
     assert s.refresh_game().title == "PPSA01234"
+
+
+def test_one_debugger_user_at_a_time(session):
+    from cheatmaker.errors import DebuggerInUse
+
+    with session.claim_debugger("Pro's Watch tab"):
+        assert session.debug_owner == "Pro's Watch tab"
+        with (
+            pytest.raises(DebuggerInUse, match="in use by Pro's Watch tab"),
+            session.claim_debugger("the main window"),
+        ):
+            pass
+    with pytest.raises(RuntimeError), session.claim_debugger("x"):
+        raise RuntimeError
+    assert session.debug_owner is None
+
+
+def test_guided_watch_is_refused_while_pro_watches(session):
+    from cheatmaker.core.locker import find_writers
+    from cheatmaker.errors import DebuggerInUse
+
+    with session.claim_debugger("Pro's Watch tab"), pytest.raises(DebuggerInUse):
+        find_writers(session, HEALTH_ADDR, 4, 1.0)
+    assert session.client.watched == []

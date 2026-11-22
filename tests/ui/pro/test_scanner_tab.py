@@ -187,9 +187,15 @@ def test_remove_and_close_drop_freezes(win, pro):
     assert win.ctl.freezer.keys == set()
 
 
-def test_watch_actions_wait_for_the_watch_tab(pro):
+def test_find_what_writes_opens_the_watch_tab(pro):
+    from cheatmaker.core.pro.watch_session import WatchTarget
+
     lst, _ = _row(pro)
-    assert not lst.writes_btn.isEnabled() and not lst.accesses_btn.isEnabled()
+    assert lst.writes_btn.isEnabled() and lst.accesses_btn.isEnabled()
+    pro.watch.clock = pro.watch.ctl.session.client.debugger.clock
+    lst.accesses_btn.click()
+    assert pro.tabs.currentWidget() is pro.watch
+    assert pro.watch.running_targets == [WatchTarget(HP_ADDR, 4, "access")]
 
 
 def test_pointer_scan_opens_with_the_address(pro, monkeypatch):
