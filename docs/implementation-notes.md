@@ -719,3 +719,26 @@ Built from docs/architecture-pro.md (spec docs/spec-pro.md), implementation step
   UTF-8 BOM. `formats.sniff` decodes a UTF-16 start and looks for `<` / `{` (a UTF-16
   `.json` is again refused as "not valid JSON"). Also: entry and cave offsets must be
   below 2^48, and variable names can't be x86 registers or NASM keywords.
+
+## Cheat Maker Pro, R1 steps 6-10 (2026-11-22)
+
+- **Step 6 (assembler).** `core/pro/asm.py`. Interface (local choice, same content as the
+  doc sketch): `Assembler.assemble(source, ctx: CaveContext, variables) -> AsmResult`,
+  where `CaveContext(org, hook, original: bytes, symbols)` carries the cave address, the
+  hook, the bytes the jump covers and extra `equ` names; `return` is derived. The
+  `original` macro is iced NASM text of those bytes. NASM can't make a bare number
+  RIP-relative (`[rel 0x400116]` assembles as an absolute address), so the shim writes
+  `[rel $$+(N-org)]`, which NASM does encode RIP-relative; the same rule turns a user's
+  `[0x...]` (Reaper/ReaperPy meaning) RIP-relative, and iced text for a true absolute
+  operand is written `[abs N]`. `%line 0+1 user` makes NASM report the user's own line
+  numbers (no header subtraction). Variables are `db` bytes of `Variable.encoded()`
+  after `align 4` (exact for every type). Labels and variable addresses come from
+  `[map symbols]`. NASM runs with cwd = a fresh temp folder (relative file names, so no
+  quoting of paths), `timeout=2` (reported as an error line 0), `CREATE_NO_WINDOW`;
+  a missing exe raises `AssemblerNotFound`. `FakeAssembler` (in `asm.py`, like
+  `console/fake.py`) handles `label:`, `db`, `nop`, `ret`, `int3`, `jmp` (rel32),
+  `original`, and agrees byte for byte with NASM on that subset (tested).
+  **AC-8.1 measured** (NASM 2.16.01 on the Linux build container, 50 runs of a
+  102-line cave with one variable, 816 bytes): min 3.3 ms, median 4.3 ms, max 7.0 ms;
+  an error comes back in 2.7 ms. The 0.5 s budget is >60x away; Windows process start
+  and a first antivirus scan of `nasm.exe` are not measured here (C-P console tests).
