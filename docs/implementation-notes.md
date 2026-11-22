@@ -691,3 +691,16 @@ Built from docs/architecture-pro.md (spec docs/spec-pro.md), implementation step
   spec-restart-combined TC-60 pins as written once, and spec-pro §1 says guided mode
   stays as it is. `badge.runner_cheats` is ready for when it is decided. The full
   export dialog (AC-12.1, "make a cave at its writer") is step 12.
+- **Step 5 (mc4).** `formats/_aes.py` is ReaperPy's `aes_cbc.py` with its MIT notice,
+  English messages, type hints and a strict PKCS#7 unpad; NIST SP 800-38A CBC
+  (128/192/256) and FIPS-197 block vectors pass. `formats/mc4.py` = base64(AES-256-CBC(
+  PKCS#7(`shn.dumps`))) with the public key/IV from ReaperPy `cheatfmt.py`; a file with
+  bad padding is still read when it decrypts to a `<Trainer` (logged). Cheat names are
+  sanitised (`& < > "` -> `+ ( ) '`) in shn and therefore mc4 (decision 6); the game
+  title and credits keep plain XML escaping (the decision names cheat names only).
+  Note: the real GoldHEN fixture `CUSA15436_1.05.shn` writes `&#38;` in a cheat name,
+  a hint for S-P8 that escapes may be fine. `formats.load_path` reads a file by its
+  content when it is clearly XML or JSON under another extension. The ReaperPy-made
+  mc4 fixture is not included (running ReaperPy here was not allowed); a test reads
+  ReaperPy's plaintext layout instead. The save dialog doesn't offer mc4 yet (the
+  CheatRunner folder for mc4 is unknown; export dialog in step 12).

@@ -354,7 +354,7 @@ class CheatFile:
 
     def file_name(self, fmt: str) -> str:
         """``{titleid}_{version}.{ext}`` (AC-6.1, AC-6.2)."""
-        if fmt not in ("json", "shn"):
+        if fmt not in ("json", "shn", "mc4"):
             raise ValueError(f"unknown format {fmt!r}")
         if not self.title_id or not self.version:
             raise ValueError("title ID and version are needed to name the file")

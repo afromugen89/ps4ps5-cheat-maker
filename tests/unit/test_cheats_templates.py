@@ -96,8 +96,9 @@ def test_file_name_ps5_and_ps4():  # AC-6.1
     )
     cf = CheatFile("G", "CUSA05347", "01.00")
     assert cf.file_name("shn") == "CUSA05347_01.00.shn" and cf.is_ps4
+    assert cf.file_name("mc4") == "CUSA05347_01.00.mc4"  # Pro step 5
     with pytest.raises(ValueError):
-        cf.file_name("mc4")
+        cf.file_name("xml")
     with pytest.raises(ValueError):
         CheatFile("G", "CUSA05347", "").file_name("json")
 

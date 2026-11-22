@@ -36,9 +36,11 @@ def test_real_shn_loads_and_roundtrips():
     assert cf.cheats[0].name == "Add Items & Money"
     assert cf.cheats[1].locations[0].on == b"\x90" * 6
     again = shn.loads(shn.dumps(cf))
+    # Written names lose & < > " (architecture-pro decision 6); reading is unchanged.
     assert [(c.name, c.locations) for c in again.cheats] == [
-        (c.name, c.locations) for c in cf.cheats
+        (shn.safe_name(c.name), c.locations) for c in cf.cheats
     ]
+    assert again.cheats[0].name == "Add Items + Money"
 
 
 def _sample():
@@ -146,7 +148,7 @@ def test_missing_file_raises_cheatfileerror(tmp_path):
 
 def test_unknown_format_dumps():
     with pytest.raises(ValueError):
-        formats.dumps(_sample(), "mc4")
+        formats.dumps(_sample(), "xml")  # mc4 is a format since Pro step 5
 
 
 def test_linked_pool_and_places_are_never_written_or_compared():  # spec-linked-values L2

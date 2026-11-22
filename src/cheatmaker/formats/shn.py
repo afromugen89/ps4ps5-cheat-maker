@@ -19,6 +19,15 @@ from cheatmaker.formats._hex import fmt_offset, parse_bytes, parse_offset
 TYPE_ATTR = "CheatMakerValueType"  # which bytes are the editable value (ours only)
 AT_ATTR = "CheatMakerValueAt"
 _DECL = re.compile(r"^\s*<\?xml[^>]*\?>")
+_NAME_SAFE = str.maketrans({"&": "+", "<": "(", ">": ")", '"': "'"})
+"""Cheat names lose the characters XML escapes (architecture-pro decision 6): older
+mc4 readers un-escape blindly and break the XML, and .mc4 must decrypt to exactly this
+.shn (AC-12.2). Console test S-P8 checks whether CheatRunner handles escapes; if it
+does, both formats can go back to plain escaping."""
+
+
+def safe_name(name: str) -> str:
+    return name.translate(_NAME_SAFE)
 
 
 def _dash_hex(b: bytes) -> str:
@@ -48,7 +57,7 @@ def dumps(cf: CheatFile) -> bytes:
             at = _value.at_text(c)
             if at is not None:
                 extra += f" {AT_ATTR}={quoteattr(at)}"
-        lines.append(f"  <Cheat Text={quoteattr(c.name)}{extra}>")
+        lines.append(f"  <Cheat Text={quoteattr(safe_name(c.name))}{extra}>")
         for loc in c.locations:
             lines += [
                 "    <Cheatline>",
