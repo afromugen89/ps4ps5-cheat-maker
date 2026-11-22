@@ -802,3 +802,16 @@ Built from docs/architecture-pro.md (spec docs/spec-pro.md), implementation step
   cheats go into the new notes and are listed "check"), `for_merge` (Pro cheats with a
   new name, fresh ids), `learn_note_signatures` (AOBs learned with the other
   fingerprints), `ui/carry.apply_signatures` and `find_again.adopt_carried`.
+- **Step 10 (import).** `core/pro/importer.py`. `import_cheats(cf, existing)` /
+  `import_path(path)` (format sniffed by `formats.load_path`, so json, shn and mc4)
+  give one Pro cheat per file cheat (origin "import", ids after `existing`), one Bytes
+  entry per line, bytes exactly as in the file. A cheat with any line in section != 0,
+  another module or not a code patch is refused with a message naming the section.
+  `is_cave` uses `updater.is_cave`; `disassembly` shows a cave as NASM lines (unchecked,
+  `db` for bytes that don't decode). `convert` ("Convert to assembly") pairs each cave
+  with its jump line through `asm_text.cave_entries` and replaces both with one Cave
+  entry whose source re-assembles to the same bytes; bytes that don't decode refuse
+  the whole conversion naming their offset and leave the cheat unchanged (AC-14.1);
+  a cave no jump reaches stays Bytes. Note: after conversion the compiled cave line is
+  the same on and off (step 8 rule) where the imported file had zeros as off-bytes.
+  The import dialog itself is step 12.
