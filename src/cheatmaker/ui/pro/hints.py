@@ -83,3 +83,7 @@ AOB_COPIED = "Copied: {aob}"
 CODE_MAKE_NOP = "Make NOP entry"
 CODE_MAKE_CAVE = "Make cave entry"
 MAKE_ENTRY_TIP = "Add it to the Pro cheat picked in the Cheats tab, or make a new cheat."
+
+# -- Memory view (PR-7, read-only) ----------------------------------------------------------------
+MEMORY = "Type an address and press Go. ?? marks memory the game doesn't have. Read-only for now."
+MEMORY_SELECTED = "At {place}:"
