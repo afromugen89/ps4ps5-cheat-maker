@@ -412,3 +412,28 @@ def test_export_is_logged_as_a_pro_action(win, tab, tmp_path, caplog):  # spec-p
     tab.exec_dialog = run
     tab.export_btn.click()
     assert "action=pro_export format=json cheats=3 left_out=1" in caplog.text
+
+
+def test_guided_preview_is_made_once_per_cheat_until_it_changes(win, tab, monkeypatch):
+    """O10: a My cheats tick refreshes the list but doesn't run the assembler again."""
+    from PySide6.QtCore import Qt
+
+    from cheatmaker.ui.pro import cheats_tab
+
+    made: list[str] = []
+    real = cheats_tab.adopt
+    monkeypatch.setattr(
+        cheats_tab, "adopt", lambda c, cid, asm: made.append(c.name) or real(c, cid, asm)
+    )
+    c = _guided(win)
+    tab.select_cheat(c)
+    assert made == ["No damage"]
+    row = win.ctl.cheat_file.cheats.index(c)
+    win.cheats.table.item(row, 0).setCheckState(Qt.CheckState.Checked)
+    assert c.enabled and tab.cheat_list.currentItem().text().startswith("● ")
+    win.ctl.cheats_changed.emit()
+    assert made == ["No damage"] and tab.preview is not None
+    c.locations[0] = Location(LocationKind.CODE_PATCH, c.locations[0].offset, b"\x90" * 6, fg.SUB_W)
+    c.name = "Renamed"
+    win.ctl.cheats_changed.emit()
+    assert made == ["No damage", "Renamed"]

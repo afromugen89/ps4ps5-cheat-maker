@@ -1114,3 +1114,11 @@ Built from docs/architecture-pro.md (spec docs/spec-pro.md), implementation step
 - `docs/user-guide.md` chapter 10 (Pro mode). `docs/console-tests.md`: C-P1, and
   C-P6 to C-P14. C-P2 to C-P5 were added with their steps.
 - NOTICE credits ReaperPy for the debugger behaviour (step 16).
+- O10: the Pro Cheats tab keeps each guided cheat's preview, or the reason it can't
+  be adopted, in `_previews`.
+  - The cache is keyed by the cheat object and everything `adopt` reads: name, hint,
+    freeze, anchor, found again, and every line's kind, offset, on, off, module,
+    section and anchor.
+  - A list refresh, such as a My cheats tick, no longer runs the assembler. A changed
+    cheat gets a new preview.
+  - Entries for cheats no longer listed are dropped on `fill`.
