@@ -742,3 +742,21 @@ Built from docs/architecture-pro.md (spec docs/spec-pro.md), implementation step
   102-line cave with one variable, 816 bytes): min 3.3 ms, median 4.3 ms, max 7.0 ms;
   an error comes back in 2.7 ms. The 0.5 s budget is >60x away; Windows process start
   and a first antivirus scan of `nasm.exe` are not measured here (C-P console tests).
+- **Step 7 (bytes to text).** `core/pro/asm_text.py`. Sources are assembled at module
+  offsets (`org` = cave offset, `hook`/`return` offsets): the caves are RIP-relative,
+  so the bytes don't depend on the module base and the text shows the same
+  `+0x...` offsets as the rest of the app. `to_source` labels branch and RIP-relative
+  targets that are instruction starts (`L1`...), names the hook and `return`, writes
+  `near` on rel32 branches and `[dword reg+d]` when a 1-byte-sized displacement was
+  encoded long (so NASM keeps the guided encoder's form), then checks line by line with
+  marker labels: a line whose bytes differ becomes `db ... ; <text>`. Lines before the
+  first length change that refer to labels are only judged once the addresses settle.
+  On the 119 guided cave variants tested (sampler, player only, capture x filter x keep,
+  effect x type x filter x counter x flags_fix) everything round-trips; the only `db`
+  lines left are register-to-register moves in the other encoding direction
+  (`mov rax, r12` as 49 8B C4). `adopt(cheat, id, assembler)` pairs a `jmp rel32`+NOPs
+  line with the line it jumps to as one cave entry (the cave's off-bytes are not kept;
+  compile decides them), other lines become Bytes/NOP entries; PC-only cheats and
+  lines outside `eboot.bin` section 0 are refused. The guided `value_at` (editable
+  value) is not carried into the Pro cheat (it is an immediate in the code, not a
+  variable); follow-up for step 12.
