@@ -171,10 +171,6 @@ def test_tc04_port_in_use_sends_nothing_and_names_the_port(server):
     assert server.commands == []
 
 
-@pytest.mark.xfail(
-    reason="BUG-02: the firewall message can come up to 2 s after the 10 s deadline",
-    strict=True,
-)
 def test_bug02_firewall_said_within_the_deadline_when_the_ps5_is_silent():
     """AC-1.3: "within 10 s". With no attach reply, the fresh-connection detach waits
     FRESH_DETACH_TIMEOUT (2 s) for its answer before FirewallBlocked is raised."""
@@ -201,7 +197,8 @@ def test_tc06_dialled_back_but_no_attach_reply_isnt_blamed_on_the_firewall(serve
         s.attach()
     assert not isinstance(info.value, FirewallBlocked)
     assert "never answered the attach" in str(info.value)
-    assert s.state == "detached" and server.fresh_detaches == 1
+    # the fresh detach runs on a thread since BUG-02 (the error isn't held for it)
+    assert s.state == "detached" and _wait(lambda: server.fresh_detaches == 1)
 
 
 # == WatchSession (step 17) =====================================================================
@@ -334,10 +331,6 @@ def test_tc21_guided_lock_it_refused_at_once_while_pro_watches(g):
 
 
 # == access sampler (step 18) ===================================================================
-@pytest.mark.xfail(
-    reason="BUG-01: a Pro sample and a guided Player-only collect share one table",
-    strict=True,
-)
 def test_bug01_a_guided_collect_cant_take_the_table_a_sample_is_using(g):
     """While a sample runs on an instruction that hasn't fired yet (a health writer
     waits for a hit), find_table hands the very same table to the guided Player only
@@ -527,9 +520,6 @@ def test_tc54_struct_layout_of_a_watch_body():
         dbg.watch_body(4, 0x1000, 8, "write")
 
 
-@pytest.mark.xfail(
-    reason="BUG-05: the old game's watch list and rows stay after a new game", strict=True
-)
 def test_bug05_a_new_game_during_a_watch_clears_the_old_games_list(watch, pro):
     """A new game while a watch runs: the watch stops; when it has ended, the old game's
     addresses and rows mustn't stay listed for the new game."""

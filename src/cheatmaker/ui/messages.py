@@ -46,6 +46,7 @@ _MESSAGES: list[tuple[type[BaseException], str]] = [
     (e.DebuggerError, "{reason}"),
     (e.FindFailed, "{reason}"),
     (e.BuildFailed, "{reason}"),
+    (e.TableInUse, "{reason}"),
     (e.LockFailed, "Couldn't lock this value ({reason}). It still works for this session."),
     (
         e.ProtocolError,

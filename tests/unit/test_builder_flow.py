@@ -691,6 +691,18 @@ def test_collect_puts_the_sampler_back_when_done():
     assert module(g) == before and notes.current_note() is None
 
 
+def test_collect_is_refused_while_a_pro_sample_holds_the_table():  # BUG-01
+    from cheatmaker.core.session import SAMPLER_TABLE
+    from cheatmaker.errors import TableInUse
+
+    g, _clock, bl = setup(only_me=True)
+    bl.watch()
+    before = module(g)
+    with g.session.claim_table(SAMPLER_TABLE), pytest.raises(TableInUse, match="sampler"):
+        bl.collect()
+    assert module(g) == before and g.session.table_owner is None
+
+
 def test_typed_full_is_what_the_game_stores_so_the_nop_is_offered():
     g, _clock, bl = setup("float", Effect.ALWAYS_FULL, full=99.9)
     assert bl.full == struct.unpack("<f", struct.pack("<f", 99.9))[0]

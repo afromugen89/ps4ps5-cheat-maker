@@ -76,6 +76,11 @@ class LockFailed(CheatMakerError):
     action = "lock"
 
 
+class TableInUse(LockFailed):
+    """The sampler table (``cave.find_table``) is held by another collect or sample
+    (``Session.claim_table``): they would share it and lose each other's objects."""
+
+
 class ProjectFileError(CheatFileError):
     """A ``.cmproj`` (find-it-again data) can't be read."""
 

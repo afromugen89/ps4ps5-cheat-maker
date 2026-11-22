@@ -18,6 +18,7 @@ from cheatmaker.errors import (
     DebuggerInUse,
     GameNotFound,
     ReadFailed,
+    TableInUse,
     UnsupportedServer,
 )
 from cheatmaker.logs import game_context
@@ -34,9 +35,19 @@ TITLE_ID_RE = re.compile(r"^(PPSA|CUSA)\d{5}$", re.IGNORECASE)
 ClientFactory = Callable[[str, int], ConsoleClient]
 ALIVE_WAIT = 0.5
 """Seconds the Pro liveness poll waits for a busy connection before it counts as alive."""
-GUIDED_DEBUGGER = "the main window (Lock it, Make it work or Find the real one)"
+GUIDED_DEBUGGER = (
+    "the main window (Lock it, Make it work, Find the real one, Find it next time or "
+    "Bring them over)"
+)
 """Who holds the debugger while a guided screen watches (Session.claim_debugger)."""
 DEBUGGER_IN_USE = "The debugger is in use by {owner}. Wait until it's done, or stop it there."
+SAMPLER_TABLE = "the sampler (Pro's What does it access?)"
+GUIDED_COLLECT = "the Player only collect (Lock it, Make it work, Find it again or Bring them over)"
+"""Who holds the sampler table (Session.claim_table)."""
+TABLE_IN_USE = (
+    "{owner} is using the game's spare data for its object list. Wait until it's done, "
+    "or stop it there."
+)
 
 
 @dataclass(frozen=True)
@@ -110,6 +121,10 @@ class Session:
         # Pro Watch tab claim it with claim_debugger.
         self.debug_owner: str | None = None
         self._debug_lock = threading.Lock()
+        # One sampler table user at a time (cave.find_table gives everyone the same
+        # bytes): the Pro sampler and the guided Player only collects claim it.
+        self.table_owner: str | None = None
+        self._table_lock = threading.Lock()
         # Module-offset ranges [start, end) that saved find-again notes keep for their
         # routines and slots (even while still zero): new caves and slots avoid them.
         self.reserved_rooms: list[tuple[int, int]] = []
@@ -167,6 +182,25 @@ class Session:
         finally:
             with self._debug_lock:
                 self.debug_owner = None
+
+    def table_in_use(self) -> TableInUse:
+        owner = self.table_owner or "another collect"
+        return TableInUse(TABLE_IN_USE.format(owner=owner[:1].upper() + owner[1:]))
+
+    @contextmanager
+    def claim_table(self, owner: str) -> Iterator[None]:
+        """Hold the sampler table for ``owner`` while the block runs; TableInUse names
+        whoever has it. Always released, however the block ends."""
+        with self._table_lock:
+            if self.table_owner is not None:
+                raise self.table_in_use()
+            self.table_owner = owner
+        log.info("action=table_claim owner=%s", owner)
+        try:
+            yield
+        finally:
+            with self._table_lock:
+                self.table_owner = None
 
     def require_client(self) -> ConsoleClient:
         if self.client is None:

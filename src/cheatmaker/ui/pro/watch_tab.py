@@ -62,6 +62,7 @@ class WatchTab(ProTab):
         self._cancel: threading.Event | None = None
         self._guard = JobGuard(ctl, "watch")  # a disconnect detaches first (B1)
         self._seconds = 0.0
+        self._game_changed = False  # a new game came while watching: clear at the end
 
         self.hint = QLabel(hints.WATCH)
         self.hint.setWordWrap(True)
@@ -213,6 +214,7 @@ class WatchTab(ProTab):
         cancel = threading.Event()
         self._cancel = cancel
         self.running_targets = list(self.targets)
+        self._game_changed = False
         self._seconds = float(settings.pro_watch_seconds)
         self.rows = []
         self._fill_rows()
@@ -255,11 +257,24 @@ class WatchTab(ProTab):
         text = hints.WATCH_ENDED[result.ended].format(hits=result.hits, reason=result.message)
         self.state.setText(text)
         self.msgs.say(text)
+        self._forget_old_game()
         self._update_buttons()
+
+    def _forget_old_game(self) -> None:
+        """A new game came while the watch ran (BUG-05): its addresses and rows belong
+        to the old game, so they go once the watch has ended."""
+        if not self._game_changed:
+            return
+        self._game_changed = False
+        self.targets = []
+        self.rows = []
+        self._fill_targets()
+        self._fill_rows()
 
     def _failed(self, exc: BaseException) -> None:
         self._cancel = None
         self._guard.finish()
+        self._forget_old_game()
         self.state.setText("")
         self.msgs.fail(exc, "pro_watch")
         self._update_buttons()
@@ -330,6 +345,7 @@ class WatchTab(ProTab):
             self.access.stop()
         self.access.update_buttons()
         if self.watching and (new_game or not self.running):  # AC-1.2: the game went away
+            self._game_changed = self._game_changed or new_game
             self.stop()
             self.msgs.say(hints.WATCH_GAME_GONE)
         if new_game and not self.watching:

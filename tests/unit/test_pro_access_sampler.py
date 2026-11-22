@@ -114,6 +114,43 @@ def test_an_instruction_a_cheat_patches_is_refused(g):
         _sample(g, enabled=[lock])
 
 
+def test_a_guided_collect_during_a_sample_is_refused_at_once(g):  # BUG-01
+    from cheatmaker.core.locker import Writer
+    from cheatmaker.core.session import SAMPLER_TABLE
+    from cheatmaker.errors import TableInUse
+
+    other = Writer(fg.READER, fg.VMOVSS_R, "vmovss xmm0, [r12+0x2ac]", 1)
+    refused: list[Exception] = []
+
+    def sleep(_s: float) -> None:
+        if not refused:
+            assert g.session.table_owner == SAMPLER_TABLE
+            n = len(g.fake.writes)
+            with pytest.raises(TableInUse, match="The sampler") as caught:
+                cv.collect_objects(g.session, other, 0.5, sleep=lambda _t: None)
+            assert len(g.fake.writes) == n  # nothing hooked by the guided collect
+            refused.append(caught.value)
+
+    _sample(g, sleep=sleep)
+    assert refused and g.session.table_owner is None
+
+
+def test_a_sample_during_a_guided_collect_is_refused(g):  # BUG-01
+    from cheatmaker.core.session import GUIDED_COLLECT
+    from cheatmaker.errors import TableInUse
+
+    n = len(g.fake.writes)
+    with g.session.claim_table(GUIDED_COLLECT), pytest.raises(TableInUse, match="Player only"):
+        _sample(g)
+    assert len(g.fake.writes) == n
+
+
+def test_the_table_is_released_when_the_sample_fails(g):  # BUG-01
+    with pytest.raises(WriteFailed):
+        sm.sample(g.session, fg.WRITER, _HookReadBackFails(g.session), seconds=0.5)
+    assert g.session.table_owner is None
+
+
 def test_operand_rules():
     op = sm.operand_at(bytes.fromhex("8b4b10"), 0x1000)  # mov ecx, [rbx+0x10]
     assert (op.base_name, op.disp, op.length) == ("rbx", 0x10, 3)

@@ -83,6 +83,8 @@ ALREADY_DEBUG_WAIT = 2.0
 """After an "already debugged" answer: detach, wait this long, attach once more."""
 POLL_S = 0.5  # the back-channel reader checks for the end this often
 ACCEPT_POLL_S = 0.2
+STOP_LOG_INFO = 20
+"""Stops per session logged at INFO (their raw status, C-P3d); later ones at DEBUG."""
 """The accept thread checks this often whether the session is closing (m-D)."""
 FPU_OFFSET = 0xE0
 FPU_SIZE = 832
@@ -197,6 +199,7 @@ class DebugSession:
         self._end = threading.Event()
         self._threads: list[threading.Thread] = []
         self._lost_why = KEEPALIVE_LOST
+        self._stops_seen = 0  # stops this session (the first STOP_LOG_INFO at INFO)
         self.slots: dict[int, tuple[int, int, WatchKind]] = {}
 
     # -- context manager: detach in finally ------------------------------------------
@@ -221,9 +224,12 @@ class DebugSession:
             self._attach_command(deadline)
             self._wait_back(deadline)
         except BaseException:
-            self._close()
+            # the error is decided: a fresh detach mustn't hold it past the deadline
+            # (AC-1.3: the firewall message within 10 s), so it goes on a thread (BUG-02)
+            self._close(fresh_in_background=True)
             raise
         self._stops = queue.Queue()
+        self._stops_seen = 0
         self._lost_why = KEEPALIVE_LOST
         self.state = "running"
         for target in (self._read_back, self._keep_alive):
@@ -256,10 +262,11 @@ class DebugSession:
         listener = self._listener
         assert listener is not None
         self._accepted.clear()
+        peer_ip = _console_ip(self.host)
 
         def accept() -> None:
             try:
-                taken = _accept_until(listener, deadline, self._end)
+                taken = _accept_until(listener, deadline, self._end, peer_ip)
                 if taken is not None:
                     self._take_back(*taken)
             finally:
@@ -421,7 +428,9 @@ class DebugSession:
                 log.warning("action=pro_debug_stop result=bad_packet reason=%s", exc)
             else:
                 # the raw wait status, for console test C-P3d (what NG really sends)
-                log.info(
+                self._stops_seen += 1
+                log.log(
+                    logging.INFO if self._stops_seen <= STOP_LOG_INFO else logging.DEBUG,
                     "action=pro_debug_stop lwpid=%d status=%#x signal=%d dr6=%#x",
                     stop.lwpid,
                     struct.unpack_from("<I", buf, 4)[0],
@@ -509,13 +518,17 @@ class DebugSession:
         finally:
             w.close()
 
-    def _close(self) -> None:
-        """Detach if attached (also after a firewall timeout), then close everything."""
+    def _close(self, *, fresh_in_background: bool = False) -> None:
+        """Detach if attached (also after a firewall timeout), then close everything.
+        ``fresh_in_background``: a detach that needs a fresh connection runs on a daemon
+        thread (a failed attach raises at once; the detach is still always tried)."""
         self._end.set()
         if self._attached or self._maybe_attached:
             if self._w is not None and not self._dead:
                 with contextlib.suppress(CheatMakerError, OSError):
                     self._request(Cmd.DEBUG_DETACH)
+            elif fresh_in_background:
+                threading.Thread(target=self._detach_fresh, daemon=True).start()
             else:
                 self._detach_fresh()
         self._attached = self._maybe_attached = False
@@ -541,23 +554,44 @@ class DebugSession:
         self.state = "detached"
 
 
+def _console_ip(host: str) -> str | None:
+    """The console's IP address, which the dial back must come from. None when the
+    name doesn't resolve (then any caller is taken, as before)."""
+    try:
+        return socket.gethostbyname(host)
+    except OSError as exc:
+        log.warning("action=pro_debug_listen host=%s resolve_failed=%s", host, exc)
+        return None
+
+
 def _accept_until(
-    listener: socket.socket, deadline: float, end: threading.Event
+    listener: socket.socket,
+    deadline: float,
+    end: threading.Event,
+    peer_ip: str | None = None,
 ) -> tuple[socket.socket, tuple] | None:
-    """Accept one connection before ``deadline``; None at the deadline, when ``end`` is
+    """Accept the dial back before ``deadline``; None at the deadline, when ``end`` is
     set or the listener is shut. A short timeout loop, so a closing session never waits
-    for the deadline (a closed listener doesn't wake ``accept`` on every OS)."""
+    for the deadline (a closed listener doesn't wake ``accept`` on every OS). With
+    ``peer_ip``, a connection from anywhere else (another machine on the network) is
+    closed and the wait goes on: only the console's stop packets are trusted."""
     while not end.is_set():
         left = deadline - time.monotonic()
         if left <= 0:
             return None
         try:
             listener.settimeout(min(ACCEPT_POLL_S, left))
-            return listener.accept()
+            conn, peer = listener.accept()
         except TimeoutError:
             continue
         except OSError:  # shut or closed by _close
             return None
+        if peer_ip is not None and peer[0] != peer_ip:
+            log.warning("action=pro_debug_back_channel peer=%s result=not_the_console", peer[0])
+            with contextlib.suppress(OSError):
+                conn.close()
+            continue
+        return conn, peer
     return None
 
 

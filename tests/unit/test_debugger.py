@@ -261,6 +261,31 @@ def test_a_dial_back_after_the_session_closed_is_closed(server):  # m-A
             assert s._back is c
 
 
+def test_only_the_console_may_dial_back():  # QA risk: another machine on port 755
+    with socket.socket() as listener:
+        listener.bind(("0.0.0.0", 0))
+        listener.listen(4)
+        port = listener.getsockname()[1]
+        stranger = socket.socket()
+        stranger.bind(("127.0.0.2", 0))
+        stranger.connect(("127.0.0.1", port))
+        console = socket.create_connection(("127.0.0.1", port))
+        try:
+            got = dbg._accept_until(listener, time.monotonic() + 2, threading.Event(), "127.0.0.1")
+            assert got is not None and got[1][0] == "127.0.0.1"
+            got[0].close()
+            stranger.settimeout(1)
+            assert stranger.recv(1) == b""  # the stranger was closed
+        finally:
+            stranger.close()
+            console.close()
+
+
+def test_console_ip_resolves_or_allows_any():
+    assert dbg._console_ip("127.0.0.1") == "127.0.0.1"
+    assert dbg._console_ip("no-such-host.invalid") is None
+
+
 def test_accept_until_stops_when_the_session_ends():  # m-D
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))
@@ -270,6 +295,26 @@ def test_accept_until_stops_when_the_session_ends():  # m-D
         started = time.monotonic()
         assert dbg._accept_until(listener, time.monotonic() + 5, end) is None
         assert time.monotonic() - started < 1.0
+
+
+def test_a_slow_fresh_detach_doesnt_hold_the_firewall_message(server, monkeypatch):  # BUG-02
+    server.reply_attach = False
+    server.dial_back = False
+    s = session(server, deadline=0.4)
+    real = s._detach_fresh
+    done = threading.Event()
+
+    def slow() -> None:
+        time.sleep(1.5)  # a PS5 slow to answer the fresh connection
+        real()
+        done.set()
+
+    monkeypatch.setattr(s, "_detach_fresh", slow)
+    started = time.monotonic()
+    with pytest.raises(FirewallBlocked):
+        s.attach()
+    assert time.monotonic() - started < s.deadline + 0.75
+    assert done.wait(5) and server.fresh_detaches == 1  # still always tried
 
 
 def test_attach_deadline_covers_reply_and_dial_back(server):
@@ -335,6 +380,20 @@ def test_a_stop_is_decoded_and_resume_continues(server, caplog):
         assert s.state == "running"
         assert server.commands[-1] == (Cmd.DEBUG_CONTINUE, struct.pack("<I", 0))
         assert s.next_stop(0.05) is None
+
+
+def test_only_the_first_stops_are_logged_at_info(server, caplog, monkeypatch):  # nit
+    import logging
+
+    monkeypatch.setattr(dbg, "STOP_LOG_INFO", 2)
+    caplog.set_level(logging.DEBUG, logger="cheatmaker.console.debugger")
+    with session(server) as s:
+        for k in range(3):
+            server.send_stop(stop_packet(0x400100 + k))
+            assert s.next_stop(2.0) is not None
+            s.resume()
+    levels = [r.levelno for r in caplog.records if "action=pro_debug_stop" in r.getMessage()]
+    assert levels == [logging.INFO, logging.INFO, logging.DEBUG]
 
 
 def test_dr6_names_the_lowest_slot_or_none():

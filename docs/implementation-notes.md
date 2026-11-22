@@ -1005,12 +1005,14 @@ Built from docs/architecture-pro.md (spec docs/spec-pro.md), implementation step
   detached.
   - The 755 listener is bound before `DEBUG_ATTACH`. A failed bind gives `PortInUse`
     naming the port.
-  - If the PS5 doesn't dial back within `BACK_CHANNEL_WAIT` (5 s), the session
-    detaches and raises `FirewallBlocked` naming the port (AC-1.3).
+  - The attach reply and the PS5's dial-back share one deadline, `ATTACH_DEADLINE`
+    (10 s). If either misses it, the session detaches and raises `FirewallBlocked`
+    naming the port (AC-1.3). This was 5 s for the dial-back alone until the review
+    fixes below.
   - On `ALREADY_DEBUG` it detaches, waits 2 s and retries once.
   - Keep-alive is `VERSION` every 2 s, only while running and idle (never while a
-    thread is stopped or a command holds the socket). Two misses make the session
-    lost.
+    thread is stopped or a command holds the socket). One miss makes the session
+    lost (the review fixes below changed this from two).
   - Stop packets give a `StopEvent`: lwpid, thread name, registers, savefpu, DR6 and
     signal. DR6 bits 0-3 give the slot. Signal 9 or the back channel closing raises
     `DebuggerLost`.
@@ -1229,3 +1231,34 @@ Built from docs/architecture-pro.md (spec docs/spec-pro.md), implementation step
   `SampleResult.site_changed` is set. The panel then says once, before the result
   line, that the instruction was changed by another cheat and the sampler's jump may
   remain until the game restarts.
+
+### QA fixes (2026-11-22, qa/reports/2026-11-22-pro-steps-16-19.md)
+
+- **BUG-01, one sampler table.** `cave.find_table` always gives the same bytes at the
+  end of the game's data. The Pro sampler and the guided Player only collect (Lock it,
+  Make it work, Find it again, Bring them over) could therefore share it and wipe each
+  other's objects.
+  - `Session.claim_table(owner)` works like `claim_debugger`: one owner, named, and
+    always released.
+  - `find_table` refuses with `TableInUse` (a `LockFailed`) while someone holds the
+    table. Callers find the table, then claim it for as long as it is hooked: the
+    sampler, `cave.collect_objects` and `Builder` collect.
+  - A guided collect during a sample stops at once: "The sampler (Pro's What does it
+    access?) is using…". A sample during a guided collect is refused the same way.
+    Otherwise guided behaviour is unchanged.
+- **BUG-02.** After a failed attach, the fresh-connection `DEBUG_DETACH` runs on a
+  daemon thread, so `FirewallBlocked` comes within the deadline. The detach is still
+  always tried.
+- **BUG-05.** A new game while a watch runs sets a flag. When that watch ends or
+  fails, the old game's watch list and rows are cleared. The game only going away
+  (the same game) keeps them.
+- **BUG-04 / BUG-06.** These were doc fixes: user guide §10.3, and the step-16 notes
+  above (the 10 s shared deadline, one keep-alive miss). `GUIDED_DEBUGGER` now also
+  names Find it next time and Bring them over.
+- **Dial-back source.** The 755 dial-back is taken only from the console's IP
+  (`_console_ip(host)`). Other peers are closed and the wait goes on. A host name that
+  doesn't resolve accepts any peer, as before.
+- `action=pro_debug_stop` is logged at INFO for the first `STOP_LOG_INFO` (20) stops
+  of a session, and at DEBUG after that.
+- Console test C-P3a2: a second watch right after the first (Windows TIME_WAIT on
+  port 755).

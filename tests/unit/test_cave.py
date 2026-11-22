@@ -87,10 +87,10 @@ def test_player_only_code_matches_the_known_returnal_cheat():
 def test_collect_compare_and_build_cheat():
     fake, s = game()
     table_seen = {}
+    table = cv.find_table(s)  # where the collect will put it (claimed while it runs)
 
     def fight(_t):  # the "game" runs the sampler: record the three objects
         if not table_seen:
-            table = cv.find_table(s)
             for obj in (PLAYER, ENEMY1, ENEMY2):
                 slot = (obj >> 4) & (cv.TABLE_SLOTS - 1)
                 fake.poke(PID, table + slot * 8, struct.pack("<Q", obj))

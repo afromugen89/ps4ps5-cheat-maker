@@ -829,11 +829,17 @@ The register columns say "(unverified)" until a console test has proven them; ch
 before you rely on them. The debugger needs TCP port **755** open on the PC. If Windows
 Firewall blocks it, Pro says so within 10 seconds: allow Cheat Maker on private networks.
 Only one part of the app can use the debugger at a time. While a Pro watch runs, Lock it,
-Make it work and Find the real one wait (and the other way round).
+Make it work, Find the real one, Find it next time and Bring them over don't wait: they
+stop at once with "The debugger is in use by Pro's Watch tab". Stop the watch, then try
+again. It works the other way round too: a Pro watch can't start while one of them is
+watching.
 
 **What does it access?** (under the Watch list, or from Code) hooks an instruction for 20
 seconds without stopping the game. It lists every address it read or wrote, the object
-(the register it uses) and how often it was seen. The hook comes out at the end. If the
+(the register it uses) and how often it was seen. The hook comes out at the end. While it
+runs, the Player only collect (Lock it, Make it work, Find it again, Bring them over) can't
+start: it says the sampler is using the space it needs. Wait for the sample to end, or
+stop it. If the
 game has no spare room for the sampler, Pro says so. With `"trace_exec_breakpoint": true`
 in settings.json (the same opt-in as Find the real one), it offers to watch the instruction
 instead, which pauses the game each time the instruction runs.

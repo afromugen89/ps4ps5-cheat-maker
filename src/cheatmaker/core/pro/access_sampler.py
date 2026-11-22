@@ -34,8 +34,8 @@ from cheatmaker.core.locker import MAX_INSN, touches_memory
 from cheatmaker.core.pro import sites
 from cheatmaker.core.pro.asm import insn_text
 from cheatmaker.core.pro.compile import DISABLE_WAIT, ProWriter
-from cheatmaker.core.session import Session
-from cheatmaker.errors import LockFailed
+from cheatmaker.core.session import SAMPLER_TABLE, Session
+from cheatmaker.errors import LockFailed, TableInUse
 
 log = logging.getLogger(__name__)
 
@@ -179,6 +179,8 @@ def sample(
     try:
         cave = cv.find_cave(session, cv.CAVE_ROOM, extra_reserved=reserved)
         table = cv.find_table(session)
+    except TableInUse:  # a guided collect has it: not "no room"
+        raise
     except LockFailed as exc:
         log.info("action=pro_sample site=%#x result=no_room reason=%s", site, exc)
         raise NoRoomForSampler(NO_ROOM.format(reason=exc)) from exc
@@ -186,30 +188,31 @@ def sample(
     counts: Counter[int] = Counter()
     polls, cancelled = 0, False
     hook = cv.jmp_patch(site, cave, len(orig))
-    writer.write_checked(cave, code, "sampler:cave")
-    try:
-        writer.write_checked(site, hook, "sampler:hook")  # inside: a bad read-back unhooks
-        log.info("action=pro_sample site=%#x cave=%#x table=%#x", site, cave, table)
-        waited = 0.0
-        while waited < seconds:
-            if cancel is not None and cancel.is_set():
-                cancelled = True
-                break
-            sleep(POLL_S)
-            waited += POLL_S
+    with session.claim_table(SAMPLER_TABLE):  # no guided collect meanwhile (BUG-01)
+        writer.write_checked(cave, code, "sampler:cave")
+        try:
+            writer.write_checked(site, hook, "sampler:hook")  # inside: a bad read-back unhooks
+            log.info("action=pro_sample site=%#x cave=%#x table=%#x", site, cave, table)
+            waited = 0.0
+            while waited < seconds:
+                if cancel is not None and cancel.is_set():
+                    cancelled = True
+                    break
+                sleep(POLL_S)
+                waited += POLL_S
+                counts.update(_table_values(read(table, cv.TABLE_SIZE)))
+                client.write(game.pid, table, bytes(cv.TABLE_SIZE))
+                polls += 1
+                if on_update is not None:
+                    on_update(rows_from(counts, operand), polls)
+        finally:
+            unhooked = _unhook(session, writer, site, hook, orig)
+            if unhooked:
+                sleep(DISABLE_WAIT)  # threads finish their last pass through the cave
             counts.update(_table_values(read(table, cv.TABLE_SIZE)))
             client.write(game.pid, table, bytes(cv.TABLE_SIZE))
-            polls += 1
-            if on_update is not None:
-                on_update(rows_from(counts, operand), polls)
-    finally:
-        unhooked = _unhook(session, writer, site, hook, orig)
-        if unhooked:
-            sleep(DISABLE_WAIT)  # threads finish their last pass through the cave
-        counts.update(_table_values(read(table, cv.TABLE_SIZE)))
-        client.write(game.pid, table, bytes(cv.TABLE_SIZE))
-        if unhooked:  # only once nothing can jump into it any more
-            writer.write(cave, bytes(len(code)), "sampler:cave_clear")
+            if unhooked:  # only once nothing can jump into it any more
+                writer.write(cave, bytes(len(code)), "sampler:cave_clear")
     rows = rows_from(counts, operand)
     log.info("action=pro_sample site=%#x polls=%d addresses=%d", site, polls, len(rows))
     return SampleResult(operand, rows, polls, cancelled, site_changed=not unhooked)

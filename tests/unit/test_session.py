@@ -177,6 +177,23 @@ def test_one_debugger_user_at_a_time(session):
     assert session.debug_owner is None
 
 
+def test_one_sampler_table_user_at_a_time(session):  # BUG-01
+    from cheatmaker.core.session import GUIDED_COLLECT, SAMPLER_TABLE
+    from cheatmaker.errors import LockFailed, TableInUse
+
+    with session.claim_table(SAMPLER_TABLE):
+        assert session.table_owner == SAMPLER_TABLE
+        with (
+            pytest.raises(TableInUse, match=r"^The sampler \(Pro's What does it access\?\) is"),
+            session.claim_table(GUIDED_COLLECT),
+        ):
+            pass
+        assert issubclass(TableInUse, LockFailed)  # guided screens already handle it
+    with pytest.raises(RuntimeError), session.claim_table("x"):
+        raise RuntimeError
+    assert session.table_owner is None
+
+
 def test_guided_watch_is_refused_while_pro_watches(session):
     from cheatmaker.core.locker import find_writers
     from cheatmaker.errors import DebuggerInUse

@@ -68,6 +68,32 @@ def test_the_main_link_dropping_mid_watch_reaches_the_controller(watch, game, wi
     assert not watch.watching and game.fake.debugger.state == "detached"
 
 
+def _as_if_watching(tab) -> None:
+    import threading
+
+    tab.targets = [ws.WatchTarget(HP_ADDR, 4, "write")]
+    tab._fill_targets()
+    tab._cancel = threading.Event()
+    tab.running_targets = list(tab.targets)
+
+
+def test_a_new_game_then_a_failed_watch_clears_the_old_list(watch):  # BUG-05
+    from cheatmaker.errors import DebuggerLost
+
+    _as_if_watching(watch)
+    watch.game_state_changed(True)
+    watch._failed(DebuggerLost("gone"))
+    assert watch.targets == [] and watch.target_table.rowCount() == 0
+
+
+def test_the_game_going_away_keeps_the_list(watch):  # BUG-05: only a new game clears
+    _as_if_watching(watch)
+    watch.alive = False  # the game stopped answering (same game)
+    watch.game_state_changed(False)
+    watch._ended(ws.WatchResult([], 0, ws.STOPPED, 1.0))
+    assert len(watch.targets) == 1 and watch.target_table.rowCount() == 1
+
+
 def test_registers_marked_unverified(watch):  # AC-3.3
     assert not ws.REGISTERS_VERIFIED
     header = watch.table.horizontalHeaderItem(COL_FIRST).text()
