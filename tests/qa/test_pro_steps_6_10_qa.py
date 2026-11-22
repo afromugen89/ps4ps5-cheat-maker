@@ -640,3 +640,89 @@ def test_rt_bring_over_keeps_this_versions_own_pro_cheat(pwin):  # TC-32b
     assert [e.offset for e in saved["p2"].entries] == [e.offset for e in moved.entries]
     rows = [(c.pro.id, c.name) for c in cheats if c.pro is not None]
     assert sorted(rows) == [("p1", "Own"), ("p2", "Health")]
+
+
+# == Re-test of 5dccb93 (BUG-10..12) ===================================================
+@pytest.mark.needs_nasm
+@pytest.mark.parametrize(
+    "src",
+    [
+        "%rep 2\nmov eax, [0x2010+rcx*4]\n%endrep",
+        "times 2 mov eax, [0x2010+rcx*4]",
+        "times 1 mov eax, [0x2010+rcx*4] ; db",
+        "mov eax, [0x2010+rcx*4] ; [abs 0x2010]",
+    ],
+)
+def test_rt2_absolute_operand_check_has_no_easy_bypass(nasm, src):  # TC-03e
+    assert _refused(nasm.assemble(src, CTX))
+
+
+@pytest.mark.needs_nasm
+@pytest.mark.parametrize(
+    "src", ["%  line 0+1 x\nnop", "%define LL %%line\nnop"], ids=["spaced", "in-a-define"]
+)
+def test_rt2_line_directive_is_refused(nasm, src):  # TC-03f
+    result = nasm.assemble(src, CTX)
+    assert not result.ok and "%line" in result.error[1]
+
+
+@pytest.mark.needs_nasm
+@pytest.mark.parametrize(
+    "build",
+    [
+        lambda f: f'%macro M 1\n%1bin "{f}"\n%endmacro\nM inc',
+        lambda f: f'%macro M 1\n%{{1}}bin "{f}"\n%endmacro\nM inc',
+        lambda f: f'%macro M 1\n%1 "{f}"\n%endmacro\nM %include',
+    ],
+    ids=["param-paste", "brace-paste", "param-directive"],
+)
+def test_rt2_file_reads_built_by_macros_are_refused(nasm, tmp_path, build):  # TC-05e
+    secret = tmp_path / "secret.txt"
+    secret.write_text("password", encoding="utf-8")
+    result = nasm.assemble(build(secret.as_posix()), CTX)
+    assert not result.ok and b"password" not in result.code
+
+
+@pytest.mark.needs_nasm
+@pytest.mark.parametrize(
+    "src",
+    ['db "%[x] %line incbin"', "nop ; %[x] incbin %line", "original\njmp return"],
+)
+def test_rt2_no_false_refusals(nasm, src):  # TC-05f
+    assert nasm.assemble(src, CTX).ok
+
+
+def test_rt2_layout_is_recorded_saved_and_used(s):  # TC-26d
+    pc = built_cheat(s)
+    entry = pc.entries[0]
+    assert entry.layout == (("mult", "float", len(entry.cave_bytes) - 4),)
+    assert ProEntry.from_json(entry.to_json()).layout == entry.layout
+    pc.variables[0] = Variable("mult", ValueType.INT32, 2)  # retyped, not built
+    with pytest.raises(pc_.LockFailed, match="build the cave first"):
+        pc_.set_variable(pc, "mult", 5)
+    cheat = pc_.compile_cheat(pc)
+    assert cheat.value_type is ValueType.FLOAT, "the value is read as the cave holds it"
+    pc_.build(s, pc, entry, FakeAssembler())
+    assert pc_.set_variable(pc, "mult", 5) == pc_.SAVED
+    assert entry.cave_bytes[-4:] == struct.pack("<i", 5)
+
+
+def test_rt2_bring_over_records_the_new_layout():  # TC-41b
+    pc = carry_cheat()
+    rp.learn([pc], _image())
+    (new,), _report = rp.bring_over([pc], _image(SHIFT), FakeAssembler())
+    home = new.entries[0]
+    assert home.layout == (("mult", "float", len(home.cave_bytes) - 4),)
+
+
+@pytest.mark.xfail(
+    reason="BUG-13: a saved layout whose variable runs past the cave's end is accepted, "
+    "and set_variable then makes the cave longer",
+    strict=True,
+)
+def test_bug13_layout_must_fit_inside_the_cave(s):  # TC-26e
+    entry = built_cheat(s).entries[0]
+    d = entry.to_json()
+    d["layout"] = [["mult", "double", len(entry.cave_bytes) - 1]]
+    with pytest.raises(ValueError):
+        ProEntry.from_json(d)
