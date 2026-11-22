@@ -658,8 +658,9 @@ Built from docs/architecture-pro.md (spec docs/spec-pro.md), implementation step
 
 - **Step 1 (tooling).** `tools/fetch_nasm.py` pins NASM 3.02 win64 by URL and SHA-256.
   The hash could not be computed in the build container (nasm.us blocked), so
-  `NASM_ZIP_SHA256` is None with a TODO and the script refuses to run; CI runs it with
-  `continue-on-error` until the hash is pinned. `paths.nasm_exe(configured)` takes the
+  `NASM_ZIP_SHA256` was pinned on 2026-11-22 (trust-on-first-use: NASM publishes no
+  checksums; taken from the nasm.us HTTPS download on Kein's PC). CI fetches it without
+  `continue-on-error` and the Windows build job now always runs. `paths.nasm_exe(configured)` takes the
   `nasm_path` setting as an argument (paths can't import settings). `needs_nasm` tests
   skip when no assembler is found.
 - **Step 2 (scanner model).** `ValueType.UINT8..UINT64` are appended after the old six so

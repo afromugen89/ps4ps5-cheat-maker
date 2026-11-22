@@ -14,11 +14,8 @@ jobs:
       - run: ruff check src tests tools
       - run: ruff format --check src tests tools
       # Real-assembler tests (marker needs_nasm) skip when NASM is missing.
-      # TODO(pro step 1): drop continue-on-error once NASM_ZIP_SHA256 is pinned in
-      # tools/fetch_nasm.py; until then the script refuses to run.
       - name: Fetch NASM (pinned, SHA-256 checked)
         run: python tools/fetch_nasm.py
-        continue-on-error: true
       - run: pytest -q
   build:
     # The Windows build with NASM and the notices (cheatmaker.spec), smoke-tested with
@@ -31,17 +28,11 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -e ".[dev]"
-      # TODO(pro step 1): this job is skipped until NASM_ZIP_SHA256 is pinned (the
-      # script refuses an unverified zip, and the spec refuses to build without NASM).
       - name: Fetch NASM (pinned, SHA-256 checked)
-        id: nasm
         run: python tools/fetch_nasm.py
-        continue-on-error: true
       - name: Build
-        if: steps.nasm.outcome == 'success'
         run: pyinstaller --noconfirm cheatmaker.spec
       - name: Smoke test the build
-        if: steps.nasm.outcome == 'success'
         shell: pwsh
         run: |
           $p = Start-Process dist\CheatMaker\CheatMaker.exe -ArgumentList '--self-check' -Wait -PassThru
