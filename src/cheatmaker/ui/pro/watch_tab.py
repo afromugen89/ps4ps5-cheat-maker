@@ -29,14 +29,14 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-from cheatmaker.console.client import DEBUG_SLOTS, open_debugger
+from cheatmaker.console.client import open_debugger
 from cheatmaker.core.pro import watch_session as ws
 from cheatmaker.core.pro.addresses import parse_place, place_text
 from cheatmaker.ui.controller import Controller
 from cheatmaker.ui.pro import hints
 from cheatmaker.ui.pro.access_panel import AccessPanel
 from cheatmaker.ui.pro.cave_editor import mono
-from cheatmaker.ui.pro.tab import ProMessages, ProTab
+from cheatmaker.ui.pro.tab import JobGuard, ProMessages, ProTab
 from cheatmaker.ui.tasks import TaskRunner
 
 T_SLOT, T_ADDR, T_SIZE, T_KIND = range(4)
@@ -60,6 +60,7 @@ class WatchTab(ProTab):
         self.make_entry: Callable[[str, int], None] = lambda kind, offset: None  # window
         self.show_code: Callable[[int], None] = lambda addr: None  # set by the window
         self._cancel: threading.Event | None = None
+        self._guard = JobGuard(ctl, "watch")  # a disconnect detaches first (B1)
         self._seconds = 0.0
 
         self.hint = QLabel(hints.WATCH)
@@ -147,7 +148,7 @@ class WatchTab(ProTab):
         """Add one watch (one per address and kind). False when all slots are taken."""
         if target in self.targets:
             return True
-        if len(self.targets) >= DEBUG_SLOTS:
+        if len(self.targets) >= ws.MAX_WATCH_SLOTS:
             self.msgs.say(hints.WATCH_FULL)
             return False
         self.targets.append(target)
@@ -176,7 +177,7 @@ class WatchTab(ProTab):
         if self.watching:
             self.msgs.say(hints.WATCH_BUSY)
             return
-        self.targets = list(targets[:DEBUG_SLOTS])
+        self.targets = list(targets[: ws.MAX_WATCH_SLOTS])
         self._fill_targets()
         self.start()
 
@@ -231,7 +232,7 @@ class WatchTab(ProTab):
                 return watch.run(cancel)
 
         self._update_buttons()
-        self.tasks.run(work, self._ended, self._failed)
+        self.tasks.run(self._guard.start(cancel, work), self._ended, self._failed)
 
     def stop(self) -> None:
         if self._cancel is not None:
@@ -248,6 +249,7 @@ class WatchTab(ProTab):
 
     def _ended(self, result: ws.WatchResult) -> None:
         self._cancel = None
+        self._guard.finish()
         self.rows = result.rows
         self._fill_rows()
         text = hints.WATCH_ENDED[result.ended].format(hits=result.hits, reason=result.message)
@@ -257,6 +259,7 @@ class WatchTab(ProTab):
 
     def _failed(self, exc: BaseException) -> None:
         self._cancel = None
+        self._guard.finish()
         self.state.setText("")
         self.msgs.fail(exc, "pro_watch")
         self._update_buttons()
@@ -312,7 +315,7 @@ class WatchTab(ProTab):
 
     def _update_buttons(self) -> None:
         idle = not self.watching
-        self.add_btn.setEnabled(idle and len(self.targets) < DEBUG_SLOTS)
+        self.add_btn.setEnabled(idle and len(self.targets) < ws.MAX_WATCH_SLOTS)
         self.remove_btn.setEnabled(idle and bool(self.target_table.selectionModel().selectedRows()))
         self.start_btn.setEnabled(idle and self.running and bool(self.targets))
         self.stop_btn.setEnabled(not idle)

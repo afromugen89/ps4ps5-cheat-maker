@@ -834,7 +834,9 @@ Make it work and Find the real one wait (and the other way round).
 **What does it access?** (under the Watch list, or from Code) hooks an instruction for 20
 seconds without stopping the game. It lists every address it read or wrote, the object
 (the register it uses) and how often it was seen. The hook comes out at the end. If the
-game has no spare room for the sampler, Pro offers to watch the instruction instead.
+game has no spare room for the sampler, Pro says so. With `"trace_exec_breakpoint": true`
+in settings.json (the same opt-in as Find the real one), it offers to watch the instruction
+instead, which pauses the game each time the instruction runs.
 
 ### 10.4 Cheats: entries, caves and variables
 

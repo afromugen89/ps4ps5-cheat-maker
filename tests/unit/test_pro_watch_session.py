@@ -10,7 +10,6 @@ import pytest
 from cheatmaker.console.client import WatchHit
 from cheatmaker.console.fake import PROT_R, PROT_X, FakeConsole, FakeStop
 from cheatmaker.core.pro import watch_session as ws
-from cheatmaker.errors import FirewallBlocked
 
 PID = 0x50
 CODE = 0x400000
@@ -59,7 +58,7 @@ def test_time_limit_ends_clears_and_detaches(fake):  # AC-3.2
 
 
 def test_hit_limit_ends_the_session(fake):
-    fake.debugger.flood(600, 0, _hit(WRITER + 3))
+    fake.debugger.stops = [FakeStop(0, _hit(WRITER + 3, rax=k)) for k in range(600)]
     result = _session(fake, max_hits=500).run(threading.Event())
     assert result.ended == ws.HITS and result.hits == 500 and result.rows[0].count == 500
     assert fake.debugger.calls.count(("resume",)) == 500
@@ -120,11 +119,79 @@ def test_live_updates_and_a_final_one(fake):
     assert seen[-1] == (1, 5) and len(seen) >= 2
 
 
-def test_attach_failure_is_raised_and_nothing_is_left_attached(fake):  # AC-1.3
+def test_attach_failure_ends_failed_and_nothing_is_left_attached(fake):  # AC-1.3, m2
     fake.debugger.back_channel = False
-    with pytest.raises(FirewallBlocked):
-        _session(fake).run(threading.Event())
-    assert fake.debugger.state == "detached"
+    result = _session(fake).run(threading.Event())
+    assert result.ended == ws.FAILED and "port 755" in result.message
+    assert result.rows == [] and fake.debugger.state == "detached"
+
+
+def test_an_error_mid_watch_keeps_the_rows(fake, monkeypatch):  # m2
+    from cheatmaker.errors import DebuggerError
+
+    d = fake.debugger
+    d.stops = [FakeStop(0, _hit(WRITER + 3, rax=k)) for k in range(3)]
+    real = d.resume
+    calls = []
+
+    def resume():
+        calls.append(1)
+        if len(calls) == 3:
+            raise DebuggerError("continue: the PS5 answered ERROR")
+        real()
+
+    monkeypatch.setattr(d, "resume", resume)
+    result = _session(fake).run(threading.Event())
+    assert result.ended == ws.FAILED and "ERROR" in result.message
+    assert result.rows[0].count == 2 and d.state == "detached"
+
+
+def test_busy_connection_shows_unknown_and_asks_again(fake):  # m2
+    from cheatmaker.errors import ConsoleBusy
+
+    busy = [True]
+
+    def read(a, n):
+        if busy[0]:
+            busy[0] = False
+            raise ConsoleBusy("busy")
+        return fake.read(PID, a, n)
+
+    dbg = fake.open_debugger(PID)
+    dbg.stops = [FakeStop(0, _hit(WRITER + 3, rax=k)) for k in range(2)]
+    s = ws.WatchSession(dbg, read, [ws.WatchTarget(VALUE, 4, "write")], clock=dbg.clock)
+    rows = s.run(threading.Event()).rows
+    assert {(r.address, r.text) for r in rows} == {
+        (WRITER + 3, ws.UNKNOWN_TEXT),
+        (WRITER, "mov [rbx+8], eax"),
+    }
+
+
+def test_the_same_stop_again_and_again_ends_the_watch(fake):  # M4
+    fake.debugger.flood(40, 0, _hit(READER))
+    target = [ws.WatchTarget(READER, 1, "execute")]
+    result = _session(fake, target).run(threading.Event())
+    assert result.ended == ws.REPEATS and result.hits == ws.REPEAT_HITS
+    assert "16 times in a row" in result.message
+
+
+def test_several_dr6_bits_go_to_the_watch_the_operand_points_at(fake):  # m3
+    targets = [ws.WatchTarget(VALUE + 0x100, 4, "write"), ws.WatchTarget(VALUE, 4, "write")]
+    d = fake.debugger
+    d.stops = [FakeStop(0, _hit(WRITER + 3), dr6=0b11)]  # [rbx+8] with rbx = VALUE-8
+    d.stops.append(FakeStop(0, WatchHit(WRITER + 3, {"rbx": 0x10}), dr6=0b11))
+    rows = _session(fake, targets).run(threading.Event()).rows
+    assert sorted((r.slot is None, r.slot) for r in rows) == [(False, 1), (True, None)]
+
+
+def test_a_misaligned_address_is_refused():  # M6
+    with pytest.raises(ValueError, match=r"divisible by its size.*0x20000040"):
+        ws.WatchTarget(VALUE - 6, 4, "write")
+    assert ws.WatchTarget(VALUE + 1, 1, "write").addr == VALUE + 1
+
+
+def test_max_watch_slots_matches_the_hardware():  # m4
+    assert ws.MAX_WATCH_SLOTS == 4
 
 
 def test_targets_are_checked():
@@ -132,7 +199,7 @@ def test_targets_are_checked():
         ws.WatchTarget(VALUE, 3, "write")
     with pytest.raises(ValueError):
         ws.WatchTarget(VALUE, 4, "execute")
-    with pytest.raises(ValueError, match="1 to 4"):
+    with pytest.raises(ValueError, match=f"1 to {ws.MAX_WATCH_SLOTS}"):
         ws.WatchSession(None, None, [ws.WatchTarget(VALUE, 4, "write")] * 5)  # type: ignore[arg-type]
 
 

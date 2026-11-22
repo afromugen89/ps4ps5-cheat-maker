@@ -114,24 +114,26 @@ class ExportDialog(QDialog):
         self.save_btn.setEnabled(n > 0)
         self._update_make_cave()
 
-    def _target(self) -> WatchTarget | None:
+    def _target(self) -> tuple[WatchTarget | None, str]:
+        """The watch for the picked PC-only cheat, or why there is none."""
         k, game = self.left_out.currentRow(), self.ctl.session.game
         if game is None or not 0 <= k < len(self.left):
-            return None
-        return value_target(self.left[k][0], game.module_base)
+            return None, hints.MAKE_CAVE_TIP
+        try:
+            target = value_target(self.left[k][0], game.module_base)
+        except ValueError as exc:  # an address the PS5 can't watch
+            return None, str(exc)
+        return target, hints.MAKE_CAVE_TIP if target is not None else hints.MAKE_CAVE_CANT
 
     def _update_make_cave(self) -> None:
-        picked = 0 <= self.left_out.currentRow() < len(self.left)
-        target = self._target()
+        target, tip = self._target()
         self.make_cave_btn.setEnabled(target is not None)
-        self.make_cave_btn.setToolTip(
-            hints.MAKE_CAVE_TIP if target is not None or not picked else hints.MAKE_CAVE_CANT
-        )
+        self.make_cave_btn.setToolTip(tip)
 
     def make_cave(self) -> None:
         """AC-12.1: watch what writes the picked cheat's value; the Watch tab then makes
         the cave entry at the writer."""
-        target = self._target()
+        target, _tip = self._target()
         if target is None:
             return
         self.accept()

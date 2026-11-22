@@ -13,7 +13,7 @@ from cheatmaker.core.cheats import Cheat, Location, LocationKind
 from cheatmaker.core.pro import access_sampler as sm
 from cheatmaker.core.pro.compile import ProWriter
 from cheatmaker.core.pro.sites import Overlap
-from cheatmaker.errors import LockFailed
+from cheatmaker.errors import LockFailed, WriteFailed
 from tests import fakegame as fg
 
 
@@ -71,6 +71,38 @@ def test_no_room_is_refused_and_nothing_hooked(g, monkeypatch):  # AC-3.5
     with pytest.raises(sm.NoRoomForSampler, match="No room for the sampler"):
         _sample(g)
     assert len(g.fake.writes) == n
+
+
+class _HookReadBackFails(ProWriter):
+    """The hook lands, but its read-back says otherwise (M5)."""
+
+    def write_checked(self, addr: int, data: bytes, source: str) -> None:
+        if source == "sampler:hook":
+            self.write(addr, data, source)
+            raise WriteFailed(f"{addr:#x} didn't take the new bytes")
+        super().write_checked(addr, data, source)
+
+
+def test_a_failed_hook_read_back_still_unhooks_and_clears_the_cave(g):  # M5
+    cave = cv.find_cave(g.session, cv.CAVE_ROOM)
+    with pytest.raises(WriteFailed):
+        sm.sample(
+            g.session, fg.WRITER, _HookReadBackFails(g.session), seconds=0.5, sleep=g.fight(1)
+        )
+    assert g.fake.peek(fg.PID, fg.WRITER, len(fg.VMOVSS_W)) == fg.VMOVSS_W
+    assert g.fake.peek(fg.PID, cave, cv.CAVE_ROOM) == bytes(cv.CAVE_ROOM)
+
+
+def test_a_site_changed_meanwhile_is_left_alone_and_the_cave_kept(g):  # m7
+    cave = cv.find_cave(g.session, cv.CAVE_ROOM)
+    other = b"\x90" * len(fg.VMOVSS_W)  # e.g. a cheat turned on during the sample
+
+    def sleep(_s: float) -> None:
+        g.fake.poke(fg.PID, fg.WRITER, other)
+
+    _sample(g, sleep=sleep)
+    assert g.fake.peek(fg.PID, fg.WRITER, len(other)) == other
+    assert g.fake.peek(fg.PID, cave, cv.CAVE_ROOM) != bytes(cv.CAVE_ROOM)
 
 
 def test_an_instruction_a_cheat_patches_is_refused(g):

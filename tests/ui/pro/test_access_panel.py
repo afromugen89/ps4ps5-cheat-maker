@@ -46,6 +46,7 @@ def test_no_room_offers_a_watch_instead(panel, game, pro, monkeypatch):  # AC-3.
         raise LockFailed("no spare space at the end of the game's code for the patch")
 
     monkeypatch.setattr(sm.cv, "find_cave", full)
+    pro.watch.ctl.settings.trace_exec_breakpoint = True  # the same opt-in as guided (M4)
     asked: list[str] = []
     panel.ask_watch = lambda reason: asked.append(reason) or True
     regs = {"r12": fg.PLAYER_AT[1]}
@@ -84,3 +85,15 @@ def test_a_running_cheat_at_the_instruction_is_refused(panel, pro, game):
     n = len(game.fake.writes)
     panel.sample_at(fg.WRITER)
     assert "Turn it off first" in pro.status.text() and len(game.fake.writes) == n
+
+
+def test_no_room_without_the_opt_in_just_says_so(panel, game, pro, monkeypatch):  # M4
+    def full(*_a, **_k):
+        raise LockFailed("no spare space at the end of the game's code for the patch")
+
+    monkeypatch.setattr(sm.cv, "find_cave", full)
+    assert not pro.watch.ctl.settings.trace_exec_breakpoint
+    panel.ask_watch = lambda reason: pytest.fail("no execute watch is offered")
+    panel.sample_at(fg.WRITER)
+    assert pro.status.text().startswith("No room for the sampler")
+    assert game.fake.debugger.sessions == 0

@@ -1122,3 +1122,81 @@ Built from docs/architecture-pro.md (spec docs/spec-pro.md), implementation step
   - A list refresh, such as a My cheats tick, no longer runs the assembler. A changed
     cheat gets a new preview.
   - Entries for cheats no longer listed are dropped on `fill`.
+
+## Cheat Maker Pro, R1 steps 16-19: review fixes (2026-11-22)
+
+- **B1, a disconnect during a Pro job.** `ui/pro/tab.py` `JobGuard` follows Find the
+  real one (`trace_dialog`). The access sampler, its execute-watch fallback and the
+  Watch tab start their job through it:
+  - it registers a `Controller.before_disconnect` callback;
+  - Disconnect, Connect again or closing the app sets the job's cancel and waits up
+    to `STOP_WAIT_S` (3 s) for the job to finish, while the link still works. The
+    sampler's hook is out and the debugger detached before the main link closes;
+  - the callback is removed when the job ends.
+- **M1, the attach order.** The 755 accept runs on a thread before `DEBUG_ATTACH` is
+  sent, so a PS5 that dials back before replying works.
+  - The attach reply and the dial-back share one `ATTACH_DEADLINE` (10 s).
+  - A missing reply or no dial-back gives `FirewallBlocked` naming the port.
+    `DEBUG_DETACH` is then still sent: on the session's wire if it is live, else on a
+    fresh connection.
+  - `FakeDebugger` gained `never_reply` and `dial_before_reply`. The test server can
+    dial first or never reply.
+- **M2.** `ps5debug_ng.listen_options` sets `SO_EXCLUSIVEADDRUSE` on Windows and
+  `SO_REUSEADDR` elsewhere. Both the Pro listener and the guided `watch()` listener
+  use it. The guided behaviour is otherwise unchanged.
+- **M3, signals.** SIGTRAP (5) is a hit, and signal 9 means the game closed. Any other
+  signal ends the watch `LOST` with "The game stopped with signal N, not at a watch."
+  and detaches. Signal 0 also counts as a hit: what NG puts in the status field is
+  unverified (S-P1), and 0 is what an empty field gives. `FakeStop.signal` defaults
+  to 5.
+- **M4.**
+  - The execute-watch fallback for "No room for the sampler" is offered only with
+    `trace_exec_breakpoint` on, the same opt-in as guided. Otherwise only the
+    message shows.
+  - `WatchSession` ends `REPEATS` after `REPEAT_HITS` (16) stops in a row with the
+    same lwpid, RIP and registers. This is the rule of the tracer's
+    execute fallback (`tracer._repeats`). The tracer checks a finished batch of hits,
+    so the rule is written again here for a running stream.
+- **M5 / m7, the sampler's end.**
+  - The hook write (with its read-back) is inside the `try`, so a failed read-back
+    still restores the game's bytes.
+  - `_unhook` first reads the site:
+    - the game's bytes: nothing to do;
+    - the hook: restore it;
+    - anything else: something wrote there meanwhile, so it is left alone and logged
+      (`result=site_changed`).
+  - The sampler cave is zeroed only after a successful unhook, so nothing can still
+    jump into it.
+  - There is no extra refusal for a guided cheat turned on over an active sample.
+    That would need a new hook into the guided Lock it path, and the read-check
+    already keeps both sides safe.
+- **M6.** `WatchTarget` refuses an address that isn't a multiple of its size
+  (`MISALIGNED`, which names the aligned address to watch instead).
+  - The address list's Find what writes / accesses shows the message.
+  - The export dialog's "Make a cave at its writer" is disabled with the message as
+    its tooltip.
+  - The narrowed span is named in the message but not offered as a button.
+- **m1.** A failed keep-alive marks the wire dead at once and the session lost (it was
+  two misses). Detach then goes over a fresh connection.
+- **m2.**
+  - `WatchSession.run` turns any `CheatMakerError` into `FAILED` with its message and
+    always returns the rows so far.
+  - A `ConsoleBusy` while naming an instruction shows "?" for that hit and isn't
+    cached.
+- **m3.** When DR6 has several bits set, the slot is the one whose target the
+  instruction's memory operand touches (`operand_touches`). With no single match, the
+  slot is "?".
+- **m4.** `MAX_WATCH_SLOTS = 4` (S-P2 checks that four slots work). The address list
+  and the Watch tab use it.
+- **m5, decision: no gate.** The Watch tab stays live before S-P1 passes. Its
+  register columns are marked "(unverified)" (`REGISTERS_VERIFIED = False`).
+- **m6.** `--self-check`:
+  - sets up logging first;
+  - logs every line (`action=self_check`);
+  - writes `self-check.txt` next to the exe (or the app folder when run from source,
+    or when the exe's folder can't be written);
+  - checks the bundled `nasm/` copy directly, ignoring `nasm_path` and PATH.
+
+  CI prints the report.
+- **m8.** `FakeDebugger.detach` mirrors `DebugSession`: it clears the four slots and
+  sends detach, or sends only a fresh detach when the wire is dead.

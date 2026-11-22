@@ -87,7 +87,7 @@ class FakeStop:
     slot: int
     hit: WatchHit
     dr6: int | None = None
-    signal: int = 0
+    signal: int = 5  # SIGTRAP: a watch fired (any other signal ends the session)
     lwpid: int = 100
     thread: str = "main"
 
@@ -97,8 +97,11 @@ class FakeDebugger:
 
     Scripted stops come in ``stops`` order; a stop is only delivered while its slot is
     set. Every call is recorded in ``calls``. Failure modes: ``port_in_use``,
-    ``back_channel=False`` (the firewall, AC-1.3), ``already_debugged_once``,
-    ``game_exits_after=n`` stops (AC-1.2), ``lost_after=n`` stops (keep-alive misses).
+    ``back_channel=False`` (the firewall, AC-1.3), ``never_reply`` (the attach answer
+    never comes: firewall, detached on a fresh connection), ``dial_before_reply`` (NG
+    dials back before answering: works, as the real session accepts first),
+    ``already_debugged_once``, ``game_exits_after=n`` stops (AC-1.2), ``lost_after=n``
+    stops (a failed keep-alive: the wire is dead, so detach sends nothing on it).
     Waiting moves ``clock`` instead of sleeping: ``gap`` per stop, ``timeout`` when
     none is left."""
 
@@ -116,6 +119,9 @@ class FakeDebugger:
         self.already_debugged_once = False
         self.game_exits_after: int | None = None
         self.lost_after: int | None = None
+        self.never_reply = False
+        self.dial_before_reply = False
+        self.dead = False  # the debugger's own connection failed
         self.served = 0
         self.sessions = 0  # attaches that worked
 
@@ -137,6 +143,12 @@ class FakeDebugger:
             self.already_debugged_once = False
             self.calls += [("attach", self.pid), ("already_debugged",), ("detach",)]
         self.calls.append(("attach", self.pid))
+        self.dead = False
+        if self.never_reply:
+            self.calls.append(("fresh_detach",))
+            raise FirewallBlocked("The PS5 didn't connect back on TCP port 755.")
+        if self.dial_before_reply:
+            self.calls.append(("dialled_first",))
         if not self.back_channel:
             self.calls.append(("detach",))
             raise FirewallBlocked("The PS5 didn't connect back on TCP port 755.")
@@ -168,7 +180,7 @@ class FakeDebugger:
             self.state = "lost"
             raise DebuggerLost("The game closed while the debugger was attached.")
         if self.lost_after is not None and self.served >= self.lost_after:
-            self.state = "lost"
+            self.state, self.dead = "lost", True
             raise DebuggerLost("The debugger's connection stopped answering.")
         k = next((k for k, st in enumerate(self.stops) if st.slot in self.slots), None)
         if k is None:
@@ -177,6 +189,14 @@ class FakeDebugger:
         st = self.stops.pop(k)
         self.served += 1
         self.clock.advance(min(self.gap, timeout))
+        if st.signal not in (5, 0):  # as DebugSession: only SIGTRAP is a hit
+            self.state = "lost"
+            why = (
+                "The game closed while the debugger was attached."
+                if st.signal == 9
+                else f"The game stopped with signal {st.signal}, not at a watch."
+            )
+            raise DebuggerLost(why)
         self.state = "stopped"
         dr6 = 1 << st.slot if st.dr6 is None else st.dr6
         return StopEvent(st.lwpid, st.thread, st.hit, dr6=dr6, signal=st.signal)
@@ -189,9 +209,11 @@ class FakeDebugger:
     def detach(self) -> None:
         if self.state == "detached":
             return
-        if self.state != "lost":
+        if self.dead:  # as DebugSession: nothing on a dead wire, DETACH on a fresh one
+            self.calls.append(("fresh_detach",))
+        else:
             self.calls += [("clear", k) for k in range(DEBUG_SLOTS)]
-        self.calls.append(("detach",))
+            self.calls.append(("detach",))
         self.slots.clear()
         self.state = "detached"
 

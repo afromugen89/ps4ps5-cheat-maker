@@ -43,6 +43,8 @@ WATCH_ENDED = {
     "hits": "Stopped at {hits} hits (the limit).",
     "stopped": "Stopped: {hits} hit(s).",
     "lost": "The watch ended: {reason} The list shows the hits so far.",
+    "failed": "The watch couldn't go on: {reason}",
+    "repeats": "{reason}",
 }
 WATCH_GAME_GONE = "The game isn't running, so the watch ended. Nothing was written."
 WATCH_PICK_ROW = "Pick an instruction in the list first."
@@ -63,7 +65,9 @@ ACCESS_RUNNING = "Sampling: {n} address(es) so far..."
 ACCESS_DONE = "{n} address(es) seen in {polls} look(s)."
 ACCESS_STOPPED = "Stopped: {n} address(es) seen."
 ACCESS_WATCH_TITLE = "No room for the sampler"
-ACCESS_WATCH_ASK = "{reason}\n\nWatch the instruction instead?"
+ACCESS_WATCH_ASK = (
+    "{reason}\n\nWatch the instruction instead? The game pauses briefly each time it runs."
+)
 ACCESS_WATCHED = (
     "{n} address(es) from {hits} pass(es), worked out from the registers (unverified until "
     "console test S-P1)."

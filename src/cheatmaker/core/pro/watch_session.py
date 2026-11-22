@@ -29,14 +29,23 @@ from dataclasses import dataclass, field, replace
 
 import iced_x86 as ix
 
-from cheatmaker.console.client import DEBUG_SLOTS, Debugger, StopEvent, WatchHit, WatchKind
+from cheatmaker.console.client import Debugger, StopEvent, WatchHit, WatchKind
+from cheatmaker.core.cave import Target
 from cheatmaker.core.cheats import Cheat, LocationKind
 from cheatmaker.core.locker import CONTEXT, MAX_INSN, Read, instruction_before, touches_memory
 from cheatmaker.core.pro.asm import insn_text
-from cheatmaker.errors import ConsoleBusy, DebuggerLost, ReadFailed
+from cheatmaker.errors import CheatMakerError, ConsoleBusy, DebuggerLost, ReadFailed
 
 log = logging.getLogger(__name__)
 
+MAX_WATCH_SLOTS = 4
+"""Watches at once: x86 has four debug slots (DR0-DR3). That NG gives us all four, each
+reporting its own hits through DR6, is console spike S-P2 (C-P3d). If it fails, set
+this to 1 and the Watch tab takes one address at a time."""
+REPEAT_HITS = 16
+"""The same thread at the same RIP with the same registers this many times in a row:
+the breakpoint fires again and again without the game moving on (the tracer's
+``EXEC_HITS`` rule; an execute breakpoint without RF, console test C20d)."""
 WATCH_SECONDS = 60
 WATCH_HITS = 500
 REGISTERS_VERIFIED = False
@@ -51,7 +60,22 @@ REG_ORDER = (
     "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15", "rip", "rflags",
 )  # fmt: skip
 
-STOPPED, TIME, HITS, LOST = "stopped", "time", "hits", "lost"
+STOPPED, TIME, HITS, LOST, FAILED, REPEATS = (
+    "stopped",
+    "time",
+    "hits",
+    "lost",
+    "failed",
+    "repeats",
+)
+MISALIGNED = (
+    "The PS5 can only watch a value at an address divisible by its size: {addr:#x} isn't "
+    "a multiple of {size}. Watch {size} byte(s) at {down:#x}, or a smaller size."
+)
+REPEATING = (
+    "The watch fired {n} times in a row at the same place without the game moving on, "
+    "so it was stopped."
+)
 
 
 @dataclass(frozen=True)
@@ -67,6 +91,12 @@ class WatchTarget:
             raise ValueError(f"Unknown watch kind {self.kind!r}.")
         if self.kind == "execute" and self.size != 1:
             raise ValueError("An instruction watch covers 1 byte.")
+        if self.addr % self.size:  # x86 debug registers ignore the low address bits
+            down = self.addr - self.addr % self.size
+            raise ValueError(MISALIGNED.format(addr=self.addr, size=self.size, down=down))
+
+    def covers(self, start: int, size: int) -> bool:
+        return start < self.addr + self.size and self.addr < start + size
 
 
 @dataclass
@@ -83,9 +113,16 @@ class InstructionRow:
 class WatchResult:
     rows: list[InstructionRow]
     hits: int
-    ended: str  # STOPPED, TIME, HITS or LOST
+    ended: str  # STOPPED, TIME, HITS, LOST, FAILED or REPEATS
     seconds: float
-    message: str = ""  # why it was LOST
+    message: str = ""  # why it was LOST, FAILED or REPEATS
+
+
+@dataclass(frozen=True)
+class _Found:
+    address: int  # where the instruction starts (the RIP when it couldn't be found)
+    text: str
+    insn: ix.Instruction | None = None
 
 
 @dataclass
@@ -93,31 +130,55 @@ class _Lookup:
     """Instruction start and text per reported RIP (each read once per session)."""
 
     read: Read
-    found: dict[tuple[int, str], tuple[int, str]] = field(default_factory=dict)
+    found: dict[tuple[int, str], _Found] = field(default_factory=dict)
 
-    def __call__(self, rip: int, kind: WatchKind) -> tuple[int, str]:
+    def __call__(self, rip: int, kind: WatchKind) -> _Found:
         key = (rip, "execute" if kind == "execute" else "data")
         if key not in self.found:
-            self.found[key] = self._find(rip, kind)
+            try:
+                self.found[key] = self._find(rip, kind)
+            except ConsoleBusy:  # the main connection is busy: "?" now, ask next time
+                log.info("action=pro_watch_decode rip=%#x result=busy", rip)
+                return _Found(rip, UNKNOWN_TEXT)
         return self.found[key]
 
-    def _find(self, rip: int, kind: WatchKind) -> tuple[int, str]:
+    def _find(self, rip: int, kind: WatchKind) -> _Found:
         try:
             if kind == "execute":
                 insn = ix.Decoder(64, self.read(rip, MAX_INSN), ip=rip).decode()
                 if insn.code == ix.Code.INVALID:
-                    return rip, UNKNOWN_TEXT
-                return rip, insn_text(insn)
+                    return _Found(rip, UNKNOWN_TEXT)
+                return _Found(rip, insn_text(insn), insn)
             before = instruction_before(self.read(rip - CONTEXT, CONTEXT), rip, touches_memory)
         except ConsoleBusy:
             raise
         except ReadFailed as exc:
             log.info("action=pro_watch_decode rip=%#x reason=%s", rip, exc)
-            return rip, UNKNOWN_TEXT
+            return _Found(rip, UNKNOWN_TEXT)
         if before is None:
-            return rip, UNKNOWN_TEXT
+            return _Found(rip, UNKNOWN_TEXT)
         start, raw, _text = before
-        return start, insn_text(ix.Decoder(64, raw, ip=start).decode())
+        insn = ix.Decoder(64, raw, ip=start).decode()
+        return _Found(start, insn_text(insn), insn)
+
+
+def _reg_value(regs: dict[str, int], reg: int) -> int | None:
+    if reg == ix.Register.NONE:
+        return 0
+    return regs.get(Target(reg, 0).base_name)
+
+
+def operand_touches(insn: ix.Instruction, regs: dict[str, int], target: WatchTarget) -> bool:
+    """Does ``insn``'s memory operand, worked out from ``regs``, overlap ``target``?"""
+    if not any(insn.op_kind(i) == ix.OpKind.MEMORY for i in range(insn.op_count)):
+        return False
+    base = _reg_value(regs, insn.memory_base)
+    index = _reg_value(regs, insn.memory_index)
+    if base is None or index is None or insn.memory_base == ix.Register.RIP:
+        return False
+    ea = (base + index * insn.memory_index_scale + insn.memory_displacement) & (1 << 64) - 1
+    size = max(1, ix.MemorySizeInfo(insn.memory_size).size)
+    return target.covers(ea, size)
 
 
 class WatchSession:
@@ -135,8 +196,8 @@ class WatchSession:
     ) -> None:
         """``on_update``: live rows (throttled), and once at the end. ``on_hit``: every
         stop (the access sampler's fallback counts addresses from the registers)."""
-        if not 1 <= len(targets) <= DEBUG_SLOTS:
-            raise ValueError(f"Watch 1 to {DEBUG_SLOTS} addresses at a time.")
+        if not 1 <= len(targets) <= MAX_WATCH_SLOTS:
+            raise ValueError(f"Watch 1 to {MAX_WATCH_SLOTS} addresses at a time.")
         self.dbg = dbg
         self.targets = list(targets)
         self.seconds, self.max_hits = seconds, max_hits
@@ -145,6 +206,8 @@ class WatchSession:
         self.on_hit = on_hit
         self._lookup = _Lookup(read)
         self._rows: dict[tuple[int, int | None], InstructionRow] = {}
+        self._same: tuple[int, int, tuple] | None = None  # (lwpid, rip, regs) of the last
+        self._same_count = 0
         self.hits = 0
 
     def rows(self) -> list[InstructionRow]:
@@ -166,8 +229,13 @@ class WatchSession:
                 self.max_hits,
             )
             ended = self._loop(cancel, started)
+            if ended == REPEATS:
+                message = REPEATING.format(n=REPEAT_HITS)
         except DebuggerLost as exc:
             ended, message = LOST, str(exc)
+        except CheatMakerError as exc:  # e.g. the firewall: the rows so far still show
+            log.warning("action=pro_watch_end reason=%s: %s", type(exc).__name__, exc)
+            ended, message = FAILED, str(exc)
         finally:
             self.dbg.detach()  # clears every slot first (AC-3.2)
         took = self.clock() - started
@@ -200,22 +268,44 @@ class WatchSession:
                 self._add(stop)
                 if self.on_hit is not None:
                     self.on_hit(stop)
+                if self._repeating(stop):
+                    return REPEATS
             now = self.clock()
             if self.on_update is not None and (stop is None or now - shown >= UPDATE_S):
                 shown = now
                 self.on_update(self.rows(), self.hits, now - started)
 
-    def _slot(self, stop: StopEvent) -> int | None:
-        slot = stop.slot
-        if slot is not None and slot < len(self.targets):
-            return slot
-        return 0 if len(self.targets) == 1 else None
+    def _repeating(self, stop: StopEvent) -> bool:
+        key = (stop.lwpid, stop.hit.rip, tuple(sorted(stop.hit.regs.items())))
+        self._same_count = self._same_count + 1 if key == self._same else 1
+        self._same = key
+        if self._same_count >= REPEAT_HITS:
+            log.warning("action=pro_watch_end reason=repeats rip=%#x", stop.hit.rip)
+            return True
+        return False
+
+    def _slot(self, stop: StopEvent) -> tuple[int | None, _Found]:
+        """Which watch fired, and the instruction. One DR6 bit names it. Several bits:
+        the watch the instruction's operand points at (m3), else none. No bit (DR6
+        UNVERIFIED on NG): the only watch, else none."""
+        fired = [k for k in range(len(self.targets)) if stop.dr6 >> k & 1]
+        kinds = {self.targets[k].kind for k in fired or range(len(self.targets))}
+        kind: WatchKind = "execute" if kinds == {"execute"} else "access"
+        found = self._lookup(stop.hit.rip, kind)
+        if len(fired) == 1:
+            return fired[0], found
+        if not fired:
+            return (0 if len(self.targets) == 1 else None), found
+        if found.insn is not None:
+            hit = [k for k in fired if operand_touches(found.insn, stop.hit.regs, self.targets[k])]
+            if len(hit) == 1:
+                return hit[0], found
+        return None, found
 
     def _add(self, stop: StopEvent) -> None:
         self.hits += 1
-        slot = self._slot(stop)
-        kind = self.targets[slot].kind if slot is not None else "access"
-        address, text = self._lookup(stop.hit.rip, kind)
+        slot, found = self._slot(stop)
+        address, text = found.address, found.text
         row = self._rows.get((address, slot))
         if row is None:
             self._rows[(address, slot)] = InstructionRow(address, text, slot, 1, stop.hit, stop.hit)
@@ -243,7 +333,8 @@ def registers_text(hit: WatchHit) -> str:
 def value_target(cheat: Cheat, module_base: int) -> WatchTarget | None:
     """A write watch on the value a cheat holds ("Make a cave at its writer"): its
     first value line at a known address. None for a code cheat, or a value whose place
-    is found again each run (it isn't known until then)."""
+    is found again each run (it isn't known until then). ValueError (``MISALIGNED``)
+    for a value the PS5 can't watch."""
     for loc in cheat.locations:
         if loc.kind is LocationKind.CODE_PATCH or loc.anchor is not None:
             continue

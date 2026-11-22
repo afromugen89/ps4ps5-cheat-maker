@@ -198,6 +198,14 @@ def test_find_what_writes_opens_the_watch_tab(pro):
     assert pro.watch.running_targets == [WatchTarget(HP_ADDR, 4, "access")]
 
 
+def test_find_what_refuses_a_misaligned_value(pro):  # M6
+    lst, _ = _row(pro, HP_ADDR + 2)
+    lst.writes_btn.click()
+    assert pro.tabs.currentWidget() is not pro.watch and not pro.watch.running_targets
+    assert "divisible by its size" in pro.status.text()
+    assert f"{HP_ADDR:#x}" in pro.status.text()  # the narrowed place it can watch
+
+
 def test_pointer_scan_opens_with_the_address(pro, monkeypatch):
     lst, _ = _row(pro)
     seen = []

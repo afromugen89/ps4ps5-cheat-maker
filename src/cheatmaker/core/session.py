@@ -33,10 +33,10 @@ TITLE_ID_RE = re.compile(r"^(PPSA|CUSA)\d{5}$", re.IGNORECASE)
 
 ClientFactory = Callable[[str, int], ConsoleClient]
 ALIVE_WAIT = 0.5
+"""Seconds the Pro liveness poll waits for a busy connection before it counts as alive."""
 GUIDED_DEBUGGER = "the main window (Lock it, Make it work or Find the real one)"
 """Who holds the debugger while a guided screen watches (Session.claim_debugger)."""
 DEBUGGER_IN_USE = "The debugger is in use by {owner}. Wait until it's done, or stop it there."
-"""Seconds the Pro liveness poll waits for a busy connection before it counts as alive."""
 
 
 @dataclass(frozen=True)

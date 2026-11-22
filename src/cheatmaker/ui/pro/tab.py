@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import logging
+import threading
+from collections.abc import Callable
+from typing import TypeVar
+
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
@@ -16,6 +21,56 @@ from cheatmaker.ui.controller import Controller
 from cheatmaker.ui.messages import LOST, report
 from cheatmaker.ui.pro import hints
 from cheatmaker.ui.tasks import TaskRunner
+
+T = TypeVar("T")
+STOP_WAIT_S = 3.0
+"""A disconnect waits this long for a Pro job to take its hook out or detach."""
+log = logging.getLogger(__name__)
+
+
+class JobGuard:
+    """A Pro job that puts something in the game (the sampler's hook, an attached
+    debugger). Disconnect, Connect again and closing the app run
+    ``Controller.before_disconnect`` while the link still works: the guard then stops
+    the job and waits up to ``STOP_WAIT_S`` for it to clean up (as Find the real one
+    does, trace_dialog)."""
+
+    def __init__(self, ctl: Controller, name: str) -> None:
+        self.ctl, self.name = ctl, name
+        self.done = threading.Event()
+        self.done.set()
+        self.cancel: threading.Event | None = None
+
+    def start(self, cancel: threading.Event, work: Callable[[], T]) -> Callable[[], T]:
+        """Call on the UI thread right before the job is handed to the worker; returns
+        the job to run (it marks itself done however it ends)."""
+        self.cancel = cancel
+        self.done.clear()
+        if self._stop not in self.ctl.before_disconnect:
+            self.ctl.before_disconnect.append(self._stop)
+
+        def run() -> T:
+            try:
+                return work()
+            finally:
+                self.done.set()
+
+        return run
+
+    def finish(self) -> None:
+        """The job ended (UI thread)."""
+        self.cancel = None
+        self.done.set()
+        if self._stop in self.ctl.before_disconnect:
+            self.ctl.before_disconnect.remove(self._stop)
+
+    def _stop(self) -> None:
+        if self.cancel is None:
+            return
+        self.cancel.set()
+        if not self.done.wait(STOP_WAIT_S):
+            log.warning("action=pro_stop_wait job=%s timed_out=True", self.name)
+
 
 PRO_ERRORS = (SiteChanged, Overlap, LockFailed, CantConvert, SearchReplaced)
 """Errors whose own text is the message in Pro (they name the site, the bytes, the other

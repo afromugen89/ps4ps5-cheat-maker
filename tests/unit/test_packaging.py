@@ -4,6 +4,7 @@ the ``action=pro_*`` log audit (spec-pro §7). The real build runs in CI on Wind
 from __future__ import annotations
 
 import io
+import logging
 import re
 import sys
 from pathlib import Path
@@ -86,20 +87,62 @@ def test_frozen_app_looks_for_nasm_where_the_spec_puts_it(monkeypatch, tmp_path)
     assert paths.bundled_nasm_dir() == tmp_path / "nasm"
 
 
-def test_self_check_reports_and_needs_the_assembler(monkeypatch, tmp_path):
+@pytest.fixture
+def bundled(monkeypatch, tmp_path):
+    """The bundled NASM folder, empty: tests put the assembler in it or not."""
+    folder = tmp_path / "nasm"
+    folder.mkdir()
+    monkeypatch.setattr(paths, "bundled_nasm_dir", lambda: folder)
+    return folder
+
+
+def test_self_check_reports_and_needs_the_assembler(bundled):
+    (bundled / paths.NASM_EXE_NAME).write_bytes(b"")
     out = io.StringIO()
-    monkeypatch.setattr(paths, "nasm_exe", lambda configured="": tmp_path / "nasm.exe")
     assert app.self_check(out) == 0
     assert "modules: ok" in out.getvalue() and "assembler:" in out.getvalue()
-    monkeypatch.setattr(paths, "nasm_exe", lambda configured="": None)
+    (bundled / paths.NASM_EXE_NAME).unlink()
     out = io.StringIO()
     assert app.self_check(out) == 1 and "assembler: MISSING" in out.getvalue()
 
 
+def test_self_check_ignores_the_nasm_path_setting(bundled, monkeypatch, tmp_path):  # m6
+    elsewhere = tmp_path / "nasm.exe"
+    elsewhere.write_bytes(b"")
+    monkeypatch.setattr(paths, "nasm_exe", lambda configured="": elsewhere)
+    assert app.self_check(io.StringIO()) == 1  # only the build's own copy counts
+
+
+def test_self_check_writes_its_report_next_to_the_exe(bundled, monkeypatch, tmp_path, caplog):
+    exe_dir = tmp_path / "dist"
+    exe_dir.mkdir()
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(exe_dir / "CheatMaker.exe"))
+    caplog.set_level(logging.INFO)
+    out = io.StringIO()
+    assert app.self_check(out) == 1
+    report = (exe_dir / app.SELF_CHECK_FILE).read_text(encoding="utf-8")
+    assert "modules: ok" in report and "assembler: MISSING" in report
+    assert "action=self_check assembler: MISSING" in caplog.text
+    assert f"report: {exe_dir / app.SELF_CHECK_FILE}" in out.getvalue()
+
+
+def test_self_check_falls_back_to_the_app_folder(bundled, monkeypatch, tmp_path):
+    blocked = tmp_path / "file"
+    blocked.write_text("")  # a file where the exe's folder would be: can't write there
+    monkeypatch.setattr(app, "self_check_path", lambda: blocked / app.SELF_CHECK_FILE)
+    app.self_check(io.StringIO())
+    assert (paths.app_data_dir() / app.SELF_CHECK_FILE).is_file()
+
+
 def test_main_runs_the_self_check_without_a_window(monkeypatch):
+    from cheatmaker import logs
+
+    started = []
     monkeypatch.setattr(sys, "argv", ["CheatMaker.exe", app.SELF_CHECK])
+    monkeypatch.setattr(logs, "setup_logging", lambda: started.append(1) or "log")
     monkeypatch.setattr(app, "self_check", lambda out=None: 7)
-    assert app.main() == 7
+    assert app.main() == 7 and started == [1]  # logging first: the report goes there too
 
 
 # -- log audit (spec-pro §7: every Pro action is logged as action=pro_*) --------------------

@@ -5,15 +5,21 @@
 - **Its own connection** on port 744, opened only by ``attach`` (AC-1.1), so a long
   watch never holds the socket that reads, writes and freezes use.
 - **The back channel.** The PS5 dials back to the PC on port 755 and sends one
-  0x4A0-byte packet per stop. The listener is bound *before* ``DEBUG_ATTACH``; a
-  failed bind is "Port 755 is in use". When the PS5 hasn't dialled back
-  ``BACK_CHANNEL_WAIT`` seconds after attaching, the session detaches and raises
-  FirewallBlocked naming the port (AC-1.3, within 10 s in all).
+  0x4A0-byte packet per stop. The listener is bound and already accepting (on its own
+  thread) *before* ``DEBUG_ATTACH`` is sent, since NG may dial back before it answers.
+  A failed bind is "Port 755 is in use". The attach reply and the dial back must both
+  come within ``ATTACH_DEADLINE`` (10 s, AC-1.3); otherwise the session detaches (on a
+  fresh connection when its own is stuck) and raises FirewallBlocked naming the port.
+  On Windows the port is bound with ``SO_EXCLUSIVEADDRUSE`` (no second program can
+  take it over).
 - **Already debugged** (a session cut off earlier): detach, wait 2 s, try once more.
 - **Keep-alive.** ``VERSION`` every ``KEEPALIVE_S`` on the debugger socket, only while
   attached, running and idle (never while a thread is stopped or a command is
-  pending). ``KEEPALIVE_MISSES`` misses in a row make the session lost; it never
-  reconnects by itself.
+  pending). A keep-alive that fails leaves the socket out of step, so one miss makes
+  the session lost; it never reconnects by itself.
+- **Signals.** Only SIGTRAP (a watch firing) is a hit. Any other signal ends the
+  session (SIGKILL: the game closed). A status that isn't a stop status (signal 0) is
+  taken as a hit: NG's status field is UNVERIFIED (C-P3d).
 - **DR6.** Each stop carries the debug registers; bits 0-3 of DR6 say which of the
   four watch slots fired (NG 1.3.2 keeps DR6 intact: console test C-P3d).
 - **Detach** clears all four slots, sends ``DEBUG_DETACH`` and closes the listener; it
@@ -49,6 +55,7 @@ from cheatmaker.console.ps5debug_ng import (
     Ps5DebugNgClient,
     Status,
     _Wire,
+    listen_options,
     parse_struct_reg,
 )
 from cheatmaker.errors import (
@@ -63,10 +70,11 @@ from cheatmaker.errors import (
 
 log = logging.getLogger(__name__)
 
-BACK_CHANNEL_WAIT = 5.0
-"""Seconds after attaching for the PS5 to dial back before the firewall is blamed."""
+ATTACH_DEADLINE = 10.0
+"""Seconds from the start of ``attach`` until both the attach reply and the PS5's dial
+back must have come; otherwise the firewall is blamed (AC-1.3: within 10 s)."""
+FRESH_DETACH_TIMEOUT = 2.0
 KEEPALIVE_S = 2.0
-KEEPALIVE_MISSES = 2
 ALREADY_DEBUG_WAIT = 2.0
 """After an "already debugged" answer: detach, wait this long, attach once more."""
 POLL_S = 0.5  # the back-channel reader checks for the end this often
@@ -74,6 +82,7 @@ FPU_OFFSET = 0xE0
 FPU_SIZE = 832
 DBREGS_OFFSET = 0x420
 DR6_INDEX = 6
+SIGTRAP = 5
 SIGKILL = 9
 STOPPED_STATUS = 0x7F
 """A wait status whose low byte is 0x7F is "stopped"; the signal is the next byte."""
@@ -89,6 +98,7 @@ FIREWALL = (
 )
 ATTACH_REFUSED = "The PS5 wouldn't attach the debugger to the game ({reason})."
 GAME_CLOSED = "The game closed while the debugger was attached."
+SIGNAL_STOP = "The game stopped with signal {signal}, not at a watch."
 BACK_CLOSED = "The PS5 closed the debugger's back channel."
 KEEPALIVE_LOST = "The debugger's connection stopped answering."
 NOT_ATTACHED = "The debugger isn't attached."
@@ -150,7 +160,7 @@ class DebugSession:
         *,
         listen_port: int = INTERRUPT_PORT,
         timeout: float = 8.0,
-        back_wait: float = BACK_CHANNEL_WAIT,
+        deadline: float = ATTACH_DEADLINE,
         keepalive_s: float = KEEPALIVE_S,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
@@ -158,7 +168,7 @@ class DebugSession:
         self.listen_port = listen_port  # tests use 0: any free port
         self.listen_bound = 0  # the port really listened on
         self.timeout = timeout
-        self.back_wait = back_wait
+        self.deadline = deadline
         self.keepalive_s = keepalive_s
         self.sleep = sleep
         self.state: DebugState = "detached"
@@ -166,6 +176,8 @@ class DebugSession:
         self._listener: socket.socket | None = None
         self._back: socket.socket | None = None
         self._attached = False
+        self._maybe_attached = False  # ATTACH was sent but its answer never came
+        self._accepted = threading.Event()  # the accept thread finished
         self._dead = False  # the debugger socket failed: nothing more is sent on it
         self._cmd = threading.Lock()  # one command at a time on the debugger socket
         self._stops: queue.Queue[StopEvent | DebuggerLost] = queue.Queue()
@@ -173,7 +185,6 @@ class DebugSession:
         self._count = threading.Lock()  # guards _waiting and state (reader vs worker)
         self._end = threading.Event()
         self._threads: list[threading.Thread] = []
-        self._misses = 0
         self._lost_why = KEEPALIVE_LOST
         self.slots: dict[int, tuple[int, int, WatchKind]] = {}
 
@@ -190,11 +201,13 @@ class DebugSession:
         if self.state != "detached":
             raise DebuggerError("The debugger is already attached.")
         started = time.monotonic()
+        deadline = started + self.deadline
         try:
             self._listen()
+            self._start_accept(deadline)
             self._w = _Wire(Ps5DebugNgClient._open(self.host, self.port, self.timeout))
-            self._attach_command()
-            self._accept_back()
+            self._attach_command(deadline)
+            self._wait_back(deadline)
         except BaseException:
             self._close()
             raise
@@ -217,7 +230,7 @@ class DebugSession:
         """Bind the back-channel port before attaching (the PS5 dials in at once)."""
         listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
-            listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            listen_options(listener)
             listener.bind(("0.0.0.0", self.listen_port))
             listener.listen(1)
         except OSError as exc:
@@ -227,12 +240,52 @@ class DebugSession:
         self._listener = listener
         self.listen_bound = listener.getsockname()[1]
 
-    def _attach_command(self) -> None:
+    def _start_accept(self, deadline: float) -> None:
+        """Accept the PS5's dial back on a thread, from before ``DEBUG_ATTACH`` on."""
+        listener = self._listener
+        assert listener is not None
+        self._accepted.clear()
+
+        def accept() -> None:
+            try:
+                listener.settimeout(max(0.01, deadline - time.monotonic()))
+                conn, peer = listener.accept()
+            except OSError:  # the deadline, or the listener closed by _close
+                return
+            finally:
+                self._accepted.set()
+            conn.settimeout(POLL_S)
+            self._back = conn
+            log.info("action=pro_debug_back_channel peer=%s", peer[0])
+
+        t = threading.Thread(target=accept, daemon=True)
+        t.start()
+        self._threads.append(t)
+
+    def _firewall(self, why: str) -> FirewallBlocked:
+        log.warning(
+            "action=pro_debug_attach result=no_back_channel port=%d reason=%s",
+            self.listen_bound,
+            why,
+        )
+        return FirewallBlocked(FIREWALL.format(port=self.listen_port))
+
+    def _attach_command(self, deadline: float) -> None:
         for attempt in (1, 2):
-            status = self._request(Cmd.DEBUG_ATTACH, struct.pack("<I", self.pid), ATTACH_TIMEOUT)
+            left = min(ATTACH_TIMEOUT, deadline - time.monotonic())
+            if left <= 0:
+                raise self._firewall("no time left to attach")
+            self._maybe_attached = True
+            try:
+                status = self._request(Cmd.DEBUG_ATTACH, struct.pack("<I", self.pid), left)
+            except DebuggerLost as exc:
+                if _timed_out(exc):  # NG may wait for its dial back before it answers
+                    raise self._firewall("no attach reply") from exc
+                raise
             if status == Status.SUCCESS:
                 self._attached = True
                 return
+            self._maybe_attached = False
             if status == Status.ALREADY_DEBUG and attempt == 1:
                 log.info("action=pro_debug_attach result=already_debugged retry=1")
                 self._request(Cmd.DEBUG_DETACH)
@@ -240,21 +293,10 @@ class DebugSession:
                 continue
             raise DebuggerError(ATTACH_REFUSED.format(reason=_status_name(status)))
 
-    def _accept_back(self) -> None:
-        assert self._listener is not None
-        self._listener.settimeout(self.back_wait)
-        try:
-            conn, peer = self._listener.accept()
-        except OSError as exc:  # includes the timeout
-            log.warning(
-                "action=pro_debug_attach result=no_back_channel port=%d reason=%s",
-                self.listen_bound,
-                exc,
-            )
-            raise FirewallBlocked(FIREWALL.format(port=self.listen_port)) from exc
-        conn.settimeout(POLL_S)
-        self._back = conn
-        log.info("action=pro_debug_back_channel peer=%s", peer[0])
+    def _wait_back(self, deadline: float) -> None:
+        self._accepted.wait(max(0.0, deadline - time.monotonic()))
+        if self._back is None:
+            raise self._firewall("no dial back")
 
     # -- commands ------------------------------------------------------------------------
     def _request(self, cmd: int, body: bytes = b"", timeout: float | None = None) -> int:
@@ -321,6 +363,10 @@ class DebugSession:
         if item.signal == SIGKILL:
             self._lose(GAME_CLOSED)
             raise DebuggerLost(GAME_CLOSED)
+        if item.signal not in (SIGTRAP, 0):
+            why = SIGNAL_STOP.format(signal=item.signal)
+            self._lose(why)
+            raise DebuggerLost(why)
         return item
 
     def _read_back(self) -> None:
@@ -377,8 +423,7 @@ class DebugSession:
                 ok = self._ping()
             finally:
                 self._cmd.release()
-            self._misses = 0 if ok else self._misses + 1
-            if self._misses >= KEEPALIVE_MISSES:
+            if not ok:
                 self._lose(KEEPALIVE_LOST)
                 return
 
@@ -389,7 +434,8 @@ class DebugSession:
         try:
             w.request(Cmd.VERSION)
             w.recv(w.u32())
-        except (ConnectionLost, OSError) as exc:
+        except (ConnectionLost, OSError) as exc:  # a late answer would put it out of step
+            self._dead = True
             log.info("action=pro_debug_keepalive result=miss reason=%s", exc)
             return False
         return True
@@ -415,13 +461,32 @@ class DebugSession:
         except CheatMakerError as exc:
             log.warning("action=pro_debug_detach step=%s reason=%s", Cmd(cmd).name, exc)
 
+    def _detach_fresh(self) -> None:
+        """``DEBUG_DETACH`` on a new connection: ours is stuck or gone, but the game may
+        still be attached (an attach whose answer never came)."""
+        try:
+            w = _Wire(Ps5DebugNgClient._open(self.host, self.port, FRESH_DETACH_TIMEOUT))
+        except CheatMakerError as exc:
+            log.warning("action=pro_debug_detach fresh=1 reason=%s", exc)
+            return
+        try:
+            w.request(Cmd.DEBUG_DETACH)
+            log.info("action=pro_debug_detach fresh=1 status=%s", _status_name(w.status()))
+        except CheatMakerError as exc:
+            log.warning("action=pro_debug_detach fresh=1 reason=%s", exc)
+        finally:
+            w.close()
+
     def _close(self) -> None:
         """Detach if attached (also after a firewall timeout), then close everything."""
         self._end.set()
-        if self._attached and self._w is not None and not self._dead:
-            with contextlib.suppress(CheatMakerError, OSError):
-                self._request(Cmd.DEBUG_DETACH)
-        self._attached = False
+        if self._attached or self._maybe_attached:
+            if self._w is not None and not self._dead:
+                with contextlib.suppress(CheatMakerError, OSError):
+                    self._request(Cmd.DEBUG_DETACH)
+            else:
+                self._detach_fresh()
+        self._attached = self._maybe_attached = False
         for s in (self._back, self._listener):
             if s is not None:
                 with contextlib.suppress(OSError):
@@ -441,3 +506,13 @@ class DebugSession:
 
 def _status_name(status: int) -> str:
     return Status(status).name if status in Status._value2member_map_ else f"{status:#010x}"
+
+
+def _timed_out(exc: BaseException) -> bool:
+    """Did ``exc`` (or what caused it) come from a socket timeout?"""
+    seen: BaseException | None = exc
+    while seen is not None:
+        if isinstance(seen, TimeoutError):
+            return True
+        seen = seen.__cause__
+    return False

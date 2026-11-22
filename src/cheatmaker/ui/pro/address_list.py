@@ -21,10 +21,10 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-from cheatmaker.console.client import DEBUG_SLOTS, WatchKind
+from cheatmaker.console.client import WatchKind
 from cheatmaker.core.pro import addresses as ad
 from cheatmaker.core.pro import compile as pc_compile
-from cheatmaker.core.pro.watch_session import WatchTarget
+from cheatmaker.core.pro.watch_session import MAX_WATCH_SLOTS, WatchTarget
 from cheatmaker.core.values import ValueType
 from cheatmaker.ui.controller import Controller
 from cheatmaker.ui.pointer_dialog import PointerDialog
@@ -172,15 +172,20 @@ class AddressListTab(ProTab):
         self.memory_btn.setEnabled(one)
         self.pointer_btn.setEnabled(one)
         self.refresh_btn.setEnabled(bool(self.rows))
-        picked = 0 < len(self.selected_rows()) <= DEBUG_SLOTS
+        picked = 0 < len(self.selected_rows()) <= MAX_WATCH_SLOTS
         self.writes_btn.setEnabled(picked)
         self.accesses_btn.setEnabled(picked)
 
     def find_what(self, kind: WatchKind) -> None:
         """Find what writes / accesses the picked rows (up to 4): the Watch tab."""
-        rows = self.selected_rows()[:DEBUG_SLOTS]
-        if rows:
-            self.watch([WatchTarget(r.address, r.vtype.size, kind) for r in rows])
+        rows = self.selected_rows()[:MAX_WATCH_SLOTS]
+        try:
+            targets = [WatchTarget(r.address, r.vtype.size, kind) for r in rows]
+        except ValueError as exc:  # an address the PS5 can't watch at that size
+            self.msgs.fail(exc, "pro_watch")
+            return
+        if targets:
+            self.watch(targets)
 
     def frozen_count(self) -> int:
         return sum(row.frozen is not None for row in self.rows)

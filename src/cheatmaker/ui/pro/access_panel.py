@@ -1,9 +1,11 @@
 """ "What does this instruction access" (spec PR-3, AC-3.4/3.5), below the Watch list.
 
 The sample runs on the Pro worker (``core/pro/access_sampler.py``): the game never
-stops, and the hook, the table and the sampler cave are cleared at the end. With no
-room for the sampler the panel offers an execute watch on the instruction instead
-(the debugger pauses the game at each pass; addresses come from the registers).
+stops, and the hook, the table and the sampler cave are cleared at the end; a
+disconnect waits for that (``JobGuard``). With no room for the sampler, and only when
+the execute-breakpoint opt-in ``trace_exec_breakpoint`` is on, the panel offers an
+execute watch on the instruction instead (the debugger pauses the game at each pass;
+addresses come from the registers).
 """
 
 from __future__ import annotations
@@ -36,7 +38,7 @@ from cheatmaker.core.values import ValueType
 from cheatmaker.ui.controller import Controller
 from cheatmaker.ui.pro import hints
 from cheatmaker.ui.pro.cave_editor import mono
-from cheatmaker.ui.pro.tab import ProMessages
+from cheatmaker.ui.pro.tab import JobGuard, ProMessages
 from cheatmaker.ui.tasks import TaskRunner
 
 COL_ADDR, COL_OBJECT, COL_COUNT = range(3)
@@ -56,6 +58,7 @@ class AccessPanel(QWidget):
         self.rows: list[sm.AccessRow] = []
         self.running = False  # the game runs (set by the Watch tab)
         self._cancel: threading.Event | None = None
+        self._guard = JobGuard(ctl, "sample")  # a disconnect takes the hook out (B1)
 
         self.hint = QLabel(hints.ACCESS.format(seconds=int(self.seconds)))
         self.hint.setWordWrap(True)
@@ -141,7 +144,9 @@ class AccessPanel(QWidget):
                 on_update=lambda rows, polls: self._update.emit((rows, polls)),
             )
 
-        self.tasks.run(work, self._sampled, lambda exc: self._failed(exc, addr))
+        self.tasks.run(
+            self._guard.start(cancel, work), self._sampled, lambda exc: self._failed(exc, addr)
+        )
 
     def _start(self) -> threading.Event:
         self._cancel = threading.Event()
@@ -165,6 +170,7 @@ class AccessPanel(QWidget):
 
     def _sampled(self, result: sm.SampleResult) -> None:
         self._cancel = None
+        self._guard.finish()
         self.rows = result.rows
         self._fill()
         n = len(result.rows)
@@ -179,11 +185,14 @@ class AccessPanel(QWidget):
 
     def _failed(self, exc: BaseException, addr: int) -> None:
         self._cancel = None
+        self._guard.finish()
         self.state.setText("")
         self.update_buttons()
         if isinstance(exc, sm.NoRoomForSampler):
             self.msgs.say(str(exc))
-            if self.ask_watch(str(exc)):
+            # the offer needs an execute breakpoint: only with the same opt-in as the
+            # guided Find the real one (trace_exec_breakpoint, console test C20d; M4)
+            if self.ctl.settings.trace_exec_breakpoint and self.ask_watch(str(exc)):
                 self.watch_instead(addr)
             return
         self.msgs.fail(exc, "pro_sample")
@@ -218,16 +227,18 @@ class AccessPanel(QWidget):
 
         def done(result: ws.WatchResult) -> None:
             self._cancel = None
+            self._guard.finish()
             self.rows = sm.accesses_from_hits([s.hit for s in hits], operand)
             self._fill()
             text = hints.ACCESS_WATCHED.format(n=len(self.rows), hits=result.hits)
-            if result.ended == ws.LOST:
-                text = hints.WATCH_ENDED[ws.LOST].format(hits=result.hits, reason=result.message)
+            if result.message:  # lost, failed or repeating: say why, rows still shown
+                ended = hints.WATCH_ENDED[result.ended]
+                text = ended.format(hits=result.hits, reason=result.message) + " " + text
             self.state.setText(text)
             self.msgs.say(text)
             self.update_buttons()
 
-        self.tasks.run(work, done, lambda exc: self._failed(exc, addr))
+        self.tasks.run(self._guard.start(cancel, work), done, lambda exc: self._failed(exc, addr))
 
     def _watched_hit(self, stop: StopEvent, hits: list, operand: sm.Operand) -> None:
         hits.append(stop)

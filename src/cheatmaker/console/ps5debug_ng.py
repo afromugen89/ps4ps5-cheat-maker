@@ -14,6 +14,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import math
+import os
 import queue
 import socket
 import struct
@@ -225,6 +226,17 @@ def parse_struct_reg(blob: bytes) -> dict[str, int]:
     gp = struct.unpack_from("<15Q", blob, 0)
     tail = struct.unpack_from("<5Q", blob, 136)
     return dict(zip(_GP_ORDER, gp, strict=True)) | dict(zip(_TAIL_ORDER, tail, strict=True))
+
+
+def listen_options(sock: socket.socket, nt: bool | None = None) -> None:
+    """Options for a back-channel listener on port 755. Windows: SO_EXCLUSIVEADDRUSE, so
+    no other program can bind the port while we listen (SO_REUSEADDR there would let
+    one take it over). Elsewhere SO_REUSEADDR, so a port in TIME_WAIT can be reused."""
+    windows = os.name == "nt" if nt is None else nt
+    if windows:
+        sock.setsockopt(socket.SOL_SOCKET, getattr(socket, "SO_EXCLUSIVEADDRUSE", -5), 1)
+    else:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
 
 def parse_interrupt(packet: bytes) -> WatchHit:
@@ -1902,7 +1914,7 @@ class Ps5DebugNgClient:
             raise ValueError("an execute breakpoint covers 1 byte")
         hits: queue.Queue[WatchHit] = queue.Queue()
         listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listen_options(listener)
         listener.bind(("0.0.0.0", self.interrupt_port))
         self.interrupt_bound = listener.getsockname()[1]
         listener.listen(1)

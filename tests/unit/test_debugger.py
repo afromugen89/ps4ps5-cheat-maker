@@ -53,6 +53,9 @@ class DebugServer:
         self.commands: list[tuple[int, bytes]] = []
         self.attach_answers: list[int] = []  # statuses for the next attaches
         self.dial_back = True
+        self.dial_first = False  # dial back before answering DEBUG_ATTACH
+        self.reply_attach = True  # False: DEBUG_ATTACH is never answered
+        self.fresh_detaches = 0  # DEBUG_DETACH on a connection that never attached
         self.answer_version = True
         self.listening_at_attach: list[bool] = []
         self.client_port = 0
@@ -78,6 +81,7 @@ class DebugServer:
         return buf
 
     def _conn(self, c: socket.socket) -> None:
+        attached = False
         with c:
             while True:
                 try:
@@ -88,11 +92,19 @@ class DebugServer:
                 assert magic == MAGIC
                 self.commands.append((cmd, body))
                 if cmd == Cmd.DEBUG_ATTACH:
+                    attached = True
                     self.listening_at_attach.append(self._port_open())
                     st = self.attach_answers.pop(0) if self.attach_answers else Status.SUCCESS
-                    c.sendall(struct.pack("<I", st))
-                    if st == Status.SUCCESS and self.dial_back:
+                    dial = st == Status.SUCCESS and self.dial_back
+                    if dial and self.dial_first:
                         self._dial()
+                    if self.reply_attach:
+                        c.sendall(struct.pack("<I", st))
+                    if dial and not self.dial_first:
+                        self._dial()
+                elif cmd == Cmd.DEBUG_DETACH and not attached:
+                    self.fresh_detaches += 1
+                    c.sendall(OK)
                 elif cmd == Cmd.VERSION:
                     if self.answer_version:
                         c.sendall(struct.pack("<I", 5) + b"1.3.2")
@@ -142,7 +154,7 @@ def session(server: DebugServer, **kw) -> dbg.DebugSession:
     port = _free_port()
     server.client_port = port
     kw.setdefault("timeout", 1.0)
-    kw.setdefault("back_wait", 1.0)
+    kw.setdefault("deadline", 1.0)
     kw.setdefault("keepalive_s", 60.0)
     return dbg.DebugSession("127.0.0.1", server.port, PID, listen_port=port, **kw)
 
@@ -184,13 +196,44 @@ def test_port_in_use_is_named(server):
 def test_no_dial_back_is_the_firewall_and_detaches(server):
     """AC-1.3: says so within the wait, names the port, and leaves nothing attached."""
     server.dial_back = False
-    s = session(server, back_wait=0.3)
+    s = session(server, deadline=0.3)
     started = time.monotonic()
     with pytest.raises(FirewallBlocked, match=f"TCP port {s.listen_port}"):
         s.attach()
     assert time.monotonic() - started < 3
     assert _wait(lambda: server.names() == ["DEBUG_ATTACH", "DEBUG_DETACH"])
     assert s.state == "detached"
+
+
+def test_dial_back_before_the_attach_reply_is_accepted(server):
+    """The accept runs before DEBUG_ATTACH is sent: NG may dial back first."""
+    server.dial_first = True
+    s = session(server)
+    with s:
+        assert s.state == "running" and server.dialled.is_set()
+
+
+def test_no_attach_reply_is_the_firewall_and_detaches_on_a_fresh_connection(server):
+    """M1: the reply never comes (NG waits for a dial back the firewall blocks)."""
+    server.reply_attach = False
+    server.dial_back = False
+    s = session(server, deadline=0.4)
+    started = time.monotonic()
+    with pytest.raises(FirewallBlocked, match=f"TCP port {s.listen_port}"):
+        s.attach()
+    assert time.monotonic() - started < 3
+    assert _wait(lambda: server.fresh_detaches == 1) and s.state == "detached"
+
+
+def test_attach_deadline_covers_reply_and_dial_back(server):
+    """The whole attach stays within the deadline (AC-1.3: 10 s by default)."""
+    assert dbg.ATTACH_DEADLINE <= 10
+    server.dial_back = False
+    s = session(server, deadline=0.5)
+    started = time.monotonic()
+    with pytest.raises(FirewallBlocked):
+        s.attach()
+    assert time.monotonic() - started < 1.5
 
 
 def test_already_debugged_detaches_waits_and_retries_once(server):
@@ -293,7 +336,9 @@ def test_keep_alive_pings_only_while_running(server):
         assert _wait(lambda: server.names().count("VERSION") > pings)
 
 
-def test_two_missed_keep_alives_lose_the_session(server):
+def test_a_failed_keep_alive_loses_the_session(server):
+    """m1: a keep-alive that fails leaves the socket out of step: the wire is dead and
+    nothing more is sent on it (detach goes over a fresh connection)."""
     server.answer_version = False
     s = session(server, keepalive_s=0.05, timeout=0.2)
     with s:
@@ -302,6 +347,35 @@ def test_two_missed_keep_alives_lose_the_session(server):
         assert s.state == "lost"
         with pytest.raises(DebuggerLost):
             s.resume()
+    assert _wait(lambda: server.fresh_detaches == 1)
+
+
+def test_other_signals_end_the_session(server):
+    """M3: only SIGTRAP is a hit; SIGSEGV (11) ends the watch with the signal named."""
+    s = session(server)
+    with s:
+        server.send_stop(stop_packet(0x400105, status=0x0B7F))
+        with pytest.raises(DebuggerLost, match="signal 11"):
+            s.next_stop(2.0)
+        assert s.state == "lost"
+
+
+def test_listener_options_per_platform():
+    class Sock:
+        def __init__(self):
+            self.opts = []
+
+        def setsockopt(self, level, opt, value):
+            self.opts.append((level, opt, value))
+
+    from cheatmaker.console.ps5debug_ng import listen_options
+
+    win, other = Sock(), Sock()
+    listen_options(win, nt=True)
+    listen_options(other, nt=False)
+    exclusive = getattr(socket, "SO_EXCLUSIVEADDRUSE", -5)
+    assert win.opts == [(socket.SOL_SOCKET, exclusive, 1)]
+    assert other.opts == [(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)]
 
 
 # -- detach ------------------------------------------------------------------------------------
@@ -391,3 +465,28 @@ def test_open_debugger_needs_a_client_that_has_one():
 
 def test_stop_packet_size_matches_the_wire():
     assert len(stop_packet(1)) == INTERRUPT_SIZE
+
+
+def test_fake_debugger_mirrors_the_session(fake):
+    """m8 and M1/M3 modes: a dead wire sends no clears; other signals end it."""
+    d = fake.debugger
+    d.never_reply = True
+    with pytest.raises(FirewallBlocked):
+        d.attach()
+    assert d.calls[-1] == ("fresh_detach",) and d.state == "detached"
+    d.never_reply, d.dial_before_reply = False, True
+    d.attach()
+    assert ("dialled_first",) in d.calls and d.state == "running"
+    d.lost_after = 0
+    with pytest.raises(DebuggerLost):
+        d.next_stop(1)
+    d.detach()
+    assert d.calls[-1] == ("fresh_detach",) and ("clear", 0) not in d.calls[-2:]
+    d.lost_after = None
+    d.attach()
+    d.set_watch(0, ADDR, 4, "write")
+    d.stops = [FakeStop(0, WatchHit(1), signal=11)]
+    with pytest.raises(DebuggerLost, match="signal 11"):
+        d.next_stop(1)
+    d.detach()
+    assert d.calls[-5:] == [*[("clear", k) for k in range(4)], ("detach",)]

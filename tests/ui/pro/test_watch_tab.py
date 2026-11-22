@@ -163,3 +163,24 @@ def test_export_make_cave_watches_the_pc_only_value(win, pro, game):
     pro.cheats.export_btn.click()
     assert shown and pro.tabs.currentWidget() is pro.watch
     assert pro.watch.running_targets == [ws.WatchTarget(HP_ADDR, 4, "write")]
+
+
+def test_export_make_cave_says_why_a_misaligned_value_cant_be_watched(win, pro):  # M6
+    from cheatmaker.core.cheats import Cheat, Location, LocationKind
+
+    odd = Cheat(
+        "Odd gold",
+        [Location(LocationKind.SESSION_ADDRESS, HP_ADDR + 2, b"\1\0\0\0", b"\0\0\0\0")],
+    )
+    win.ctl.ensure_file().cheats.append(odd)
+    win.ctl.cheats_changed.emit()
+    tips = []
+
+    def run(dlg):
+        dlg.left_out.setCurrentRow(0)
+        tips.append((dlg.make_cave_btn.isEnabled(), dlg.make_cave_btn.toolTip()))
+
+    pro.cheats.exec_dialog = run
+    pro.cheats.export_btn.click()
+    ((enabled, tip),) = tips
+    assert not enabled and "divisible by its size" in tip

@@ -41,10 +41,7 @@ log = logging.getLogger(__name__)
 
 SAMPLE_SECONDS = 20
 POLL_S = 0.25
-NO_ROOM = (
-    "No room for the sampler: the game's code or data has no spare space for it "
-    "({reason}). Watch the instruction instead (it pauses the game at each pass)."
-)
+NO_ROOM = "No room for the sampler: the game's code or data has no spare space for it ({reason})."
 NOT_MEMORY = "This instruction doesn't read or write memory, so there is nothing to sample."
 NO_BASE = (
     "This instruction's address isn't one register plus a number ({text}), so the "
@@ -133,6 +130,26 @@ def refuse_patched(site: int, length: int, enabled: Iterable[Cheat], module_base
             raise sites.Overlap(f"“{other.name}” patches this instruction. Turn it off first.")
 
 
+def _unhook(session: Session, writer: ProWriter, site: int, hook: bytes, orig: bytes) -> bool:
+    """Put the game's bytes back at ``site`` (AC-3.4). True when no jump leads into the
+    sampler cave any more. The site is read first: when it holds neither the hook nor
+    the game's own bytes, something else wrote there meanwhile (a cheat turned on), so
+    it isn't overwritten and the cave stays (m7)."""
+    game = session.require_game()
+    now = session.require_client().read(game.pid, site, len(hook))
+    if now == orig:  # the hook never landed
+        return True
+    if now != hook:
+        log.warning(
+            "action=pro_sample site=%#x result=site_changed found=%s; left alone",
+            site,
+            now.hex(" "),
+        )
+        return False
+    writer.write_checked(site, orig, "sampler:unhook")
+    return True
+
+
 def sample(
     session: Session,
     site: int,
@@ -166,10 +183,11 @@ def sample(
     code = cv.sampler_code(span, cv.Target(operand.base, operand.disp), table, cave)
     counts: Counter[int] = Counter()
     polls, cancelled = 0, False
+    hook = cv.jmp_patch(site, cave, len(orig))
     writer.write_checked(cave, code, "sampler:cave")
-    writer.write_checked(site, cv.jmp_patch(site, cave, len(orig)), "sampler:hook")
-    log.info("action=pro_sample site=%#x cave=%#x table=%#x", site, cave, table)
     try:
+        writer.write_checked(site, hook, "sampler:hook")  # inside: a bad read-back unhooks
+        log.info("action=pro_sample site=%#x cave=%#x table=%#x", site, cave, table)
         waited = 0.0
         while waited < seconds:
             if cancel is not None and cancel.is_set():
@@ -183,11 +201,13 @@ def sample(
             if on_update is not None:
                 on_update(rows_from(counts, operand), polls)
     finally:
-        writer.write_checked(site, orig, "sampler:unhook")  # AC-3.4: the hook goes first
-        sleep(DISABLE_WAIT)  # threads finish their last pass through the cave
+        unhooked = _unhook(session, writer, site, hook, orig)
+        if unhooked:
+            sleep(DISABLE_WAIT)  # threads finish their last pass through the cave
         counts.update(_table_values(read(table, cv.TABLE_SIZE)))
         client.write(game.pid, table, bytes(cv.TABLE_SIZE))
-        writer.write(cave, bytes(len(code)), "sampler:cave_clear")
+        if unhooked:  # only once nothing can jump into it any more
+            writer.write(cave, bytes(len(code)), "sampler:cave_clear")
     rows = rows_from(counts, operand)
     log.info("action=pro_sample site=%#x polls=%d addresses=%d", site, polls, len(rows))
     return SampleResult(operand, rows, polls, cancelled)

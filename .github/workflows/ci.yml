@@ -45,6 +45,7 @@ jobs:
         shell: pwsh
         run: |
           $p = Start-Process dist\CheatMaker\CheatMaker.exe -ArgumentList '--self-check' -Wait -PassThru
+          Get-Content dist\CheatMaker\self-check.txt -ErrorAction SilentlyContinue
           if ($p.ExitCode -ne 0) { exit $p.ExitCode }
           if (-not (Test-Path dist\CheatMaker\_internal\nasm\nasm.exe)) { exit 1 }
           if (-not (Test-Path dist\CheatMaker\_internal\NOTICE)) { exit 1 }
