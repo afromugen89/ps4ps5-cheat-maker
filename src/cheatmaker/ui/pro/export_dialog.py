@@ -3,6 +3,7 @@ and the PC-only cheats listed with why they are left out."""
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from pathlib import Path
 
@@ -28,6 +29,7 @@ from cheatmaker.ui.pro import hints
 from cheatmaker.ui.pro.tab import ProMessages
 from cheatmaker.ui.save_dialog import ask_overwrite
 
+log = logging.getLogger(__name__)
 EXPORT_FORMATS = (("json", ".json (GoldHEN)"), ("shn", ".shn"), ("mc4", ".mc4"))
 
 
@@ -153,5 +155,12 @@ class ExportDialog(QDialog):
             self.msgs.fail(exc, "pro_export")
             return None
         self.saved = path
+        log.info(
+            "action=pro_export format=%s cheats=%d left_out=%d path=%s",
+            self.format,
+            len(runner_cheats(self.cf.cheats)),
+            len(self.left),
+            path,
+        )
         self.result.setText(hints.EXPORT_SAVED.format(path=path))
         return path

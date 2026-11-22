@@ -1094,3 +1094,23 @@ Built from docs/architecture-pro.md (spec docs/spec-pro.md), implementation step
   - It opens from Code ("What does it access?" on a module instruction) and from a
     Watch row.
 - Console tests C-P5a/b.
+
+## Cheat Maker Pro, R1 step 19: packaging and docs (2026-11-22)
+
+- `cheatmaker.spec` (PyInstaller folder build, `dist/CheatMaker/`):
+  - `vendor/nasm/nasm.exe` goes to `nasm/` (where `paths.bundled_nasm_dir` looks when
+    frozen), with NASM's LICENSE beside it;
+  - `NOTICE`, `LICENSE` and `licenses/` go next to the app;
+  - no console window.
+  - It refuses to build without NASM unless `CHEATMAKER_NO_NASM=1` is set.
+- `CheatMaker.exe --self-check` (`app.self_check`) is the build's smoke test. It
+  imports every screen and finds the assembler, with no window; exit code 0 when all
+  is well.
+- CI gained a `build` job (Windows): fetch NASM, run PyInstaller, then
+  `--self-check` and check that `nasm.exe` and `NOTICE` are in the build. The job is
+  skipped while `tools/fetch_nasm.py` has no pinned SHA-256 (still open from step 1).
+- Log audit: every `action=` in `core/pro`, `ui/pro` and `console/debugger.py` is
+  `pro_*`, checked by a test. Export now logs `action=pro_export`.
+- `docs/user-guide.md` chapter 10 (Pro mode). `docs/console-tests.md`: C-P1, and
+  C-P6 to C-P14. C-P2 to C-P5 were added with their steps.
+- NOTICE credits ReaperPy for the debugger behaviour (step 16).

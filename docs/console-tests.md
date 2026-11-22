@@ -313,6 +313,13 @@ and frozen cheats stopped working. Searches now run on their own connection to t
 Pro features (docs/spec-pro.md, docs/architecture-pro.md). Each C-P test names the step
 that makes it runnable in the app.
 
+### C-P1 Pro window (step 11)
+
+| # | Test | Steps | Pass when | Send back |
+|---|---|---|---|---|
+| C-P1a | Same game, no new connection (AC-1.1) | Connect and start a game. Press **Pro**. Look at each tab. | The top line shows the same title, title ID, version and PID as the main window; the safety notice shows once for this game (not again after closing and reopening Pro). The log has no new `action=connect` and no `action=pro_debug_attach` lines. | The two top lines. |
+| C-P1b | Game closed (AC-1.2) | With Pro open (and a watch running, once step 17 is in), close the game on the PS5. | Within 5 s every tab says "Game not running"; a running watch ends with "Nothing was written"; the app stays connected. | The `action=pro_game_alive` line and its time. |
+
 ### C-P2 Pro scanner codes (runnable once the Pro Scanner tab ships, step 15)
 
 The guided screens never send these, so nothing the app does today depends on them.
@@ -361,3 +368,19 @@ registers "unverified" (AC-3.3).
 |---|---|---|---|---|
 | C-P5a | Sampler (AC-3.4) | Find the health writer with C-P4a. Pick its row, press **What does it access?**, and fight 2-3 enemies for the 20 s. | The game never pauses; the player's and the enemies' health addresses are listed (base + offset), each with a Seen count. Afterwards the game runs normally and Pro > Code at the writer shows the game's own bytes again. | The list and the `action=pro_sample` lines. |
 | C-P5b | No room (AC-3.5) | Only if a game has no spare code at its end: run C-P5a there. | "No room for the sampler..." with the offer to watch instead; Yes lists addresses from an instruction watch, and the game runs on after it. | The message and the `action=pro_sample result=no_room` line. |
+
+### C-P6 to C-P14 the rest of Pro (step 19 build)
+
+| # | Test | Steps | Pass when | Send back |
+|---|---|---|---|---|
+| C-P6 | Code view (AC-6.1, AC-6.2) | Pro > Code, type the writer from C-P4a (`eboot.bin+0x...`), **Go**. Then turn on a Pro cheat hooked there and tick **Show original**. | The page shows within 1 s with that instruction selected; with the cheat on, the line shows the cheat's name, and Show original shows the game's own instruction. | The time to load and a screenshot. |
+| C-P7 | Memory view (AC-7.1) | Pro > Memory, type an address at the end of a memory map (from the address list: a heap value, then Next page until the end). | `??` where the game has no memory; no disconnect. | A screenshot. |
+| C-P8a | Cave editor (AC-8.1, AC-8.2) | Make a cave entry at the writer, type `original` and `jmp return`, then a typo on a new line. | Bytes show within 0.5 s of stopping typing; the typo shows its line number and NASM's message; **Build** places it and shows "Cave: N bytes · room for M". | The `action=pro_asm` and `action=pro_build` lines. |
+| C-P8b | On and off (AC-8.4, AC-8.5, AC-8.6, AC-8.8) | Turn the cheat on, take damage, turn it off, take damage. Then make a second cheat with a NOP entry at the same writer and turn both on. | On: the cave is written before the jump (log order), the game runs with the cheat. Off: the jump goes back first, the cave is zeroed half a second later. The second cheat is refused naming the first (AC-8.8). Any `action=pro_write_ff` line shows a warning once. | The `action=pro_enable`, `action=pro_disable` and `action=pro_write` lines. |
+| C-P8c | Live variable (AC-8.7) | Add a float variable `mult` = 2.0 used by the cave (`mulss xmm1, [mult]`), Build, turn on, change it to 5.0. | Only the variable's 4 bytes are written (one `action=pro_write` of len=4) and the game uses the new value at once. | The write line. |
+| C-P9 | Reference points (AC-9.1, AC-9.2) | After a game update: open the old version's Pro cheats with **Bring them over**. | Each Pro entry is found again by its fingerprint, or listed as "can't find". | The `action=pro_carry` lines. |
+| C-P10 | Import (AC-14.1) | Import a `.mc4` made by ReaperPy (or another tool) and a `.json`; press **Convert to assembly** on a cave. | Bytes entries per line; the converted cave re-assembles to the same bytes (or names the instruction it can't express); a section ≠ 0 mod is refused with a message. | The `action=pro_import` lines. |
+| C-P11 | Windows build (step 19) | On a PC without Python, unzip the build and run `CheatMaker.exe --self-check`, then start it normally, open Pro and type a cave. | `--self-check` exits 0 (run it from PowerShell: `Start-Process ... -Wait -PassThru`); the cave editor assembles (no "Assembler not found"); Windows Firewall asks about port 755 on the first watch. | Anything the antivirus said about `nasm.exe`. |
+| C-P12 | Export runs in CheatRunner (AC-12.3) | Export the project as `.json`, `.shn` and `.mc4` (one at a time), send each to the PS5, restart the game, turn each cheat on in CheatRunner with the PC off. | Each cheat works with the PC off, in every format. | Which formats loaded, and any cheat that didn't work. |
+| C-P13 | mc4 names (AC-12.4, S-P8) | A game whose title has `&` (e.g. Ratchet & Clank) and a cheat named `A & B <x> "y"`; export `.shn` and `.mc4` and load both in CheatRunner. | The `.shn` shows the name as typed; the `.mc4` shows `A + B (x) 'y'`; both load. | How CheatRunner shows both names. |
+| C-P14 | Log audit (spec §7) | After C-P4a, C-P5a, C-P8b and C-P12, press **Copy log**. | Every Pro write, attach, watch and export has its `action=pro_*` line (`pro_write`, `pro_debug_attach`, `pro_watch_start` / `pro_watch_end`, `pro_sample`, `pro_export`). | The copied log. |

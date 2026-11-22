@@ -397,3 +397,18 @@ def test_real_assembler_from_the_settings(win, qtbot):
     qtbot.waitUntil(lambda: t.editor.bytes_view.toPlainText().startswith("B8 01"), timeout=3000)
     assert t.editor.draft_of(cheat.pro.entries[0]).startswith("mov")
     pro.close()
+
+
+def test_export_is_logged_as_a_pro_action(win, tab, tmp_path, caplog):  # spec-pro §7
+    import logging
+
+    caplog.set_level(logging.INFO)
+    _export_project(win)
+
+    def run(dlg):
+        dlg.folder.setText(str(tmp_path))
+        dlg.do_export()
+
+    tab.exec_dialog = run
+    tab.export_btn.click()
+    assert "action=pro_export format=json cheats=3 left_out=1" in caplog.text

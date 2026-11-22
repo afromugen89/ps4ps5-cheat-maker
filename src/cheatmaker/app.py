@@ -7,8 +7,32 @@ import sys
 
 from cheatmaker import __version__
 
+SELF_CHECK = "--self-check"
+
+
+def self_check(out=None) -> int:
+    """``CheatMaker.exe --self-check`` (the Windows build's smoke test): every screen's
+    module loads (so the bundled Qt, iced-x86 and app code are all there), and the
+    assembler is found. No window opens. 0 when all is well; each line printed says
+    what was checked."""
+    out = out or sys.stdout
+    try:
+        from cheatmaker.paths import nasm_exe
+        from cheatmaker.settings import Settings
+        from cheatmaker.ui.main_window import MainWindow  # noqa: F401 (loads every screen)
+        from cheatmaker.ui.pro.pro_window import ProWindow  # noqa: F401
+    except Exception as exc:  # report it: this is the smoke test's whole point
+        print(f"modules: FAILED ({type(exc).__name__}: {exc})", file=out)
+        return 1
+    print(f"modules: ok (version {__version__})", file=out)
+    nasm = nasm_exe(Settings.load().nasm_path)
+    print(f"assembler: {nasm or 'MISSING'}", file=out)
+    return 0 if nasm is not None else 1
+
 
 def main() -> int:
+    if SELF_CHECK in sys.argv[1:]:
+        return self_check()
     from cheatmaker.logs import (
         check_previous_run,
         install_crash_hook,
