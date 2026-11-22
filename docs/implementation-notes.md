@@ -877,3 +877,55 @@ Built from docs/architecture-pro.md (spec docs/spec-pro.md), implementation step
     (the editable value), `take_value`, `set_variable` and `variable_addresses` use
     only that. `set_variable` refuses with "build the cave first" when the variable
     list differs from it.
+
+## Cheat Maker Pro, R1 steps 11-15: the UI (2026-11-22)
+
+- **Step 11, window shell.** `ui/pro/pro_window.py` is a second window on the main
+  window's `Controller` and session; nothing in it opens a connection (AC-1.1). Pro work
+  runs on its own `TaskRunner`, so the guided screens' `busy_changed` (e.g. Find's trace
+  button) never flickers with the Pro poll. Every 2 s `Session.game_alive()` runs on the
+  worker: the foreground app, else the game's memory map answering (`ReadFailed`: gone,
+  `ConsoleBusy`: still alive). When the game is gone, every tab shows "Game not running"
+  (AC-1.2). `ui/pro/tab.py` holds the `ProTab` base (banner, disabled body). The safety
+  notice is shown once per title ID (`Settings.pro_notice_shown`). The main window has a
+  "Pro" button and keeps one Pro window.
+- **Step 12, Cheats tab.** Lists every cheat of My cheats with its badge. A guided cheat
+  is previewed as adopted; Edit in Pro adopts it byte for byte (its `value_at` isn't
+  carried, as before). New cheat = name + hook; its cave is built at once with the
+  default source, because `compile_cheat` needs a placed cave to list and save it. Build
+  passes `sites.open_rooms(cf.cheats, skip=id)`. Build and entry changes wait until the
+  cheat is off. On/off use `compile.enable/disable`; My cheats then follows through
+  `live.mark_on` / `turn_off(restore=False)`. A variable value goes through
+  `set_variable` (live when on); while the layout differs from the built one it is kept
+  for the next build. Pro errors (`SiteChanged`, `Overlap`, `LockFailed`, `CantConvert`,
+  `SearchReplaced`) are shown as they read (`tab.fail`), not with the guided "Couldn't
+  lock this value" wording. The editor assembles 300 ms after typing stops on the worker
+  and drops results for older text. The budget reads the console, so it is worked out
+  when an entry opens and after a build. "Assembler not found" is shown when
+  `default_assembler(settings.nasm_path)` fails. Guided Lock it / Make it work refuse a
+  cheat with `pro` ("edited in Pro"). The export dialog's "Make a cave at its writer" is
+  disabled until Watch (step 17).
+- **Step 13, Code view.** `core/pro/code_page.py`: the page is read inside its memory map
+  only. Decoding starts at the earliest of the 64 bytes before the address whose stream
+  lands on it. "Show original" overlays the off-bytes of cheats that are on. Copy AOB
+  uses `updater.make_signature` (branch and RIP-relative fields wildcarded). Make NOP /
+  cave entry adds to the Pro cheat picked in the Cheats tab when it is off, else makes a
+  new cheat.
+- **Step 14, Memory view.** `core/pro/memory_page.py` reads only the parts of the 4 KiB
+  page inside readable maps; the rest (and a part whose read fails) is `??` and the link
+  stays (AC-7.1). The inspector shows all 10 PR-2 types.
+- **Step 15, Scanner and address list.** `core/pro/scan.py`: regions (game data, all
+  writable, all readable, game module), the value as typed (no guided guessing), pages of
+  1,000 through `scan_results(offset)`, AOB over `read_code_image`. The console has one
+  search: `Session.search_owner` records who started it (`take_search(owner)` sets it;
+  the guided `Scanner._first` sets itself, with no other change). A Pro first scan takes
+  the search from the guided one, and a Pro search replaced by anything else says so.
+  Progress shows time left (AC-2.1). The address list
+  (`core/pro/addresses.AddressRow`) freezes with the shared Freezer under `pro:{addr:x}`
+  keys (10 Hz). Closing the Pro window drops those freezes; a new game clears them as it
+  does every freeze. The badge comes from the cheat the row would make (AC-2.3). Find
+  what writes / accesses are disabled until Watch (step 17). Pointer scan opens the
+  guided pointer dialog and puts the path in the row's comment.
+- **Not done here.** The Watch tab is a placeholder (steps 16-17). The NG
+  `scan_results` offset and the unsigned/greater/less codes are still C-P2 on a real
+  console.

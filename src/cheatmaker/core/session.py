@@ -90,6 +90,9 @@ class Session:
         # The console has one memory search at a time: whoever starts one that is not
         # the player's (e.g. Find it again's class search) calls take_search() first.
         self.on_search_taken: list[Callable[[], None]] = []
+        # Who started the console's current search (the guided Scanner, the Pro
+        # scanner, or None for another search): the Pro scanner checks it is still its own.
+        self.search_owner: object | None = None
         # Module-offset ranges [start, end) that saved find-again notes keep for their
         # routines and slots (even while still zero): new caves and slots avoid them.
         self.reserved_rooms: list[tuple[int, int]] = []
@@ -125,10 +128,11 @@ class Session:
                 self.client = None
         self._set_game(None)
 
-    def take_search(self) -> None:
+    def take_search(self, owner: object | None = None) -> None:
         """Another search is about to replace the console's search session."""
         for cb in list(self.on_search_taken):
             cb()
+        self.search_owner = owner
 
     def require_client(self) -> ConsoleClient:
         if self.client is None:

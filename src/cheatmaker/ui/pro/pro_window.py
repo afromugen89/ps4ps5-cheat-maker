@@ -21,9 +21,11 @@ from cheatmaker.core.pro.asm import Assembler, AssemblerNotFound, default_assemb
 from cheatmaker.core.session import GameInfo
 from cheatmaker.ui.controller import Controller
 from cheatmaker.ui.pro import hints
+from cheatmaker.ui.pro.address_list import AddressListTab
 from cheatmaker.ui.pro.cheats_tab import CheatsTab
 from cheatmaker.ui.pro.code_tab import CodeTab
 from cheatmaker.ui.pro.memory_tab import MemoryTab
+from cheatmaker.ui.pro.scanner_tab import ScannerTab
 from cheatmaker.ui.pro.tab import ProTab, game_text
 from cheatmaker.ui.tasks import TaskRunner
 
@@ -90,8 +92,10 @@ class ProWindow(QMainWindow):
             return None
 
     def _build_tabs(self) -> None:
-        for title in (hints.TAB_SCANNER, hints.TAB_ADDRESSES):
-            self.add_tab(_Placeholder(self.ctl, self.tasks, ""), title)
+        self.scanner = ScannerTab(self.ctl, self.tasks)
+        self.add_tab(self.scanner, hints.TAB_SCANNER)
+        self.addresses = AddressListTab(self.ctl, self.tasks)
+        self.add_tab(self.addresses, hints.TAB_ADDRESSES)
         self.code = CodeTab(self.ctl, self.tasks)
         self.add_tab(self.code, hints.TAB_CODE)
         self.memory = MemoryTab(self.ctl, self.tasks)
@@ -100,6 +104,13 @@ class ProWindow(QMainWindow):
         self.cheats = CheatsTab(self.ctl, self.tasks, self.assembler, self.save)
         self.add_tab(self.cheats, hints.TAB_CHEATS)
         self.code.make_entry = self._entry_from_code
+        self.scanner.add_address = lambda addr, vtype: self.addresses.add(addr, vtype)
+        self.scanner.show_code = lambda addr: self._show(self.code, addr)
+        self.addresses.show_memory = lambda addr: self._show(self.memory, addr)
+
+    def _show(self, tab: CodeTab | MemoryTab, addr: int) -> None:
+        self.tabs.setCurrentWidget(tab)
+        tab.go(addr)
 
     def _entry_from_code(self, kind: str, offset: int) -> None:
         self.tabs.setCurrentWidget(self.cheats)

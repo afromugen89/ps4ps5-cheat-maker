@@ -87,3 +87,21 @@ MAKE_ENTRY_TIP = "Add it to the Pro cheat picked in the Cheats tab, or make a ne
 # -- Memory view (PR-7, read-only) ----------------------------------------------------------------
 MEMORY = "Type an address and press Go. ?? marks memory the game doesn't have. Read-only for now."
 MEMORY_SELECTED = "At {place}:"
+
+# -- Scanner and address list (PR-2) -----------------------------------------------------------
+SCANNER = (
+    "Pick where to look and the number type, then First scan. Change the value in the game "
+    "and Next scan until few are left. Double-click a result to add it to the address list."
+)
+SCAN_COUNT = "{n:,} found"
+SCAN_PAGE = "Page {page} of {pages}"
+SCAN_PROGRESS = "{pct}% · {left}"
+SCAN_CANCELLED = "Search cancelled."
+AOB_FOUND = "{n} place(s) match in the game's code."
+AOB_TIP = "Bytes as hex pairs, ?? for any byte, e.g. C4 C1 7A 11 ?? 24"
+ADDRESSES = "Addresses you keep. Type in Value to set it once; tick Freeze to keep it there."
+ADD_ADDRESS = "Where (e.g. 0x20000040 or eboot.bin+0x4010):"
+ADDED = "Added {n} address(es) to the address list."
+POINTER_FOUND = "Pointer path for {place}: {chain}"
+FIND_WRITES = "Find what writes"
+FIND_ACCESSES = "Find what accesses"

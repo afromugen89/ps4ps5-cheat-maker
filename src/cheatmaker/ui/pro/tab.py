@@ -6,6 +6,7 @@ from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
 from cheatmaker.core.pro.asm_text import CantConvert
 from cheatmaker.core.pro.compile import SiteChanged
+from cheatmaker.core.pro.scan import SearchReplaced
 from cheatmaker.core.pro.sites import Overlap
 from cheatmaker.core.session import GameInfo
 from cheatmaker.errors import LockFailed
@@ -14,7 +15,7 @@ from cheatmaker.ui.messages import report
 from cheatmaker.ui.pro import hints
 from cheatmaker.ui.tasks import TaskRunner
 
-PRO_ERRORS = (SiteChanged, Overlap, LockFailed, CantConvert)
+PRO_ERRORS = (SiteChanged, Overlap, LockFailed, CantConvert, SearchReplaced)
 """Errors whose own text is the message in Pro (they name the site, the bytes, the other
 cheat or the room); the guided wording ("Couldn't lock this value") would mislead."""
 

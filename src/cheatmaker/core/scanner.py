@@ -270,6 +270,7 @@ class Scanner:
         game = self.session.require_game()
         regions = self.session.scannable_regions()
         self.reset()
+        self.session.search_owner = self  # a Pro search running now is replaced
         self.scan_log.new_search(game)
         if cmp is None:
             cmp = Compare.UNKNOWN if value is None else Compare.EXACT
@@ -458,6 +459,7 @@ class Scanner:
         game = self.session.require_game()
         regions = self.session.scannable_regions()
         self.reset()
+        self.session.search_owner = self  # a Pro search running now is replaced
         self.scan_log.new_search(game)
         types = tuple(vt for vt, _w in parts)
         ways = tuple(w for _vt, w in parts)
