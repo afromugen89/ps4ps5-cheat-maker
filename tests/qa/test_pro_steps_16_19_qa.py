@@ -532,3 +532,122 @@ def test_bug05_a_new_game_during_a_watch_clears_the_old_games_list(watch, pro):
     row = ws.InstructionRow(fg.WRITER, "vmovss [r12+0x2ac], xmm1", 0, 1, _hit(), _hit())
     watch._ended(ws.WatchResult([row], 1, ws.STOPPED, 1.0))
     assert watch.targets == [] and watch.target_table.rowCount() == 0
+
+
+# == re-test of a758686: Session.claim_table on the guided paths (BUG-01 fix) ==================
+def _writer():
+    from cheatmaker.core.locker import Writer
+
+    return Writer(fg.WRITER, fg.VMOVSS_W, "vmovss [r12+0x2ac], xmm1", 1)
+
+
+def test_tc70_guided_collect_unchanged_and_releases_the_table(g):
+    """No sample: Player only's collect works as before, and frees the table."""
+    objs = cv.collect_objects(g.session, _writer(), 0.25, sleep=g.fight(1))
+    assert fg.PLAYER_AT[1] in objs and g.session.table_owner is None
+    assert g.fake.peek(fg.PID, fg.WRITER, len(fg.VMOVSS_W)) == fg.VMOVSS_W
+
+
+def test_tc71_guided_collect_releases_the_table_on_cancel_and_on_a_lost_link(g):
+    from cheatmaker.errors import ConnectionLost, ScanCancelled
+
+    cancel = threading.Event()
+    cancel.set()
+    with pytest.raises(ScanCancelled):
+        cv.collect_objects(g.session, _writer(), 0.25, cancel, sleep=lambda _s: None)
+    assert g.session.table_owner is None
+
+    def drop(_s: float) -> None:
+        raise ConnectionLost("not connected to the PS5")
+
+    with pytest.raises(ConnectionLost):
+        cv.collect_objects(g.session, _writer(), 0.25, sleep=drop)
+    assert g.session.table_owner is None
+    cv.collect_objects(g.session, _writer(), 0.25, sleep=g.fight(1))  # usable again
+
+
+def test_tc72_guided_collect_during_a_sample_writes_nothing(g):
+    from cheatmaker.core.session import SAMPLER_TABLE
+    from cheatmaker.errors import TableInUse
+
+    n = len(g.fake.writes)
+    with g.session.claim_table(SAMPLER_TABLE), pytest.raises(TableInUse, match="sampler"):
+        cv.collect_objects(g.session, _writer(), 0.25, sleep=g.fight(1))
+    assert len(g.fake.writes) == n and g.session.table_owner is None
+
+
+def test_tc73_sample_during_a_guided_collect_is_refused_not_no_room(g):
+    from cheatmaker.core.session import GUIDED_COLLECT
+    from cheatmaker.errors import TableInUse
+
+    n = len(g.fake.writes)
+    with g.session.claim_table(GUIDED_COLLECT), pytest.raises(TableInUse) as info:
+        sm.sample(g.session, fg.WRITER, ProWriter(g.session), seconds=0.25)
+    assert not isinstance(info.value, sm.NoRoomForSampler)
+    assert len(g.fake.writes) == n
+
+
+def test_tc74_racing_claims_one_wins_and_nothing_deadlocks(g):
+    from cheatmaker.errors import TableInUse
+
+    won, refused = [], []
+    go = threading.Barrier(8)
+
+    def claim(k: int) -> None:
+        go.wait()
+        try:
+            with g.session.claim_table(f"owner {k}"):
+                won.append(k)
+                time.sleep(0.05)
+        except TableInUse:
+            refused.append(k)
+
+    threads = [threading.Thread(target=claim, args=(k,)) for k in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(5)
+    assert not any(t.is_alive() for t in threads)
+    assert len(won) >= 1 and len(won) + len(refused) == 8
+    assert g.session.table_owner is None
+
+
+@pytest.mark.xfail(
+    reason="BUG-07: Find it next time drops the Player only filter silently during a sample",
+    strict=True,
+)
+def test_bug07_find_it_next_time_says_the_sampler_has_the_table(g):
+    """The guide (10.3) says the Player only collect "can't start: it says the sampler is
+    using the space". refind._field_filter swallows TableInUse like any collect failure
+    and learns the hook with no filter (it may catch an enemy's object next run)."""
+    from types import SimpleNamespace
+
+    from cheatmaker.core import refind
+    from cheatmaker.core.session import SAMPLER_TABLE
+    from cheatmaker.errors import TableInUse
+
+    cand = SimpleNamespace(address=fg.WRITER, code=fg.VMOVSS_W, text="vmovss", hits=1)
+    with g.session.claim_table(SAMPLER_TABLE), pytest.raises(TableInUse):
+        refind._field_filter(g.session, cand, fg.PLAYER_AT[1], 0.25, None)
+
+
+@pytest.mark.xfail(
+    reason="BUG-07: Bring them over drops the hook way as 'no spare room' during a sample",
+    strict=True,
+)
+def test_bug07_bring_them_over_doesnt_call_a_busy_table_no_room(g):
+    """carry.collect_classes turns TableInUse (a LockFailed) into CarryFailed(NO_ROOM);
+    the dialog then drop_hook()s the object's hook way for the new version."""
+    from types import SimpleNamespace
+
+    from cheatmaker.core import carry
+    from cheatmaker.core.session import SAMPLER_TABLE
+
+    hook = SimpleNamespace(filter=SimpleNamespace(kind="field"))
+    site = SimpleNamespace(offset=fg.WRITER - fg.BASE, code=fg.VMOVSS_W, text="vmovss")
+    item = SimpleNamespace(old=SimpleNamespace(hook=hook), site=site, obj=SimpleNamespace(id="hp"))
+    with g.session.claim_table(SAMPLER_TABLE):
+        try:
+            carry.collect_classes(g.session, item, seconds=0.25, sleep=g.fight(1))  # type: ignore[arg-type]
+        except carry.CarryFailed as exc:
+            assert exc.reason != carry.NO_ROOM, "a busy table reported as 'no spare room'"
