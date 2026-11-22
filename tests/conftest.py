@@ -7,6 +7,7 @@ import pytest
 
 from cheatmaker.console.fake import PROT_R, PROT_W, PROT_X, FakeConsole
 from cheatmaker.core.session import Session
+from cheatmaker.paths import nasm_exe
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -20,6 +21,16 @@ GOLD_ADDR = HEAP_BASE + 0x80  # int32 2450
 BAR_ADDR = HEAP_BASE + 0xC0  # float 87.4
 STATIC_ADDR = DATA_BASE + 0x10  # int32 5 (skill points in module data)
 WRITER_ADDR = MODULE_BASE + 0x100  # "mov [rax],ecx" that writes health
+
+
+def pytest_collection_modifyitems(config, items):
+    """``needs_nasm`` tests skip when no assembler is found (CI fetches one first)."""
+    if nasm_exe() is not None:
+        return
+    skip = pytest.mark.skip(reason="NASM not found (run tools/fetch_nasm.py or put nasm on PATH)")
+    for item in items:
+        if "needs_nasm" in item.keywords:
+            item.add_marker(skip)
 
 
 @pytest.fixture(autouse=True)

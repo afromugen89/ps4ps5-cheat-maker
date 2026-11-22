@@ -23,7 +23,10 @@ where = ["src"]
 testpaths = ["tests"]
 pythonpath = ["src"]
 qt_api = "pyside6"
-markers = ["real_console: needs a real PS5 (skipped unless CHEATMAKER_PS5_IP is set)"]
+markers = [
+    "real_console: needs a real PS5 (skipped unless CHEATMAKER_PS5_IP is set)",
+    "needs_nasm: runs the real NASM assembler (skipped when paths.nasm_exe() finds none)",
+]
 
 [tool.ruff]
 line-length = 100
