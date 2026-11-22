@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import logging
+import math
+import time
 from collections.abc import Callable
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QCheckBox,
     QFileDialog,
@@ -28,12 +30,17 @@ from cheatmaker.core import project as pj
 from cheatmaker.core import updater as up
 from cheatmaker.core.cheats import Cheat, Location, LocationKind, combine, versions_differ
 from cheatmaker.core.locker import NOP
+from cheatmaker.core.pro import compile as pro_compile
+from cheatmaker.core.pro.asm_text import FREEZE_REFUSED
+from cheatmaker.core.pro.compile import SiteChanged
+from cheatmaker.core.pro.sites import Overlap
 from cheatmaker.core.values import parse_number
 from cheatmaker.errors import CheatMakerError, ConsoleBusy, ProjectFileError
 from cheatmaker.ui import hints
 from cheatmaker.ui.controller import Controller
 from cheatmaker.ui.find_again import FindAgain, LearnDialog
 from cheatmaker.ui.find_wizard import fmt_value
+from cheatmaker.ui.messages import report
 
 log = logging.getLogger(__name__)
 
@@ -86,6 +93,10 @@ def _line_details(loc: Location) -> str:
     return f"{loc.part}: {where}: {bytes_}" if loc.part else f"{where}: {bytes_}"
 
 
+PRO_TOGGLE_ERRORS = (SiteChanged, Overlap)
+"""Turning a Pro cheat on refused by Pro's rules: the error's text says why."""
+
+
 class CheatsView(QWidget):
     def __init__(self, ctl: Controller) -> None:
         super().__init__()
@@ -94,6 +105,7 @@ class CheatsView(QWidget):
         self.open_build: Callable[..., None] = lambda **kw: None
         self.open_save: Callable[[], None] = lambda: None
         self.finder = FindAgain(ctl)
+        self._pro_writer = pro_compile.ProWriter(ctl.session, warn=ctl.message.emit)
         self.open_learn: Callable[[Cheat], None] = lambda c: LearnDialog(
             self.ctl, self.finder, c, self
         ).exec()
@@ -306,17 +318,21 @@ class CheatsView(QWidget):
             return
         c = self.cheats[item.row()]
         try:
-            if item.column() == COL_ON:
+            if item.column() == COL_ON and id(c) in self.ctl.pro_busy:
+                self.ctl.message.emit(hints.PRO_BUSY.format(name=c.name))
+            elif item.column() == COL_ON:
                 want = item.checkState() == Qt.CheckState.Checked
                 if want and not c.enabled:
                     if self.finder.confirm(c):  # AC-12.2: ask once per run
                         self.finder.before_on(c)
-                        self.ctl.live.turn_on(c)
+                        self._turn_on(c)
                         if c.carried == "test" and c.enabled:
                             self.finder.tested(c)
                 elif not want and c.enabled:
-                    self.ctl.live.turn_off(c)
+                    self._turn_off(c)
                     self.finder.after_off(c)
+                self.ctl.cheats_changed.emit()  # e.g. Pro's tab shows it on (QA BUG-14)
+                return
             elif item.column() == COL_NAME:
                 name = item.text().strip()
                 if not name:
@@ -333,13 +349,88 @@ class CheatsView(QWidget):
                     _restore_value_bytes(c, saved)
                     raise
                 self.finder.cheat_changed(c)
+        except PRO_TOGGLE_ERRORS as exc:  # their own text names the site or the cheat
+            report(exc, "toggle")
+            self.ctl.message.emit(str(exc))
         except Exception as exc:
             self.ctl.fail(exc, "toggle" if item.column() == COL_ON else "edit")
             c.enabled = c.enabled and self.ctl.session.connected
         self.fill()
 
+    def _turn_on(self, c: Cheat) -> None:
+        """A Pro cheat goes on through Pro's rules (sites checked, overlap refused, read
+        back, undone on failure); any other cheat as before."""
+        if c.pro is None:
+            self.ctl.live.turn_on(c)
+            return
+        if c.freeze:  # checked before any write: Pro never freezes (QA BUG-02)
+            raise ValueError(FREEZE_REFUSED)
+        self.ctl.cave_clears.pop(id(c), None)  # its cave is needed again (QA BUG-13)
+        session = self.ctl.session
+        enabled = [x for x in self.cheats if x.enabled and x is not c]
+        already = pro_compile.enable(session, c.pro, self._pro_writer, enabled)
+        try:
+            self.ctl.live.mark_on(c)
+        except Exception:  # never leave it in the game while shown off
+            if not already:
+                pro_compile.disable(session, c.pro, self._pro_writer)
+            raise
+        if already:
+            self.ctl.message.emit(hints.PRO_ALREADY_ON.format(name=c.name))
+
+    def _turn_off(self, c: Cheat) -> None:
+        """A Pro cheat's jumps go back at once; its caves are zeroed DISABLE_WAIT later
+        by a timer, so the window never stops for the wait (AC-8.5). One clear is
+        pending per cheat: a later untick replaces it, a tick drops it (QA BUG-13)."""
+        if c.pro is None:
+            self.ctl.live.turn_off(c)
+            return
+        session = self.ctl.session
+        self.ctl.cave_clears.pop(id(c), None)
+        caves = pro_compile.restore_sites(session, c.pro, self._pro_writer)
+        self.ctl.live.turn_off(c, restore=False)  # already written back
+        if caves:
+            token = object()
+            self.ctl.cave_clears[id(c)] = token
+            self._clear_later(c, session.game, token, time.monotonic())
+
+    def _clear_later(self, c: Cheat, game, token: object, restored: float) -> None:
+        """Run ``_clear_caves`` once DISABLE_WAIT has passed since ``restored`` (a timer
+        may fire a little early: then it waits for the rest)."""
+        left = pro_compile.DISABLE_WAIT - (time.monotonic() - restored)
+        QTimer.singleShot(
+            max(1, math.ceil(left * 1000)), lambda: self._clear_caves(c, game, token, restored)
+        )
+
+    def _clear_caves(self, c: Cheat, game, token: object, restored: float) -> None:
+        """The second half of turning a Pro cheat off, unless it was turned on or off
+        again (another token), a Pro task is changing it, or the game changed meanwhile.
+        ``clear_caves`` itself still checks that no jump leads into a cave."""
+        if self.ctl.cave_clears.get(id(c)) is not token:
+            return
+        if time.monotonic() - restored < pro_compile.DISABLE_WAIT:
+            self._clear_later(c, game, token, restored)
+            return
+        del self.ctl.cave_clears[id(c)]
+        session = self.ctl.session
+        if (
+            c.enabled
+            or c.pro is None
+            or id(c) in self.ctl.pro_busy
+            or not session.connected
+            or session.game != game
+        ):
+            return
+        try:
+            pro_compile.clear_caves(session, c.pro, self._pro_writer)
+        except Exception as exc:
+            self.ctl.fail(exc, "toggle")
+
     def do_build(self, c: Cheat) -> None:
         """Make it work on this cheat's value; the result replaces it."""
+        if c.pro is not None:  # edited in Pro: the main window says so
+            self.open_build(source=c)
+            return
         if not single_value(c):
             self.ctl.message.emit(hints.BUILD_PICK_SINGLE)
             return

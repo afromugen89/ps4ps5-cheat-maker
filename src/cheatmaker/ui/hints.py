@@ -107,6 +107,10 @@ SEARCH_LOST = (
     "Your search was ended because Cheat Maker searched memory to find a value again. "
     "Press Search to start it again."
 )
+SEARCH_LOST_PRO = (
+    "Your search was ended because the Pro window's scanner started its own search. "
+    "Press Search to start it again."
+)
 SEARCH_DROPPED = (
     "The PS5 dropped the connection your search ran on, so the search is gone. Your "
     "cheats are still on. Press Search to start it again."
@@ -458,3 +462,5 @@ TRACE_HOW = {
     "caller": "the caller",
     "exec": "an execute breakpoint",
 }
+PRO_BUSY = "{name} is being changed in the Pro window. Try again in a moment."
+PRO_ALREADY_ON = "{name} was already on in the game."

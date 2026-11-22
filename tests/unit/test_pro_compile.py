@@ -524,3 +524,56 @@ def test_values_use_the_built_layout_not_the_current_list(s):
     assert pc.variable("mult").value == 2.0 and entry.cave_bytes == built
     assert pc_.build(s, pc, entry, FakeAssembler()).ok
     assert pc_.layout_current(pc) and pc_.set_variable(pc, "mult", 5.0) == pc_.SAVED
+
+
+def test_enable_reports_already_on_and_is_on_probe(s):
+    """QA BUG-03: all sites on -> nothing written, True; some on -> SiteChanged."""
+    import pytest as _pytest
+
+    from cheatmaker.core.pro import compile as c
+    from cheatmaker.core.pro.model import ProCheat, ProEntry
+
+    session = s
+    client = session.require_client()
+    game = session.require_game()
+    PID, MODULE_BASE = game.pid, game.module_base
+    off = client.read(PID, MODULE_BASE + 0x100, 2)
+    entry = ProEntry("bytes", 0x100, off, b"\x90\x90")
+    pc = ProCheat("p1", "Nop", [entry])
+    writer = c.ProWriter(session)
+    assert not c.is_on(session, pc)
+    assert c.enable(session, pc, writer) is False
+    assert c.is_on(session, pc)
+    writes = len(client.writes)
+    assert c.enable(session, pc, writer) is True and len(client.writes) == writes
+    other = client.read(PID, MODULE_BASE + 0x10, 1)
+    two = ProCheat("p2", "Two", [entry, ProEntry("bytes", 0x10, other, b"\x91")])
+    with _pytest.raises(c.SiteChanged):
+        c.enable(session, two, writer)
+    assert client.read(PID, MODULE_BASE + 0x10, 1) == other
+
+
+def test_clear_caves_leaves_the_cave_when_a_jump_leads_there_again(s, fake):
+    """QA BUG-13: the jump went back in before the caves were zeroed -> nothing written."""
+    pc = _cheat(s)
+    entry = pc.entries[0]
+    writer = pc_.ProWriter(s)
+    pc_.enable(s, pc, writer)
+    assert pc_.restore_sites(s, pc, writer)
+    fake.poke(PID, BASE + HOOK, entry.on)  # turned on again by another path
+    fake.writes.clear()
+    assert pc_.clear_caves(s, pc, writer) is False
+    assert fake.writes == []
+    assert fake.peek(PID, BASE + entry.cave, len(entry.cave_bytes)) == entry.cave_bytes
+    fake.poke(PID, BASE + HOOK, HOOK_CODE)
+    assert pc_.clear_caves(s, pc, writer) is True
+    assert fake.peek(PID, BASE + entry.cave, len(entry.cave_bytes)) == bytes(len(entry.cave_bytes))
+
+
+def test_disable_keeps_the_cave_when_the_jump_is_back_after_the_wait(s, fake):
+    pc = _cheat(s)
+    entry = pc.entries[0]
+    pc_.enable(s, pc, pc_.ProWriter(s))
+    on_again = lambda _t: fake.poke(PID, BASE + HOOK, entry.on)  # noqa: E731
+    assert pc_.disable(s, pc, pc_.ProWriter(s), sleep=on_again) is False
+    assert fake.peek(PID, BASE + entry.cave, len(entry.cave_bytes)) == entry.cave_bytes

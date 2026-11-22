@@ -38,6 +38,9 @@ _MARK = "__cm_i"
 """Marker labels put before each instruction while checking (never in the result)."""
 
 
+FREEZE_REFUSED = "A freeze cheat can't be edited in Pro. Use Lock it or Make it work on it first."
+
+
 class CantConvert(CheatMakerError):
     """The bytes can't be written as assembly (they don't decode)."""
 
@@ -246,6 +249,8 @@ def _is_routine(loc: Location) -> bool:
 def _check_adoptable(cheat: Cheat) -> None:
     if not cheat.locations:
         raise CantConvert(f"{cheat.name}: there is nothing to write")
+    if cheat.freeze:  # Pro writes once; the freeze would be lost (QA BUG-02)
+        raise CantConvert(FREEZE_REFUSED)
     if cheat.session_only or cheat.anchor is not None or cheat.learned_parts:
         raise CantConvert(f"{cheat.name}: its address is found each run, so it is PC only")
     for loc in cheat.locations:

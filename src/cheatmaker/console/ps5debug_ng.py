@@ -22,7 +22,7 @@ import time
 from collections.abc import Callable
 from enum import IntEnum
 
-from cheatmaker.busy import BUSY_MESSAGE, MAIN_THREAD_WAIT, on_ui_thread
+from cheatmaker.busy import BUSY_MESSAGE, MAIN_THREAD_WAIT, on_ui_thread, thread_wait
 from cheatmaker.console.client import (
     ForegroundApp,
     MemMap,
@@ -668,6 +668,9 @@ class Ps5DebugNgClient:
             if not got:
                 self._busy_until = time.monotonic() + BUSY_HOLD_S
                 log.warning("action=console_busy cmd_before=%s", self._w.last_cmd)
+                raise ConsoleBusy(BUSY_MESSAGE)
+        elif (limit := thread_wait()) is not None:
+            if not self._lock.acquire(timeout=limit):
                 raise ConsoleBusy(BUSY_MESSAGE)
         else:
             self._lock.acquire()

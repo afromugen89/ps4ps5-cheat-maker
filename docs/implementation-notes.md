@@ -877,3 +877,123 @@ Built from docs/architecture-pro.md (spec docs/spec-pro.md), implementation step
     (the editable value), `take_value`, `set_variable` and `variable_addresses` use
     only that. `set_variable` refuses with "build the cave first" when the variable
     list differs from it.
+
+## Cheat Maker Pro, R1 steps 11-15: the UI (2026-11-22)
+
+- **Step 11, window shell.** `ui/pro/pro_window.py` is a second window on the main
+  window's `Controller` and session; nothing in it opens a connection (AC-1.1). Pro work
+  runs on its own `TaskRunner`, so the guided screens' `busy_changed` (e.g. Find's trace
+  button) never flickers with the Pro poll. Every 2 s `Session.game_alive()` runs on the
+  worker: the foreground app, else the game's memory map answering (`ReadFailed`: gone,
+  `ConsoleBusy`: still alive). When the game is gone, every tab shows "Game not running"
+  (AC-1.2). `ui/pro/tab.py` holds the `ProTab` base (banner, disabled body). The safety
+  notice is shown once per title ID (`Settings.pro_notice_shown`). The main window has a
+  "Pro" button and keeps one Pro window.
+- **Step 12, Cheats tab.** Lists every cheat of My cheats with its badge. A guided cheat
+  is previewed as adopted; Edit in Pro adopts it byte for byte (its `value_at` isn't
+  carried, as before). New cheat = name + hook; its cave is built at once with the
+  default source, because `compile_cheat` needs a placed cave to list and save it. Build
+  passes `sites.open_rooms(cf.cheats, skip=id)`. Build and entry changes wait until the
+  cheat is off. On/off use `compile.enable/disable`; My cheats then follows through
+  `live.mark_on` / `turn_off(restore=False)`. A variable value goes through
+  `set_variable` (live when on); while the layout differs from the built one it is kept
+  for the next build. Pro errors (`SiteChanged`, `Overlap`, `LockFailed`, `CantConvert`,
+  `SearchReplaced`) are shown as they read (`tab.fail`), not with the guided "Couldn't
+  lock this value" wording. The editor assembles 300 ms after typing stops on the worker
+  and drops results for older text. The budget reads the console, so it is worked out
+  when an entry opens and after a build. "Assembler not found" is shown when
+  `default_assembler(settings.nasm_path)` fails. Guided Lock it / Make it work refuse a
+  cheat with `pro` ("edited in Pro"). The export dialog's "Make a cave at its writer" is
+  disabled until Watch (step 17).
+- **Step 13, Code view.** `core/pro/code_page.py`: the page is read inside its memory map
+  only. Decoding starts at the earliest of the 64 bytes before the address whose stream
+  lands on it. "Show original" overlays the off-bytes of cheats that are on. Copy AOB
+  uses `updater.make_signature` (branch and RIP-relative fields wildcarded). Make NOP /
+  cave entry adds to the Pro cheat picked in the Cheats tab when it is off, else makes a
+  new cheat.
+- **Step 14, Memory view.** `core/pro/memory_page.py` reads only the parts of the 4 KiB
+  page inside readable maps; the rest (and a part whose read fails) is `??` and the link
+  stays (AC-7.1). The inspector shows all 10 PR-2 types.
+- **Step 15, Scanner and address list.** `core/pro/scan.py`: regions (game data, all
+  writable, all readable, game module), the value as typed (no guided guessing), pages of
+  1,000 through `scan_results(offset)`, AOB over `read_code_image`. The console has one
+  search: `Session.search_owner` records who started it (`take_search(owner)` sets it;
+  the guided `Scanner._first` sets itself, with no other change). A Pro first scan takes
+  the search from the guided one, and a Pro search replaced by anything else says so.
+  Progress shows time left (AC-2.1). The address list
+  (`core/pro/addresses.AddressRow`) freezes with the shared Freezer under
+  `pro:{row_id}:{addr:x}` keys (10 Hz; see the review fixes). Closing the Pro window drops those freezes; a new game clears them as it
+  does every freeze. The badge comes from the cheat the row would make (AC-2.3). Find
+  what writes / accesses are disabled until Watch (step 17). Pointer scan opens the
+  guided pointer dialog and puts the path in the row's comment.
+- **Not done here.** The Watch tab is a placeholder (steps 16-17). The NG
+  `scan_results` offset and the unsigned/greater/less codes are still C-P2 on a real
+  console.
+- **Review fixes, PR #39 (2026-11-22).**
+  - M1: the Pro window has its own status line (`ProMessages`). Every Pro tab, editor
+    and dialog speaks there, never in the main window. A dropped link still goes
+    through `Controller.fail`. `SiteChanged` also opens a dialog listing each site with
+    its expected and found bytes. `WriteFailed` and `AssemblerNotFound` have Pro wording.
+  - M2: `showEvent` restarts the liveness timer and polls at once (close, then reopen).
+  - M3: the cave editor keeps a draft per entry. `entry.source` takes it only when
+    Build succeeds. The editor is read-only while the cheat is on. Variable edits patch
+    the built bytes (`set_variable`) and never assemble a draft.
+  - M4: `ProScan.claim()` runs `take_search(owner, by="pro")` on the UI thread before the
+    worker starts. A Pro first scan is refused while the guided runner is busy.
+    `Session.search_lock` is held around "still mine?" plus the console call by both
+    scanners (worker threads only). The guided `_narrow` refuses when another search
+    owns the console. Find says "the Pro window's scanner started its own search"
+    (`LOST_PRO`).
+  - M5 (coordinator's call): My cheats turns a cheat with `pro` on and off through
+    `compile.enable`/`disable` (site check, overlap, read-back, undo). An overlap or a
+    changed site shows the error's own text.
+  - Minors:
+    - Freeze keys are `pro:{row_id}:{addr:x}`.
+    - Address-list freezes pause while the game isn't running and resume when it
+      runs again.
+    - Closing Pro asks first when rows are frozen (no question when the app closes).
+    - Pro builds, entry additions and variable edits run on a copy on the worker and
+      are applied on the UI thread. `others`/`open_rooms` are worked out on the UI
+      thread.
+    - The liveness poll waits at most `ALIVE_WAIT` (0.5 s) for the console
+      (`busy.short_wait`, honoured by the NG socket lock off the UI thread) and counts
+      busy as alive.
+    - A failed Pro action saves nothing.
+- **QA round, BUG-01..12 (2026-11-22).**
+  - BUG-01: a Pro task records the cheat it changes (`Controller.pro_busy`). My cheats
+    refuses to toggle that cheat meanwhile. A build, entry or variable result for a
+    cheat that went on or off meanwhile is dropped ("turned on meanwhile").
+  - BUG-02 (coordinator's call): Edit in Pro refuses freeze cheats (`FREEZE_REFUSED`;
+    the preview says why). Turning a Pro cheat on checks `freeze` before any write. If
+    `mark_on` still raises, the writes are undone.
+  - BUG-03 (coordinator's call): `compile.enable` returns True and writes nothing when
+    every site already holds its on-bytes ("was already on in the game"). Some sites
+    on and some off is still SiteChanged. A Refresh that keeps the PID probes the Pro
+    cheats (`compile.is_on`) and marks the running ones On.
+  - BUG-04: the percent search and Find it again's class search take
+    `Session.search_lock` and the owner.
+  - BUG-05: the editor and Build are locked while a build runs; `built(entry, text)`
+    drops the draft only when it is the text that was built.
+  - BUG-06: the Code view reads its page again on every cheat change.
+  - BUG-07: Convert to assembly reports an assembler failure in the dialog.
+  - BUG-08: a list refresh keeps the editor (text, cursor, pending assemble) when the
+    same entry is still shown.
+  - BUG-09: the SiteChanged dialog has real line breaks.
+  - BUG-10: a cheat is named once per instruction.
+  - BUG-11: Code and Memory page loads carry a request number; only the last one
+    asked for is shown.
+  - BUG-12: Back gets the old page only after the new one has loaded.
+  - O1: unticking a Pro cave cheat in My cheats restores the jumps at once. A timer
+    zeroes the caves `DISABLE_WAIT` later (`compile.restore_sites` /
+    `clear_caves`), unless the cheat went on again or the game changed.
+- QA re-test (BUG-13..15):
+  - BUG-13: My cheats keeps one pending cave clear per cheat in `ctl.cave_clears`
+    (a token). Any tick or untick, and any Pro On/Off, replaces or drops it. The
+    timer waits for the rest if it fires before `DISABLE_WAIT` has passed since the
+    last restore, and it skips while `ctl.pro_busy` holds the cheat.
+    `compile.clear_caves` (used by `disable` too) reads the other sites first and
+    zeroes nothing unless they all hold their off-bytes. It returns False when it
+    skips.
+  - BUG-14: a tick or untick in My cheats emits `cheats_changed`, so Pro's tab follows.
+  - BUG-15: the cave editor shows new built bytes for the same entry. With a draft, it
+    assembles the draft again instead.

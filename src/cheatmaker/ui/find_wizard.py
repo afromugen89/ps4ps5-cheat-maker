@@ -50,6 +50,7 @@ from cheatmaker.core.scanner import (
     ABOUT,
     FEW_MATCHES,
     LOST_LINK,
+    LOST_PRO,
     MAX_SHOW,
     NOTED,
     TOO_MANY,
@@ -1225,8 +1226,14 @@ class FindWizard(QWidget):
         self.count.setText("")
         self.table.setRowCount(0)
         self.timer.stop()
-        dropped = self.ctl.scanner.lost_why == LOST_LINK
-        self.hint.setText(hints.SEARCH_DROPPED if dropped else hints.SEARCH_LOST)
+        why = self.ctl.scanner.lost_why
+        self.hint.setText(
+            hints.SEARCH_DROPPED
+            if why == LOST_LINK
+            else hints.SEARCH_LOST_PRO
+            if why == LOST_PRO
+            else hints.SEARCH_LOST
+        )
         self._update_buttons()
 
     def _new_game(self, game=None) -> None:
