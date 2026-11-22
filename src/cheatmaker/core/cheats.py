@@ -97,8 +97,8 @@ class Cheat:
     typed. In memory only (the address moves every run); never saved, Combine drops it."""
     pro: ProCheat | None = field(default=None, compare=False)
     """The Pro source this cheat was compiled from (architecture-pro decision 3), or
-    None for a guided cheat. Will be saved in the .cmproj (step 8, compile.py), never
-    in cheat files."""
+    None for a guided cheat. Saved in the .cmproj (format 5 ``pro_cheats``, via
+    ``core/pro/compile.store``), never in cheat files."""
 
     @property
     def session_only(self) -> bool:

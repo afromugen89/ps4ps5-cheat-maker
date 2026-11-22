@@ -33,6 +33,8 @@ from cheatmaker.core import carry as cr
 from cheatmaker.core import project as pj
 from cheatmaker.core import refind as rf
 from cheatmaker.core.cheats import Cheat, Location, LocationKind
+from cheatmaker.core.pro import compile as pro_compile
+from cheatmaker.core.pro import sites as pro_sites
 from cheatmaker.core.session import GameInfo
 from cheatmaker.core.values import ValueType
 from cheatmaker.errors import (
@@ -230,18 +232,21 @@ class FindAgain(QObject):
         """New caves and slots never go where the notes' hooks live (even unused), nor
         where a hook of ours still is that the notes don't hold (one that couldn't be
         taken out after a failed Find it next time), nor where the notes' combined
-        cheats keep new code over spare zeros."""
+        cheats keep new code over spare zeros, nor where Pro cheats keep their caves."""
         p = self.ctl.project
         objects = list(p.objects) if p else []
         in_notes = {o.id for o in objects}
         with self._lock:
             objects += [o for i, o in self.installed.items() if i not in in_notes]
-        parts = cr.part_rooms(p) if p else []
+        parts = cr.part_rooms(p) + pro_sites.cave_rooms(p.pro_cheats) if p else []
         self.ctl.session.reserved_rooms = ah.reserved_rooms(objects) + parts
 
     def save(self) -> None:
-        self.keep_rooms()
+        cf = self.ctl.cheat_file
+        if cf is not None and any(c.pro is not None for c in cf.cheats):
+            pro_compile.store(self.ensure_project(), cf.cheats)  # Cheat.pro -> format 5
         p = self.ctl.project
+        self.keep_rooms()
         if p is None:
             return
         path = pj.project_path(p.title_id, p.version)
@@ -283,6 +288,9 @@ class FindAgain(QObject):
             return
         finally:
             self.keep_rooms()
+        p = self.ctl.project
+        if p is not None and p.pro_cheats and pro_compile.restore(p, self.ctl.ensure_file().cheats):
+            self.ctl.cheats_changed.emit()
         if self.ctl.project is not None and self.ctl.project.objects:
             self.ensure_cheats()
             self.ctl.cheats_changed.emit()

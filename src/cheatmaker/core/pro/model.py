@@ -4,7 +4,7 @@ A Pro cheat is a name plus entries: Bytes (on/off bytes at a site), NOP (the sit
 instructions replaced by NOPs) or Cave (assembly source, placed in the module's spare
 code and reached by a jump at the hook). Compiled bytes are stored next to the source,
 so a project loads, turns on and exports with no assembler on the PC. Saved in the
-``.cmproj`` (format 5) ``pro_cheats`` list; ``compile.py`` (later step) turns one into
+``.cmproj`` (format 5) ``pro_cheats`` list; ``compile.compile_cheat`` turns one into
 an ordinary ``Cheat``.
 
 All offsets are from the main module's base.

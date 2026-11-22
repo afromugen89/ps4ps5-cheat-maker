@@ -760,3 +760,27 @@ Built from docs/architecture-pro.md (spec docs/spec-pro.md), implementation step
   lines outside `eboot.bin` section 0 are refused. The guided `value_at` (editable
   value) is not carried into the Pro cheat (it is an immediate in the code, not a
   variable); follow-up for step 12.
+- **Step 8 (compile, on/off).** `core/pro/compile.py` + `core/pro/sites.py`.
+  `compile_cheat` emits per entry a cave line then its jump line (Bytes/NOP entries as
+  one line each). Local choice: the cave line is the same on and off, like the guided
+  builder's routines, so a cheat file turned off never zeroes code a game thread may be
+  inside; the Pro window's own `disable` still zeroes caves after 0.5 s (AC-8.5), and
+  `enable` accepts a cave site holding either zeros or exactly that cave (left by a
+  file). Variables end the first cave entry (`variable_offsets` is deterministic, so
+  no map is needed to compile); other caves get them as `equ` symbols. The editable
+  variable becomes `value_type`/`value_at`, and `take_value` copies a value changed
+  in My cheats back into the source. New caves ask `find_cave` for `CAVE_ROOM` (256)
+  when it is there so later edits can grow in place; `room_at` limits growth to the
+  free zeros after the cave (16-byte spacer), `free_room` is the editor's budget; both
+  refuse with "The cave needs N bytes, M free." (AC-8.2). `enable`: overlap with any
+  enabled cheat refused by name (AC-8.8), every site read first (`SiteChanged` lists
+  address/expected/found, nothing written), then caves, jumps, other entries, each read
+  back (AC-8.4). `disable`: jumps and entries back, wait, caves zeroed, read back.
+  `ProWriter` logs `action=pro_write` and warns once per writer about a write that
+  continues past an address ending in 0xFF (`action=pro_write_ff`, AC-8.6).
+  `set_variable` returns saved / written (only the variable's bytes differ: written
+  live and read back) / restart (AC-8.7). Persistence: `find_again.save` stores
+  every `Cheat.pro` into `project.pro_cheats` (creating the `.cmproj` if needed; a Pro
+  cheat leaves the project only through `compile.forget`), `on_game` compiles them back
+  into My cheats, and `keep_rooms` reserves Pro caves from guided caves. The UI that
+  calls `build`/`enable`/`set_variable` is step 12.

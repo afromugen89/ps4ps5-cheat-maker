@@ -1,0 +1,484 @@
+"""Pro cheats: building, compiling to ordinary cheats, turning on and off.
+
+(architecture-pro "Export pipeline" and "Turning cheats on and off"; spec PR-8.)
+
+- **Compile.** ``compile_cheat(pc)`` makes the ``Cheat`` that My cheats lists and that
+  cheat files hold: per entry a cave line then its jump line, or a Bytes/NOP line.
+  The cave line is the same on and off (as the guided builder's routines): a file
+  turned off must never zero code a game thread may still be running. The editable
+  variable becomes the cheat's value (``value_type`` + ``value_at``).
+- **Variables** live at the end of the first cave entry's code (``align 4``, then each
+  in order). Other caves reach them as ``equ`` symbols.
+- **Sources are assembled at module offsets** (see ``asm_text``): a cave's ``org`` is
+  its module offset.
+- **On/off** (AC-8.4, AC-8.5) go through ``ProWriter``, which logs every write
+  (``action=pro_write``; the hook point for R2's journal) and warns once about writes
+  crossing an address ending in 0xFF (AC-8.6).
+"""
+
+from __future__ import annotations
+
+import logging
+import time
+from collections.abc import Callable, Iterable, Sequence
+from dataclasses import dataclass, replace
+
+import iced_x86 as ix
+
+from cheatmaker.core import cave as cv
+from cheatmaker.core.cheats import Cheat, Location, LocationKind
+from cheatmaker.core.pro import sites
+from cheatmaker.core.pro.asm import AsmResult, Assembler, CaveContext
+from cheatmaker.core.pro.model import JMP_REL32_SIZE, ProCheat, ProEntry, Variable
+from cheatmaker.core.session import Session
+from cheatmaker.errors import CheatMakerError, LockFailed, WriteFailed
+
+log = logging.getLogger(__name__)
+
+DISABLE_WAIT = 0.5
+"""Seconds between taking the jumps out and zeroing the caves (AC-8.5): a game thread
+inside a cave gets out first."""
+FAR = 1 << 30
+"""A cave is first assembled this far from its hook, so its size is the worst case."""
+TEMPLATE = "pro"
+DEFAULT_SOURCE = "original\njmp return\n"
+FF_WARNING = (
+    "A write crosses an address ending in FF: the console may write it in two steps, "
+    "so the game could briefly see half of it."
+)
+
+
+class NoRoom(LockFailed):
+    """The cave doesn't fit (AC-8.2: "needs N bytes, M free")."""
+
+
+class SiteChanged(CheatMakerError):
+    """A site doesn't hold the bytes recorded for it (AC-8.4); nothing was written."""
+
+    def __init__(self, found: Sequence[tuple[int, bytes, bytes]]) -> None:
+        self.found = list(found)  # (address, expected, found)
+        addr, want, got = self.found[0]
+        super().__init__(
+            f"The game's code at {addr:#x} isn't what this cheat expects "
+            f"(expected {want.hex(' ')}, found {got.hex(' ')}). Nothing was changed."
+        )
+
+
+# -- variables ------------------------------------------------------------------------
+def home(pc: ProCheat) -> ProEntry | None:
+    """The cave entry that holds the variables: the first cave."""
+    return next((e for e in pc.entries if e.kind == "cave"), None)
+
+
+def variable_offsets(variables: Sequence[Variable], code_len: int) -> dict[str, int]:
+    """Where each variable sits in its cave's bytes (they end the cave)."""
+    total = sum(v.vtype.size for v in variables)
+    at, out = code_len - total, {}
+    for v in variables:
+        out[v.name] = at
+        at += v.vtype.size
+    return out
+
+
+def variable_addresses(pc: ProCheat) -> dict[str, int]:
+    """Variable name -> module offset; empty while the home cave isn't built."""
+    entry = home(pc)
+    if entry is None or entry.cave is None or not entry.cave_bytes:
+        return {}
+    offs = variable_offsets(pc.variables, len(entry.cave_bytes))
+    return {name: entry.cave + off for name, off in offs.items()}
+
+
+# -- compiling ------------------------------------------------------------------------
+def _cave_lines(entry: ProEntry, pc: ProCheat) -> list[Location]:
+    if entry.cave is None or not entry.cave_bytes:
+        raise LockFailed(f"{pc.name}: a cave isn't assembled yet")
+    return [
+        Location(LocationKind.CODE_PATCH, entry.cave, entry.cave_bytes, entry.cave_bytes),
+        Location(LocationKind.CODE_PATCH, entry.offset, entry.on, entry.off),
+    ]
+
+
+def compile_cheat(pc: ProCheat) -> Cheat:
+    """The ordinary cheat for ``pc`` (``Cheat.pro`` links back to it)."""
+    if not pc.entries:
+        raise LockFailed(f"{pc.name}: there is nothing to write")
+    lines: list[Location] = []
+    home_line = None
+    for entry in pc.entries:
+        if entry.kind == "cave":
+            if home_line is None:
+                home_line = len(lines)
+            lines += _cave_lines(entry, pc)
+        else:
+            lines.append(Location(LocationKind.CODE_PATCH, entry.offset, entry.on, entry.off))
+    value_type = value_at = None
+    if pc.editable is not None and home_line is not None:
+        var = pc.variable(pc.editable)
+        at = variable_offsets(pc.variables, len(lines[home_line].on))[var.name]
+        value_type = var.vtype
+        value_at = [(home_line, at + i) for i in range(var.vtype.size)]
+    return Cheat(
+        name=pc.name,
+        locations=lines,
+        template=TEMPLATE,
+        value_type=value_type,
+        value_at=value_at,
+        hint=pc.comment or None,
+        pro=pc,
+    )
+
+
+def refresh(cheat: Cheat) -> None:
+    """Re-compile ``cheat`` from its Pro source after an edit (keeps its on/off state)."""
+    if cheat.pro is None:
+        return
+    fresh = compile_cheat(cheat.pro)
+    cheat.name, cheat.locations, cheat.hint = fresh.name, fresh.locations, fresh.hint
+    cheat.value_type, cheat.value_at = fresh.value_type, fresh.value_at
+
+
+def take_value(cheat: Cheat) -> None:
+    """Copy the editable value back into the Pro source when it was changed through the
+    ordinary cheat (My cheats' value box, ``Cheat.set_value``)."""
+    pc = cheat.pro
+    entry = home(pc) if pc is not None else None
+    if pc is None or pc.editable is None or entry is None or cheat.value is None:
+        return
+    var = pc.variable(pc.editable)
+    if cheat.value == var.value:
+        return
+    k = pc.variables.index(var)
+    pc.variables[k] = replace(var, value=cheat.value)
+    at = variable_offsets(pc.variables, len(entry.cave_bytes))[var.name]
+    data = pc.variables[k].encoded()
+    entry.cave_bytes = entry.cave_bytes[:at] + data + entry.cave_bytes[at + len(data) :]
+
+
+# -- project (.cmproj format 5) -----------------------------------------------------------
+def store(project, cheats: Iterable[Cheat]) -> bool:
+    """Put the Pro sources of ``cheats`` into ``project.pro_cheats`` (added or replaced
+    by id; a Pro cheat missing from ``cheats`` stays, only ``forget`` drops one).
+    True when anything changed."""
+    changed = False
+    by_id = {pc.id: k for k, pc in enumerate(project.pro_cheats)}
+    for cheat in cheats:
+        if cheat.pro is None:
+            continue
+        take_value(cheat)
+        k = by_id.get(cheat.pro.id)
+        if k is None:
+            by_id[cheat.pro.id] = len(project.pro_cheats)
+            project.pro_cheats.append(cheat.pro)
+            changed = True
+        else:
+            changed = changed or project.pro_cheats[k].to_json() != cheat.pro.to_json()
+            project.pro_cheats[k] = cheat.pro
+    return changed
+
+
+def forget(project, pro_id: str) -> None:
+    project.pro_cheats = [pc for pc in project.pro_cheats if pc.id != pro_id]
+
+
+def restore(project, cheats: list[Cheat]) -> list[Cheat]:
+    """Compiled cheats for the project's Pro cheats that ``cheats`` doesn't hold yet,
+    appended to ``cheats``; a Pro cheat that can't compile (an unplaced cave) is
+    logged and left out of the list (it stays in the project)."""
+    have = {c.pro.id for c in cheats if c.pro is not None}
+    added = []
+    for pc in project.pro_cheats:
+        if pc.id in have:
+            continue
+        try:
+            cheat = compile_cheat(pc)
+        except LockFailed as exc:
+            log.warning("action=pro_restore id=%s skipped: %s", pc.id, exc)
+            continue
+        cheats.append(cheat)
+        added.append(cheat)
+    return added
+
+
+# -- building entries -------------------------------------------------------------------
+def _reader(session: Session) -> Callable[[int, int], bytes]:
+    game = session.require_game()
+    client = session.require_client()
+    return lambda addr, n: client.read(game.pid, addr, n)
+
+
+def new_cave_entry(session: Session, hook: int, source: str = DEFAULT_SOURCE) -> ProEntry:
+    """A cave entry hooked at module offset ``hook`` (not placed or assembled yet).
+    Refused with the guided ``hook_span`` message where the jump would cover a call
+    or a branch (AC-8.3)."""
+    base = session.require_game().module_base
+    read = _reader(session)
+    span = cv.hook_span(read, base + hook)
+    off = read(base + hook, sum(i.len for i in span))
+    nops = b"\x90" * len(off)  # placeholder until built: never written unbuilt
+    return ProEntry("cave", hook, off, nops, source=source)
+
+
+def new_nop_entry(session: Session, offset: int) -> ProEntry:
+    """NOPs over the one instruction at ``offset`` (instruction-aligned)."""
+    base = session.require_game().module_base
+    code = _reader(session)(base + offset, 16)
+    insn = cv.decode_at(code, base + offset)[0]
+    if insn.code == ix.Code.INVALID:
+        raise LockFailed("couldn't read the game code there")
+    return ProEntry("nop", offset, code[: insn.len])
+
+
+def context(pc: ProCheat, entry: ProEntry, org: int | None = None) -> CaveContext:
+    """What a cave's source is assembled with: its place, its hook, and (for a cave
+    other than the home cave) the variables' addresses as symbols."""
+    where = entry.cave if org is None else org
+    if where is None:
+        raise LockFailed("the cave isn't placed yet")
+    symbols = {} if entry is home(pc) else variable_addresses(pc)
+    return CaveContext(where, entry.offset, entry.off, symbols)
+
+
+def assemble(
+    pc: ProCheat, entry: ProEntry, assembler: Assembler, org: int | None = None
+) -> AsmResult:
+    variables = pc.variables if entry is home(pc) else ()
+    return assembler.assemble(entry.source, context(pc, entry, org), variables)
+
+
+def _round16(n: int) -> int:
+    return (n + 15) & ~15
+
+
+def build(
+    session: Session,
+    pc: ProCheat,
+    entry: ProEntry,
+    assembler: Assembler,
+    others: Iterable[ProCheat] = (),
+) -> AsmResult:
+    """Assemble ``entry``, place its cave the first time, check the cave budget, and
+    store the cave bytes and the jump. Returns the assembler's result; on an error the
+    entry is unchanged. NoRoom when it doesn't fit (AC-8.2)."""
+    if entry.kind != "cave":
+        raise ValueError("only a cave entry is assembled")
+    mine = ProCheat(pc.id, pc.name, [e for e in pc.entries if e is not entry])
+    reserved = sites.cave_rooms(others, skip=pc.id) + sites.cave_rooms([mine])
+    if entry.cave is None:
+        trial = assemble(pc, entry, assembler, org=entry.offset + FAR)
+        if not trial.ok:
+            return trial
+        size = len(trial.code)
+        free = sites.free_room(session, reserved)
+        if size > free:
+            raise NoRoom(f"The cave needs {size} bytes, {free} free.")
+        base = session.require_game().module_base
+        try:  # room to grow by later edits, like a guided cave's
+            addr = cv.find_cave(session, max(_round16(size), cv.CAVE_ROOM), extra_reserved=reserved)
+        except LockFailed:
+            addr = cv.find_cave(session, _round16(size), extra_reserved=reserved)
+        entry.cave = addr - base
+        log.info("action=pro_place id=%s cave=%#x size=%d", pc.id, entry.cave, size)
+    result = assemble(pc, entry, assembler)
+    if not result.ok:
+        return result
+    room = sites.room_at(session, entry.cave, len(entry.cave_bytes), reserved)
+    if len(result.code) > room:
+        raise NoRoom(f"The cave needs {len(result.code)} bytes, {room} free.")
+    entry.cave_bytes = result.code
+    entry.on = cv.jmp_patch(entry.offset, entry.cave, len(entry.off))
+    return result
+
+
+def build_all(
+    session: Session, pc: ProCheat, assembler: Assembler, others: Iterable[ProCheat] = ()
+) -> AsmResult | None:
+    """Build every cave, the home cave first (the others use its variables). Returns
+    the first failed result, else None."""
+    others = list(others)
+    for entry in (e for e in pc.entries if e.kind == "cave"):
+        result = build(session, pc, entry, assembler, others)
+        if not result.ok:
+            return result
+    return None
+
+
+# -- writing -----------------------------------------------------------------------------
+def crosses_ff(addr: int, size: int) -> bool:
+    """True when a write of ``size`` bytes at ``addr`` continues past an address ending
+    in 0xFF (NG may split it there)."""
+    return size > 1 and (addr & 0xFF) + size > 0x100
+
+
+class ProWriter:
+    """Every Pro write goes through here (architecture-pro step 6 rule)."""
+
+    def __init__(self, session: Session, warn: Callable[[str], None] | None = None) -> None:
+        self.session = session
+        self.warn = warn
+        self._warned = False
+
+    def write(self, addr: int, data: bytes, source: str) -> None:
+        game = self.session.require_game()
+        if crosses_ff(addr, len(data)):
+            log.warning("action=pro_write_ff addr=%#x len=%d source=%s", addr, len(data), source)
+            if not self._warned:
+                self._warned = True
+                if self.warn is not None:
+                    self.warn(FF_WARNING)
+        log.info("action=pro_write addr=%#x len=%d source=%s", addr, len(data), source)
+        self.session.require_client().write(game.pid, addr, data)
+
+    def write_checked(self, addr: int, data: bytes, source: str) -> None:
+        """Write, then read back; WriteFailed when the console holds other bytes."""
+        self.write(addr, data, source)
+        game = self.session.require_game()
+        got = self.session.require_client().read(game.pid, addr, len(data))
+        if got != data:
+            raise WriteFailed(f"{addr:#x} didn't take the new bytes (read {got.hex(' ')})")
+
+
+@dataclass(frozen=True)
+class _Write:
+    addr: int
+    on: bytes
+    off: bytes
+    what: str  # "cave", "jump" or "bytes"
+
+
+def _writes(pc: ProCheat, base: int) -> list[_Write]:
+    out = []
+    for e in pc.entries:
+        if e.kind == "cave":
+            if e.cave is None or not e.cave_bytes or len(e.on) < JMP_REL32_SIZE:
+                raise LockFailed(f"{pc.name}: a cave isn't assembled yet")
+            out.append(_Write(base + e.cave, e.cave_bytes, bytes(len(e.cave_bytes)), "cave"))
+            out.append(_Write(base + e.offset, e.on, e.off, "jump"))
+        else:
+            out.append(_Write(base + e.offset, e.on, e.off, "bytes"))
+    order = {"cave": 0, "jump": 1, "bytes": 2}
+    return sorted(out, key=lambda w: order[w.what])  # caves, then jumps, then the rest
+
+
+def enable(
+    session: Session, pc: ProCheat, writer: ProWriter, enabled: Iterable[Cheat] = ()
+) -> None:
+    """Turn ``pc`` on (AC-8.4). Every site must hold its off-bytes (a cave: zeros, or
+    the same cave a cheat file left there); otherwise SiteChanged and nothing is
+    written. Then caves, jumps, other entries, each read back. Overlap (AC-8.8) when
+    an enabled cheat writes any of the same bytes."""
+    game = session.require_game()
+    client = session.require_client()
+    sites.refuse_overlap(pc, enabled, game.module_base)
+    writes = _writes(pc, game.module_base)
+    changed = []
+    for w in writes:
+        found = client.read(game.pid, w.addr, len(w.on))
+        if found != w.off and not (w.what == "cave" and found == w.on):
+            changed.append((w.addr, w.off, found))
+    if changed:
+        raise SiteChanged(changed)
+    for w in writes:
+        writer.write_checked(w.addr, w.on, f"{pc.id}:{w.what}")
+    log.info("action=pro_enable id=%s entries=%d", pc.id, len(pc.entries))
+
+
+def disable(
+    session: Session,
+    pc: ProCheat,
+    writer: ProWriter,
+    sleep: Callable[[float], None] = time.sleep,
+) -> None:
+    """Turn ``pc`` off (AC-8.5): jumps and other entries back first, then after
+    ``DISABLE_WAIT`` the caves are zeroed; every site is read back."""
+    game = session.require_game()
+    writes = _writes(pc, game.module_base)
+    for w in (w for w in writes if w.what != "cave"):
+        writer.write_checked(w.addr, w.off, f"{pc.id}:{w.what}")
+    caves = [w for w in writes if w.what == "cave"]
+    if caves:
+        sleep(DISABLE_WAIT)
+    for w in caves:
+        writer.write_checked(w.addr, w.off, f"{pc.id}:cave")
+    log.info("action=pro_disable id=%s", pc.id)
+
+
+# -- live variable edit (AC-8.7) -----------------------------------------------------------
+WRITTEN, SAVED, RESTART = "written", "saved", "restart"
+
+
+def set_variable(
+    pc: ProCheat,
+    name: str,
+    value: float | int,
+    assembler: Assembler,
+    *,
+    session: Session | None = None,
+    writer: ProWriter | None = None,
+    on: bool = False,
+) -> str:
+    """Give variable ``name`` a new value and re-assemble its cave. Returns ``SAVED``
+    (the cheat is off: only the stored bytes changed), ``WRITTEN`` (on: only the
+    variable's bytes differed and were rewritten live and read back) or ``RESTART``
+    (on, but more changed: turn it off and on). ValueError for a value that doesn't fit;
+    LockFailed when the cave no longer assembles."""
+    var = pc.variable(name)
+    new_var = Variable(var.name, var.vtype, value, var.comment)  # validates the value
+    entry = home(pc)
+    if entry is None or entry.cave is None:
+        raise LockFailed(f"{pc.name}: there is no placed cave for the variable")
+    k = pc.variables.index(var)
+    variables = [*pc.variables[:k], new_var, *pc.variables[k + 1 :]]
+    result = assembler.assemble(entry.source, context(pc, entry), variables)
+    if not result.ok:
+        line, msg = result.error  # type: ignore[misc]
+        raise LockFailed(f"The cave doesn't assemble any more (line {line}: {msg})")
+    old = entry.cave_bytes
+    at = variable_offsets(variables, len(result.code))[name]
+    span = range(at, at + var.vtype.size)
+    only_var = len(result.code) == len(old) and all(
+        a == b for i, (a, b) in enumerate(zip(old, result.code, strict=True)) if i not in span
+    )
+    pc.variables[k] = new_var
+    entry.cave_bytes = result.code
+    if not on:
+        return SAVED
+    if not only_var:
+        return RESTART
+    if session is None or writer is None:
+        raise ValueError("a live rewrite needs the session and the writer")
+    base = session.require_game().module_base
+    writer.write_checked(base + entry.cave + at, result.code[at : at + var.vtype.size], pc.id)
+    return WRITTEN
+
+
+__all__ = [
+    "DEFAULT_SOURCE",
+    "DISABLE_WAIT",
+    "FF_WARNING",
+    "RESTART",
+    "SAVED",
+    "WRITTEN",
+    "NoRoom",
+    "ProWriter",
+    "SiteChanged",
+    "assemble",
+    "build",
+    "build_all",
+    "compile_cheat",
+    "context",
+    "crosses_ff",
+    "disable",
+    "enable",
+    "forget",
+    "home",
+    "new_cave_entry",
+    "new_nop_entry",
+    "refresh",
+    "restore",
+    "set_variable",
+    "store",
+    "take_value",
+    "variable_addresses",
+    "variable_offsets",
+]
