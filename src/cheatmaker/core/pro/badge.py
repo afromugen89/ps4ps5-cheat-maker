@@ -63,7 +63,7 @@ def badge(cheat: Cheat, project: Project | None = None) -> Badge:
     if cheat.anchor is not None or cheat.learned_parts:
         reasons.append(POINTER_PATH if _only_chains(cheat, project) else FOUND_AGAIN)
     if reasons:
-        if cheat.freeze:
+        if cheat.freeze and cheat.locations:  # an empty cheat freezes nothing
             reasons.insert(
                 reasons.index(HEAP_ADDRESS) + 1 if HEAP_ADDRESS in reasons else 0, FREEZE
             )

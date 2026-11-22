@@ -113,6 +113,7 @@ def test_combined_cheats():
 
 def test_nothing_to_write():
     assert badge(Cheat("empty", [])).reasons == (NOTHING,)
+    assert badge(Cheat("empty", [], freeze=True)).reasons == (NOTHING,), "freezes nothing"
 
 
 @pytest.mark.parametrize(

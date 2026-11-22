@@ -7,16 +7,19 @@ from __future__ import annotations
 
 import math
 import struct
+import sys
 
 import pytest
 
 from cheatmaker.console.local_scan import LocalScanSession, MultiScan
 from cheatmaker.console.ps5debug_ng import Ps5DebugNgClient
 from cheatmaker.core.values import (
+    F32_MAX,
     GUIDED_TYPES,
     Compare,
     ValueType,
     as_between,
+    f32,
     matches,
     value_for,
 )
@@ -105,7 +108,8 @@ def test_value_for_greater_less_past_the_type_ends():
     assert value_for(ValueType.UINT8, Compare.LESS, 0) is None
     assert value_for(ValueType.UINT8, Compare.GREATER, 254) == 254
     assert value_for(ValueType.INT8, Compare.LESS, -128) is None
-    assert value_for(ValueType.FLOAT, Compare.GREATER, 1e40) == 1e40
+    assert value_for(ValueType.FLOAT, Compare.GREATER, 1e40) is None
+    assert value_for(ValueType.FLOAT, Compare.LESS, 1e40) == 1e40
 
 
 @pytest.mark.parametrize(
@@ -125,11 +129,58 @@ def test_as_between_whole_numbers(vt, cmp, value, rng):
 
 def test_as_between_decimals_is_open_at_the_value():
     lo, hi = as_between(ValueType.FLOAT, Compare.GREATER, 100.0)
-    assert lo > 100.0 and hi == math.inf
+    assert lo > 100.0 and hi == F32_MAX
     lo, hi = as_between(ValueType.DOUBLE, Compare.LESS, 0.0)
-    assert lo == -math.inf and hi < 0.0
+    assert lo == -sys.float_info.max and hi < 0.0
     with pytest.raises(ValueError):
         as_between(ValueType.FLOAT, Compare.EXACT, 1.0)
+
+
+@pytest.mark.parametrize(
+    ("vt", "cmp", "value"),
+    [
+        (ValueType.INT32, Compare.GREATER, 2**31 - 1),
+        (ValueType.INT32, Compare.GREATER, 1e20),
+        (ValueType.INT32, Compare.LESS, -(2**31)),
+        (ValueType.UINT8, Compare.LESS, 0),
+        (ValueType.UINT8, Compare.GREATER, 255),
+        (ValueType.UINT64, Compare.GREATER, 2**64 - 1),
+        (ValueType.FLOAT, Compare.GREATER, 1e39),
+        (ValueType.FLOAT, Compare.GREATER, F32_MAX),
+        (ValueType.FLOAT, Compare.LESS, -1e39),
+        (ValueType.DOUBLE, Compare.GREATER, sys.float_info.max),
+    ],
+)
+def test_as_between_none_when_nothing_can_match(vt, cmp, value):
+    assert as_between(vt, cmp, value) is None
+    assert value_for(vt, cmp, value) is None
+
+
+@pytest.mark.parametrize(
+    ("vt", "cmp", "value", "rng"),
+    [
+        (ValueType.INT32, Compare.GREATER, -1e20, (-(2**31), 2**31 - 1)),
+        (ValueType.UINT8, Compare.LESS, 1e9, (0, 255)),
+        (ValueType.FLOAT, Compare.LESS, 1e39, (-F32_MAX, F32_MAX)),
+        (ValueType.FLOAT, Compare.GREATER, -1e39, (-F32_MAX, F32_MAX)),
+    ],
+)
+def test_as_between_clamps_to_the_type(vt, cmp, value, rng):
+    assert as_between(vt, cmp, value) == rng
+    vt.encode(rng[0]) and vt.encode(rng[1])  # both bounds pack
+
+
+@pytest.mark.parametrize("value", [0.1, -0.1, 100.0, 1e-30, 0.0, 3.0e38])
+def test_float_bounds_are_the_next_float32_past_the_value(value):
+    """The console compares stored 4-byte decimals: each bound is one, strictly past
+    ``value``, so it keeps exactly what ``matches`` keeps on the PC."""
+    lo, _ = as_between(ValueType.FLOAT, Compare.GREATER, value)
+    _, hi = as_between(ValueType.FLOAT, Compare.LESS, value)
+    assert f32(lo) == lo and f32(hi) == hi and lo > value > hi
+    for raw in (lo, hi, f32(value)):
+        b = ValueType.FLOAT.encode(raw)
+        keep = matches(ValueType.FLOAT, Compare.GREATER, b, None, value)
+        assert keep == (lo <= raw <= F32_MAX)
 
 
 # -- LocalScanSession: previous / first and paging --------------------------------------
@@ -235,7 +286,7 @@ def test_unsigned_first_scan_sends_the_unsigned_type_id(server):
     cl.close()
 
 
-def test_snapshot_narrow_greater_sends_bigger_than_and_pages():
+def test_snapshot_narrow_greater_runs_as_value_between_and_pages():
     server = FakeNgServer(snapshot=True)
     server.three_value_rows = True
     cl = _connect(server)
@@ -243,7 +294,7 @@ def test_snapshot_narrow_greater_sends_bigger_than_and_pages():
     cl.scan_start(PID, regions, ValueType.INT32, Compare.UNKNOWN, None)
     server.fake.poke(PID, HEALTH_ADDR, struct.pack("<i", 300))
     n = cl.scan_next(Compare.GREATER, 200)
-    assert server.scan_compares[-1] == 2
+    assert server.scan_compares[-1] == 4, "ValueBetween, never BiggerThan (2)"
     hits = cl.scan_results(1000)
     assert len(hits) == n and HEALTH_ADDR in [h.address for h in hits]
     health = next(h for h in hits if h.address == HEALTH_ADDR)
@@ -253,7 +304,7 @@ def test_snapshot_narrow_greater_sends_bigger_than_and_pages():
     assert server.get_requests[-1] == (1, 1) and page == hits[1:2]
     server.fake.poke(PID, HEALTH_ADDR, struct.pack("<i", 50))
     cl.scan_next(Compare.LESS, 60)
-    assert server.scan_compares[-1] == 3
+    assert server.scan_compares[-1] == 4
     assert HEALTH_ADDR in [h.address for h in cl.scan_results(1000)]
     cl.close()
 
@@ -268,3 +319,93 @@ def test_two_value_rows_give_previous_but_no_first():
     [hit] = cl.scan_results(10)
     assert hit.previous == struct.pack("<i", 100) and hit.first is None
     cl.close()
+
+
+# -- greater / less never truncate, never send codes 2/3 (review) -----------------------
+def _snapshot(types=ValueType.INT32):
+    server = FakeNgServer(snapshot=True)
+    cl = _connect(server)
+    regions = [m for m in cl.maps(PID) if m.writable]
+    cl.scan_start(PID, regions, types, Compare.UNKNOWN, None)
+    return server, cl
+
+
+def _addrs(cl):
+    return [h.address for h in cl.scan_results(10_000)]
+
+
+def test_snapshot_less_than_a_fraction_keeps_the_whole_number_below():
+    server, cl = _snapshot()
+    server.fake.poke(PID, HEALTH_ADDR, struct.pack("<i", 100))
+    cl.scan_next(Compare.LESS, 100.5)  # 100 < 100.5: a truncating SmallerThan 100 drops it
+    assert HEALTH_ADDR in _addrs(cl)
+    assert all(struct.unpack("<i", h.value)[0] <= 100 for h in cl.scan_results(10_000))
+    assert 2 not in server.scan_compares and 3 not in server.scan_compares
+    cl.close()
+
+
+def test_snapshot_greater_than_minus_half_keeps_zero_and_up():
+    server, cl = _snapshot()
+    server.fake.poke(PID, HEALTH_ADDR, struct.pack("<i", -1))
+    server.fake.poke(PID, GOLD_ADDR, struct.pack("<i", 7))
+    cl.scan_next(Compare.GREATER, -0.5)
+    got = _addrs(cl)
+    assert GOLD_ADDR in got and HEALTH_ADDR not in got
+    assert server.scan_compares[-1] == 4
+    cl.close()
+
+
+def test_snapshot_unsigned_greater_than_a_negative_keeps_all():
+    server, cl = _snapshot(ValueType.UINT32)
+    before = len(_addrs(cl))
+    assert cl.scan_next(Compare.GREATER, -5) == before
+    assert server.scan_compares[-1] == 4
+    cl.close()
+
+
+def test_snapshot_compare_nothing_can_pass_sends_nothing():
+    server, cl = _snapshot()
+    sent = len(server.scan_compares)
+    assert cl.scan_next(Compare.GREATER, 2**31 - 1) == 0
+    assert len(server.scan_compares) == sent, "no compare sent"
+    assert not server.residents, "the snapshot was freed"
+    assert cl.scan_results(10) == [] and cl.scan_counts() == {ValueType.INT32: 0}
+    cl.close()
+
+
+def test_multi_type_snapshot_greater_uses_a_range_per_type():
+    server, cl = _snapshot((ValueType.FLOAT, ValueType.INT32))
+    server.fake.poke(PID, GOLD_ADDR, struct.pack("<i", 2**31 - 1))
+    n = cl.scan_next(Compare.GREATER, 2**31 - 1.5)  # 2**31-1 as int; floats above too
+    assert 2 not in server.scan_compares and server.scan_compares[-1] == 4
+    hits = cl.scan_results(10_000)
+    assert len(hits) == n and GOLD_ADDR in [h.address for h in hits]
+    assert cl.scan_next(Compare.GREATER, 1e39) == 0, "no float or int32 can pass"
+    cl.close()
+
+
+def test_first_scan_nothing_can_pass_asks_the_console_nothing(server):
+    cl = _connect(server)
+    regions = [m for m in cl.maps(PID) if m.writable]
+    for vt, cmp, value in (
+        (ValueType.INT32, Compare.GREATER, 1e20),
+        (ValueType.UINT8, Compare.LESS, 0),
+        (ValueType.FLOAT, Compare.GREATER, 1e39),
+    ):
+        assert cl.scan_start(PID, regions, vt, cmp, value) == 0
+        assert cl.scan_results(10) == []
+    assert server.scan_compares == []
+    cl.close()
+
+
+def test_pages_past_the_end_are_empty():
+    from cheatmaker.console.client import ScanHit
+
+    a, b = LocalScanSession(lambda *_: b""), LocalScanSession(lambda *_: b"")
+    a.set_results(ValueType.INT32, [ScanHit(x, b"\0" * 4) for x in (0x10, 0x30)])
+    b.set_results(ValueType.FLOAT, [ScanHit(0x20, b"\0" * 4)])
+    assert a.results(5, 2) == [] and a.results(5, 99) == []
+    assert [h.address for h in a.results(5, 1)] == [0x30]
+    multi = MultiScan([a, b])
+    assert multi.results(5, 3) == [] and multi.results(5, 10) == []
+    assert [h.address for h in multi.results(5, 2)] == [0x30]

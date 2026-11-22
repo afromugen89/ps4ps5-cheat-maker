@@ -50,7 +50,7 @@ can't recreate.
 | S-P5 | INT3 breakpoint, single step, halt/resume, get/set registers, XMM from savefpu | Each command does what PROTOCOL.md says on 3 tries |
 | S-P6 | S-P1, S-P2 and S-P5 on a CUSA game | Same results as on PPSA |
 | S-P7 | Hit rate: an instruction hit 60×/s; measure the game's frame stutter and the PC's handling | Recorded numbers; sets the limits in PR-3 and PR-11 |
-| S-P8 | CheatRunner: an mc4 made by the app loads; a cave in spare space works; two mods share bytes (what verify does); master code format; meaning of "cave of any size" | Kein reports the behaviour; recorded in docs/console-results.md |
+| S-P8 | CheatRunner: an mc4 made by the app loads (also one whose game title has `&`, e.g. "Ratchet & Clank", and a cheat name with `& < > "`: check how CheatRunner shows them); a cave in spare space works; two mods share bytes (what verify does); master code format; meaning of "cave of any size" | Kein reports the behaviour; recorded in docs/console-results.md |
 
 ## 5. Shared model (both modes)
 
@@ -91,7 +91,7 @@ AC-1.3 Given the PC firewall blocks port 755, When a Pro feature needs the debug
 
 AC-2.1 Given a 4-byte exact first scan on a large PS5 game, Then it finishes within 2 min (existing target, AC-3.5) and shows progress with time left.
 AC-2.2 Given results, When "greater than 100" is applied as a next scan, Then only results whose value is now > 100 remain (FakeConsole test with known memory).
-AC-2.3 Given an address in the list with Freeze on, Then its value is written back at least 10 times a second until Freeze is turned off, and the cheat it would make is marked PC only.
+AC-2.3 Given an address in the list with Freeze on, Then its value is written back at least 10 times a second until Freeze is turned off. The cheat it would make is marked PC only when the address is on the heap, and CheatRunner with the note "written once (CheatRunner can't freeze)" when it is a static address in the game's module (badge decision, option C).
 [OPEN: does "greater/less than" need NG compare codes we haven't verified? The C-P2 console test covers it.]
 
 ### PR-3 Find what writes / accesses (R1)
@@ -166,9 +166,9 @@ Only CheatRunner-badged cheats are exported. Variables are written in at their c
 the existing `cheatmaker_value` / `CheatMakerValue*` extension records where they sit so Cheat
 Maker can edit them in the file later. No master code (each cheat contains its own cave and jump).
 AC-12.1 Given a project with 3 CheatRunner cheats and 1 PC-only cheat, When exported, Then the file holds 3 mods, and a dialog lists the PC-only cheat with its reason and offers "make a cave at its writer" (opens PR-3 → PR-8).
-AC-12.2 Given an exported `.mc4`, When it is imported again, Then it equals the `.shn` of the same project, byte for byte, after decryption.
+AC-12.2 Given an exported `.mc4`, When it is imported again, Then after decryption it equals `shn.dumps(cf, sanitise=True)` of the same project, byte for byte (the `.shn` text with `& < > "` replaced by `+ ( ) '` in every attribute; identical to the plain `.shn` when no attribute holds those characters).
 AC-12.3 Given the exported file is sent to the PS5 and loaded in CheatRunner, When each cheat is turned on, Then it works with the PC off (console test C-P12).
-AC-12.4 Given a cheat whose name contains `& < > "`, Then the shn/mc4 is valid XML that CheatRunner shows by name.
+AC-12.4 Given a game title, credit or cheat name containing `& < > "`, Then the `.shn` is valid XML with those characters escaped (unchanged from earlier versions), and the `.mc4` is valid XML with them replaced by `+ ( ) '`, which CheatRunner shows by name (S-P8).
 [OPEN: presets (one mod per variable value) and master code, after S-P8.]
 
 ### PR-13 Journal and kernel log (R2)

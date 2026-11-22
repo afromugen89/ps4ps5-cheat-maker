@@ -665,10 +665,12 @@ Built from docs/architecture-pro.md (spec docs/spec-pro.md), implementation step
 - **Step 2 (scanner model).** `ValueType.UINT8..UINT64` are appended after the old six so
   list indices into the guided order still hold; the guided Find combos use
   `GUIDED_TYPES`. `Compare.GREATER/LESS` compare against the typed number. On the real
-  client a first scan with greater/less runs as ValueBetween (`values.as_between`), the
-  proven code path; only narrowing a console snapshot sends the unverified BiggerThan
-  2 / SmallerThan 3 (C-P2). Window re-scans of many PC-side candidates also use the
-  range. `ScanHit.previous` / `first` (compare=False) are kept by LocalScanSession and
+  client every greater/less (first scan, window re-scan, single- and multi-type
+  snapshot narrowing) runs as ValueBetween over `values.as_between`, the proven path;
+  BiggerThan 2 / SmallerThan 3 are never sent (review fix: they truncated 100.5 to
+  100). `as_between` bounds are values of the type (4-byte decimals: the next float32
+  past the value, clamped to the finite range), or None when nothing can match: then
+  nothing is sent and the search is empty. `ScanHit.previous` / `first` (compare=False) are kept by LocalScanSession and
   filled from NG snapshot rows (2-value: previous; 3-value: previous + first; order
   unverified). `scan_results(limit, offset=0)` pages; NG sends the offset in the first
   `TURBOSCAN_GET` field (unverified, C-P2d).
@@ -695,10 +697,11 @@ Built from docs/architecture-pro.md (spec docs/spec-pro.md), implementation step
   English messages, type hints and a strict PKCS#7 unpad; NIST SP 800-38A CBC
   (128/192/256) and FIPS-197 block vectors pass. `formats/mc4.py` = base64(AES-256-CBC(
   PKCS#7(`shn.dumps`))) with the public key/IV from ReaperPy `cheatfmt.py`; a file with
-  bad padding is still read when it decrypts to a `<Trainer` (logged). Cheat names are
-  sanitised (`& < > "` -> `+ ( ) '`) in shn and therefore mc4 (decision 6); the game
-  title and credits keep plain XML escaping (the decision names cheat names only).
-  Note: the real GoldHEN fixture `CUSA15436_1.05.shn` writes `&#38;` in a cheat name,
+  bad padding is still read when it decrypts to a `<Trainer` (logged; trailing NULs and
+  whitespace trimmed; UTF-16-LE text, with or without BOM, accepted). Decision 6
+  (revised after review): plain `.shn` is byte-identical to before Pro; `.mc4` encrypts
+  `shn.dumps(cf, sanitise=True)`, which replaces `& < > "` with `+ ( ) '` in every
+  attribute (title, credits, cheat names). Note: the real GoldHEN fixture `CUSA15436_1.05.shn` writes `&#38;` in a cheat name,
   a hint for S-P8 that escapes may be fine. `formats.load_path` reads a file by its
   content when it is clearly XML or JSON under another extension. The ReaperPy-made
   mc4 fixture is not included (running ReaperPy here was not allowed); a test reads

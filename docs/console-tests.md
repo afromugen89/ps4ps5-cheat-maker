@@ -317,15 +317,14 @@ that makes it runnable in the app.
 
 The guided screens never send these, so nothing the app does today depends on them.
 The values below come from the ps4debug order and are **UNVERIFIED** on PS5Debug-NG:
-value types uint8 0, uint16 2, uint32 4, uint64 6; compares BiggerThan 2 and
-SmallerThan 3 (used only to narrow down an "unknown first value" search; a first scan
-with greater/less than runs as the proven ValueBetween); the `TURBOSCAN_GET` request's
-first field as a row offset; and 3-value rows (header bit 31: value now, previous,
-first).
+value types uint8 0, uint16 2, uint32 4, uint64 6; the `TURBOSCAN_GET` request's first
+field as a row offset; and 3-value rows (header bit 31: value now, previous, first).
+Greater / less than never send BiggerThan / SmallerThan: every scan turns them into a
+proven ValueBetween range.
 
 | # | Test | Steps | Pass when | Send back |
 |---|---|---|---|---|
 | C-P2a | Unsigned types | Pro > Scanner. Pick a value you know (gold). Type **Unsigned 4 bytes**, exact, your gold. | The same match count as the guided search for that number; the address you know is listed. | The two counts and the `action=scan_stats` lines. |
 | C-P2b | Greater / less than as a first scan | Exact **greater than** (your gold − 1), 4-byte whole number. | Your gold is listed; every listed value is greater. Log shows a ValueBetween scan (no BiggerThan). | The count and `action=scan_stats` lines. |
-| C-P2c | Greater / less than on the console | **Unknown first value** (4-byte whole number). Spend gold, then **less than** (old gold), then gain some, **greater than** (the amount before gaining). | The count drops each time and your gold stays listed. If the count goes to 0 or doesn't change, NG uses other codes: say so. | The `action=resident_next cmp=greater than` / `less than` lines. |
+| C-P2c | Greater / less than on the console | **Unknown first value** (4-byte whole number). Spend gold, then **less than** (old gold), then gain some, **greater than** (the amount before gaining). | The count drops each time and your gold stays listed. Log shows `cmp=between` (no BiggerThan / SmallerThan). | The `action=resident_next` lines. |
 | C-P2d | Paging and three values | After C-P2c, page to the second 1,000 rows (needs > 1,000 matches: stop after the first compare), and look at Previous / First. | Page 2 shows other addresses than page 1 (not the same rows again). Previous holds the value before the last compare; First (if shown) the value at the unknown scan. | Whether page 2 repeated page 1, and one row's Value / Previous / First. |

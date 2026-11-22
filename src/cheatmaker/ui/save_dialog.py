@@ -114,11 +114,8 @@ class SaveDialog(QDialog):
 
     def _left_out_text(self, cf: CheatFile) -> str:
         """Each cheat the file leaves out and why it needs the PC (spec-pro AC-S2)."""
-        saved = {id(c) for c in cf.saveable_cheats()}
         rows = [
-            f"{c.name}: {', '.join(b.reasons)}"
-            for c, b in pc_only(cf.cheats, self.ctl.project)
-            if id(c) not in saved
+            f"{c.name}: {', '.join(b.reasons)}" for c, b in pc_only(cf.cheats, self.ctl.project)
         ]
         return hints.SAVE_LEFT_OUT + "\n" + "\n".join(rows) if rows else ""
 

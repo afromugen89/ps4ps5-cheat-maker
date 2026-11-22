@@ -9,7 +9,7 @@ Date: 2026-11-21. Inputs: `cheat-maker-spec-pro.md` (spec), `cheat-maker-pro-rev
 3. **Pro cheats are a source layer that compiles to the existing `Cheat` model.** One `Cheat` list, one `LiveCheats`, and one set of exporters. `.cmproj` format 5 stores each Pro cheat's source *and* its compiled lines, so a project loads, turns on and exports with no assembler on the PC. → I agree with the review [12]/[13] and add this rule.
 4. **Debugger: a new `DebugSession` on its own NG connection.** It handles the back channel on port 755 (bound before attach), keep-alive and the 4 watch slots. The guided `watch()` stays exactly as it is in R1 because it is the path proven on the console (C4). Only one debugger user at a time (`Session.debug_owner`). R3 adds breakpoints, step and registers to the same class, using the command table ReaperPy uses (credited).
 5. **Order of work: start the R1 slices that don't need the debugger now, in parallel with the S-P0 ReaperPy trial.** Only PR-3 waits for S-P1/S-P2. → **This disagrees with the review's "B now, then A".** The scanner, code and memory views, cave editor, export and import don't depend on any unproven NG feature, so waiting a week for them gains nothing.
-6. **Escape cheat names the same way for shn and mc4** (replace `& < > "` with `+ ( ) '`, as ReaperPy does for mc4). Otherwise AC-12.2 (decrypted mc4 == shn, byte for byte) and AC-12.4 (names with those characters) conflict. S-P8 checks whether CheatRunner handles XML escapes properly; if it does, both formats switch to `quoteattr`. → **This is a spec conflict I found.** Smaller points are in "Spec refinements" below.
+6. **Sanitise only in mc4, and there in every attribute** (replace `& < > "` with `+ ( ) '` in the game title, Moder/credits and cheat names, as ReaperPy does for mc4). Plain `.shn` keeps `quoteattr` escaping and stays byte-identical to earlier versions (guided export unchanged). AC-12.2 therefore reads: decrypted mc4 == `shn.dumps(cf, sanitise=True)`, byte for byte. S-P8 checks whether CheatRunner handles XML escapes in mc4 (including a game title with `&`); if it does, mc4 can switch to `quoteattr` too. (Revised 2026-11-22 after review; the first version sanitised cheat names in shn as well.) Smaller points are in "Spec refinements" below.
 
 ---
 
@@ -286,8 +286,8 @@ A line whose NASM re-encoding differs from the original bytes (NASM may pick a s
 ProCheat --compile--> Cheat (CODE_PATCH lines: cave line(s), then hook line; value_at for `editable`)
 CheatFile.cheats (guided + compiled Pro) --badge filter--> CheatRunner cheats
    json  -> formats/goldhen_json.dumps   (existing)
-   shn   -> formats/shn.dumps            (existing + name sanitising, decision 6)
-   mc4   -> formats/mc4.dumps = base64(AES256CBC(pkcs7(shn.dumps(cf)), KEY, IV))
+   shn   -> formats/shn.dumps            (existing, unchanged)
+   mc4   -> formats/mc4.dumps = base64(AES256CBC(pkcs7(shn.dumps(cf, sanitise=True)), KEY, IV))
 ```
 
 - `formats.FORMATS["mc4"] = mc4`, and `CheatFile.file_name` accepts `mc4`. The file name is `{TITLEID}_{VERSION}.{ext}`.
@@ -295,7 +295,7 @@ CheatFile.cheats (guided + compiled Pro) --badge filter--> CheatRunner cheats
 - **The export dialog** (AC-12.1) lists the PC-only cheats, each with its badge reason, plus "Make a cave at its writer" (opens Watch for its address, then the cave editor at the writer). No master code (spec PR-12).
 - **Import** gives Bytes entries, one per line; caves found by `updater.is_cave` are shown disassembled. Section ≠ 0 is refused with a message. "Convert to assembly" uses `asm_text`.
 - **Tests:**
-  - AC-12.2: import mc4, then `decrypt == shn.dumps`;
+  - AC-12.2: import mc4, then `decrypt == shn.dumps(cf, sanitise=True)`;
   - NIST vectors for `_aes`;
   - a ReaperPy-made mc4 fixture as the cross-tool check.
 
@@ -358,7 +358,7 @@ src/cheatmaker/
     __init__.py        + "mc4"
     mc4.py             NEW (public key/IV, sniffing)
     _aes.py            NEW, copied from ReaperPy aes_cbc.py (MIT header kept)
-    shn.py             + name sanitising option
+    shn.py             + sanitise option (mc4 only, decision 6)
   ui/pro/              NEW
     pro_window.py scanner_tab.py address_list.py code_tab.py memory_tab.py
     watch_tab.py cheats_tab.py cave_editor.py (QPlainTextEdit + QSyntaxHighlighter)
@@ -450,7 +450,7 @@ Revisit the design when:
 2. **Scanner model.** `UINT*`, `GREATER`/`LESS`, `GUIDED_TYPES`, NG codes, `ScanHit.previous/first`, `scan_results(offset)`. FakeConsole and LocalScanSession support, plus contract tests (AC-2.2). C-P2 is added to console-tests.md.
 3. **Format 5 and model.** `core/pro/model.py`, `pro_cheats` (de)serialisation, `Cheat.pro`, format 4 load/save test (AC-S3), newer-format refusal test.
 4. **Badge and export filter.** `badge.py`, reasons (AC-S2), `saveable_cheats` uses the badge, and the export dialog lists PC-only cheats (AC-12.1).
-5. **mc4.** `_aes.py` (copied, NIST vectors), `formats/mc4.py` dump/load/sniff, `file_name("mc4")`, name sanitising in shn and mc4 (AC-12.2, AC-12.4), plus a ReaperPy mc4 fixture.
+5. **mc4.** `_aes.py` (copied, NIST vectors), `formats/mc4.py` dump/load/sniff, `file_name("mc4")`, attribute sanitising for mc4 only (decision 6; AC-12.2, AC-12.4), plus a ReaperPy mc4 fixture.
 6. **Assembler.** `asm.py`: wrapper, `hook`/`return`/`original`/variables, map-file symbols, error-line mapping, dialect shim, timeout. Real-NASM tests, plus a measurement for AC-8.1.
 7. **Bytes to text.** `asm_text.py`: labels, `return`, `db` fallback. Every guided cave builder (sampler, player-only, capture, effect) round-trips byte for byte (AC-S1); import conversion (AC-14.1).
 8. **Compile and on/off.** `compile.py` + `sites.py`: placement, budget, order, read-back, 0xFF warning, overlap, live variable rewrite (AC-8.2 to 8.8) on FakeConsole.

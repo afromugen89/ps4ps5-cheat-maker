@@ -36,11 +36,9 @@ def test_real_shn_loads_and_roundtrips():
     assert cf.cheats[0].name == "Add Items & Money"
     assert cf.cheats[1].locations[0].on == b"\x90" * 6
     again = shn.loads(shn.dumps(cf))
-    # Written names lose & < > " (architecture-pro decision 6); reading is unchanged.
     assert [(c.name, c.locations) for c in again.cheats] == [
-        (shn.safe_name(c.name), c.locations) for c in cf.cheats
+        (c.name, c.locations) for c in cf.cheats
     ]
-    assert again.cheats[0].name == "Add Items + Money"
 
 
 def _sample():

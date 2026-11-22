@@ -119,7 +119,7 @@ def test_mc4_is_base64_of_aes_of_the_shn():
     raw = base64.b64decode(data, validate=True)
     assert len(raw) % 16 == 0
     plain = _aes.pkcs7_unpad(_aes.cbc_decrypt(mc4.KEY, mc4.IV, raw))
-    assert plain == shn.dumps(cf)
+    assert plain == shn.dumps(cf, sanitise=True)
     assert len(mc4.KEY) == 32 and len(mc4.IV) == 16
 
 
@@ -128,7 +128,9 @@ def test_exported_mc4_imported_again_equals_the_shn(tmp_path):  # AC-12.2
     path = tmp_path / cf.file_name("mc4")
     path.write_bytes(formats.dumps(cf, "mc4"))
     assert path.name == "PPSA01234_01.000.mc4"
-    assert mc4.decrypt(path.read_bytes()) == formats.dumps(cf, "shn"), "byte for byte"
+    sanitised = shn.dumps(cf, sanitise=True)
+    assert mc4.decrypt(path.read_bytes()) == sanitised, "byte for byte"
+    assert sanitised == formats.dumps(cf, "shn"), 'no & < > " here: same as plain .shn'
     back = formats.load_path(path)
     from_shn = shn.loads(formats.dumps(cf, "shn"))
     assert back == from_shn
@@ -136,20 +138,29 @@ def test_exported_mc4_imported_again_equals_the_shn(tmp_path):  # AC-12.2
     assert back.cheats[1].value_type is ValueType.INT32 and back.cheats[1].value == 999999
 
 
-def test_names_with_xml_characters_stay_valid_xml(tmp_path):  # AC-12.4
+def test_xml_characters_in_mc4_are_replaced_and_plain_shn_escapes_them(tmp_path):  # AC-12.4
     cf = _project_file()
+    cf.title = 'Ratchet & Clank: <Rift> "Apart"'
+    cf.credits = ["Kein & co"]
     cf.cheats[0].name = 'God & "mode" <on>'
-    for fmt in ("shn", "mc4"):
-        data = formats.dumps(cf, fmt)
-        text = mc4.decrypt(data) if fmt == "mc4" else data
-        root = ET.fromstring(text.decode("utf-8").split("?>", 1)[1])
-        assert root.find("Cheat").get("Text") == "God + 'mode' (on)"
-        for ch in "&<>":
-            assert ch not in root.find("Cheat").get("Text")
-        path = tmp_path / f"x.{fmt}"
-        path.write_bytes(data)
-        assert formats.load_path(path).cheats[0].name == "God + 'mode' (on)"
-    assert mc4.decrypt(formats.dumps(cf, "mc4")) == formats.dumps(cf, "shn")  # AC-12.2 too
+    data = formats.dumps(cf, "mc4")
+    plain = mc4.decrypt(data)
+    assert plain == shn.dumps(cf, sanitise=True)  # AC-12.2
+    root = ET.fromstring(plain.decode("utf-8").split("?>", 1)[1])
+    assert root.get("Game") == "Ratchet + Clank: (Rift) 'Apart'"
+    assert root.get("Moder") == "Kein + co"
+    assert root.find("Cheat").get("Text") == "God + 'mode' (on)"
+    assert b"&" not in plain and b"&lt;" not in plain
+    path = tmp_path / "x.mc4"
+    path.write_bytes(data)
+    back = formats.load_path(path)
+    assert back.title == "Ratchet + Clank: (Rift) 'Apart'"
+    assert back.cheats[0].name == "God + 'mode' (on)"
+    # plain .shn is unchanged from before Pro: escaped, names kept exactly
+    text = formats.dumps(cf, "shn")
+    assert b"""Game='Ratchet &amp; Clank: &lt;Rift&gt; "Apart"'""" in text
+    assert shn.loads(text).cheats[0].name == 'God & "mode" <on>'
+    assert shn.loads(text).title == cf.title
     j = goldhen_json.loads(formats.dumps(cf, "json"))
     assert j.cheats[0].name == 'God & "mode" <on>', "JSON keeps the name as it is"
 
@@ -182,12 +193,28 @@ def test_reads_reaperpy_style_mc4():
     assert c.locations[0].offset == 0xAB7B38 and c.locations[0].off == bytes.fromhex("C5FA58C1")
 
 
-def test_unpadded_mc4_is_still_read(caplog):
+@pytest.mark.parametrize("filler", [b" ", b"\x00"])
+def test_mc4_padded_with_spaces_or_nuls_is_still_read(caplog, filler):
     text = shn.dumps(_project_file())
-    text += b" " * (-len(text) % 16)  # a tool that pads with spaces instead of PKCS#7
+    text += filler * (-len(text) % 16 or 16)  # never valid PKCS#7
     data = base64.b64encode(_aes.cbc_encrypt(mc4.KEY, mc4.IV, text))
+    plain = mc4.decrypt(data)
+    assert not plain.endswith((b"\x00", b" ", b"\n"))
     assert mc4.loads(data).title_id == "PPSA01234"
     assert "action=mc4_load reason=bad padding" in caplog.text
+
+
+@pytest.mark.parametrize("bom", [b"", b"\xff\xfe"])
+@pytest.mark.parametrize("pkcs7", [True, False])
+def test_utf16_le_mc4_is_read(bom, pkcs7):
+    text = bom + shn.dumps(_project_file()).decode("utf-8").encode("utf-16-le")
+    if pkcs7:
+        text = _aes.pkcs7_pad(text)
+    else:
+        text += b"\x00" * (-len(text) % 16 or 16)
+    cf = mc4.loads(base64.b64encode(_aes.cbc_encrypt(mc4.KEY, mc4.IV, text)))
+    assert cf.title_id == "PPSA01234"
+    assert [c.name for c in cf.cheats] == ["Infinite Health", "Gold"]
 
 
 @pytest.mark.parametrize(

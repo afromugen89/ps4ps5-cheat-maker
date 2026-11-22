@@ -198,11 +198,10 @@ _NG_COMPARE = {
     Compare.BETWEEN: 4,  # server keeps low <= value <= high (both included)
     Compare.INCREASED_BY: 6,  # IncreasedBy / DecreasedBy: UNVERIFIED on console (C11a)
     Compare.DECREASED_BY: 8,
-    # BiggerThan / SmallerThan (ps4debug order): UNVERIFIED on console (C-P2). Only a
-    # narrow-down of a console snapshot sends them; a first scan sends ValueBetween.
-    Compare.GREATER: 2,
-    Compare.LESS: 3,
+    # GREATER / LESS are never sent as BiggerThan 2 / SmallerThan 3 (unverified on NG):
+    # every path turns them into a ValueBetween range first (values.as_between).
 }
+_GREATER_LESS = (Compare.GREATER, Compare.LESS)
 _NG_FUZZY = 1
 """FuzzyValue: |typed - memory| < 1.0, float/double only. Legacy ExactValue on floats
 is a near-bit-exact match, so typing 80 misses health that is really 79.6 (C3)."""
@@ -1282,9 +1281,14 @@ class Ps5DebugNgClient:
             if len(vtype) > 1:
                 return self._multi_start(pid, ranges, vtype, progress, cancel)
             vtype = vtype[0]
-        if cmp in (Compare.GREATER, Compare.LESS) and value is not None:
+        if cmp in _GREATER_LESS and value is not None:
             # A proven ValueBetween scan instead of the unverified BiggerThan/SmallerThan.
-            cmp, value = Compare.BETWEEN, as_between(vtype, cmp, value)
+            rng = as_between(vtype, cmp, value)
+            if rng is None:  # no value of this type can match: nothing to ask the PS5
+                self._scan = self._session(pid)
+                self._scan.set_results(vtype, [])
+                return 0
+            cmp, value = Compare.BETWEEN, rng
         if cmp not in (Compare.EXACT, Compare.BETWEEN) or value is None:
             return self._snapshot_start(pid, ranges, vtype, progress, cancel)
         hits = self._scan_ranges(pid, ranges, vtype, value, progress, cancel)
@@ -1463,6 +1467,17 @@ class Ps5DebugNgClient:
             raise ScanCancelled("scan cancelled; start a new search")
         self._resident_count = count
         return count
+
+    def _resident_matches_none(self) -> int:
+        """A compare no value of the snapshot's type can pass: free the snapshot and
+        keep an empty search of that type on the PC (no console compare is sent)."""
+        assert self._resident is not None
+        pid, vtype, _ = self._resident
+        self._resident_count = 0
+        self._end_resident()
+        self._scan = self._session(pid)
+        self._scan.set_results(vtype, [])
+        return 0
 
     def _rescan_aliasing(self) -> bool:
         return (
@@ -1716,8 +1731,21 @@ class Ps5DebugNgClient:
         them (pipelined). Many: for an exact number, scan again on the console over
         windows around the candidates and keep the overlap."""
         if self._multi is not None:
+            if cmp in _GREATER_LESS and value is not None:
+                return self._multi_next(
+                    Compare.BETWEEN,
+                    value,
+                    progress,
+                    cancel,
+                    lambda vt: as_between(vt, cmp, value),  # None ends that type's part
+                )
             return self._multi_next(cmp, value, progress, cancel)
         if self._resident is not None:
+            if cmp in _GREATER_LESS and value is not None:
+                rng = as_between(self._resident[1], cmp, value)
+                if rng is None:
+                    return self._resident_matches_none()
+                cmp, value = Compare.BETWEEN, rng
             return self._resident_next(cmp, value, progress, cancel)
         scan = self._scan
         if isinstance(scan, MultiScan) and self._scan_pid is not None:
@@ -1793,8 +1821,10 @@ class Ps5DebugNgClient:
         if not self._rescans(scan):
             return scan.narrowed(cmp, value, progress, cancel)
         self._check_narrow(scan, cmp, value)
-        if cmp in (Compare.GREATER, Compare.LESS):
+        if cmp in _GREATER_LESS:
             value = as_between(scan.vtype, cmp, value)
+            if value is None:  # no value of this type can match
+                return []
         old = {h.address: h for h in scan.hits}
         windows = candidate_windows(self._scan_ranges_list, sorted(old), scan.vtype.size)
         new = self._scan_ranges(self._scan_pid, windows, scan.vtype, value, progress, cancel)

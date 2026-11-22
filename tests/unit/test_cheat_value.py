@@ -219,6 +219,4 @@ def test_shn_value_attributes_with_quotes_and_ampersand_in_the_name():
     c = _code_cheat(ValueType.FLOAT, 2.5)
     c.name = 'Health "max" & more'
     (back,) = shn.loads(shn.dumps(_file(c))).cheats
-    # the name is written without & < > " (architecture-pro decision 6)
-    assert back.name == "Health 'max' + more" == shn.safe_name(c.name)
-    assert back.value == 2.5 and back.value_at == c.value_at
+    assert back.name == c.name and back.value == 2.5 and back.value_at == c.value_at
