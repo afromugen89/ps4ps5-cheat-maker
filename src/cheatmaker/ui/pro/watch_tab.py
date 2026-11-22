@@ -6,6 +6,7 @@ connection, holding ``Session.claim_debugger`` so a guided watch can't start mea
 and hit limits (settings ``pro_watch_seconds`` / ``pro_watch_hits``), the game going
 away and closing the window all end it; the session always detaches, and the list
 stays (AC-3.2). Registers are marked "unverified" until S-P1 passes (AC-3.3).
+Below the list, ``AccessPanel`` answers "what does this instruction access".
 """
 
 from __future__ import annotations
@@ -33,6 +34,7 @@ from cheatmaker.core.pro import watch_session as ws
 from cheatmaker.core.pro.addresses import parse_place, place_text
 from cheatmaker.ui.controller import Controller
 from cheatmaker.ui.pro import hints
+from cheatmaker.ui.pro.access_panel import AccessPanel
 from cheatmaker.ui.pro.cave_editor import mono
 from cheatmaker.ui.pro.tab import ProMessages, ProTab
 from cheatmaker.ui.tasks import TaskRunner
@@ -96,6 +98,8 @@ class WatchTab(ProTab):
         self.code_btn = QPushButton(hints.SHOW_CODE)
         self.cave_btn = QPushButton("Make cave entry here")
         self.nop_btn = QPushButton("Make NOP entry here")
+        self.access_btn = QPushButton(hints.ACCESS_BUTTON)
+        self.access = AccessPanel(ctl, tasks, self.msgs)
         for b in (self.cave_btn, self.nop_btn):
             b.setToolTip(hints.MAKE_ENTRY_TIP)
 
@@ -108,7 +112,7 @@ class WatchTab(ProTab):
             run_row.addWidget(w)
         run_row.addWidget(self.state, 1)
         act_row = QHBoxLayout()
-        for w in (self.code_btn, self.cave_btn, self.nop_btn):
+        for w in (self.code_btn, self.cave_btn, self.nop_btn, self.access_btn):
             act_row.addWidget(w)
         act_row.addStretch(1)
         self.lay = QVBoxLayout(self.body)
@@ -118,6 +122,7 @@ class WatchTab(ProTab):
         self.lay.addLayout(run_row)
         self.lay.addWidget(self.table, 1)
         self.lay.addLayout(act_row)
+        self.lay.addWidget(self.access, 1)
 
         self._update.connect(self._show_update)
         self.add_btn.clicked.connect(self.do_add)
@@ -128,6 +133,7 @@ class WatchTab(ProTab):
         self.code_btn.clicked.connect(self._show_code)
         self.cave_btn.clicked.connect(lambda: self._make("cave"))
         self.nop_btn.clicked.connect(lambda: self._make("nop"))
+        self.access_btn.clicked.connect(self._sample_row)
         self.table.itemSelectionChanged.connect(self._update_buttons)
         self.target_table.itemSelectionChanged.connect(self._update_buttons)
         self._update_buttons()
@@ -287,6 +293,13 @@ class WatchTab(ProTab):
             return
         self.show_code(row.address)
 
+    def _sample_row(self) -> None:
+        row = self.selected_row()
+        if row is None or row.text == ws.UNKNOWN_TEXT:
+            self.msgs.say(hints.WATCH_PICK_ROW)
+            return
+        self.access.sample_at(row.address)
+
     def _make(self, kind: str) -> None:
         row, game = self.selected_row(), self.game
         if row is None or row.text == ws.UNKNOWN_TEXT:
@@ -304,11 +317,15 @@ class WatchTab(ProTab):
         self.start_btn.setEnabled(idle and self.running and bool(self.targets))
         self.stop_btn.setEnabled(not idle)
         picked = self.selected_row() is not None
-        for b in (self.code_btn, self.cave_btn, self.nop_btn):
+        for b in (self.code_btn, self.cave_btn, self.nop_btn, self.access_btn):
             b.setEnabled(picked)
 
     # -- game state -------------------------------------------------------------------------------
     def game_state_changed(self, new_game: bool) -> None:
+        self.access.running = self.running
+        if self.access.sampling and (new_game or not self.running):
+            self.access.stop()
+        self.access.update_buttons()
         if self.watching and (new_game or not self.running):  # AC-1.2: the game went away
             self.stop()
             self.msgs.say(hints.WATCH_GAME_GONE)
@@ -321,3 +338,4 @@ class WatchTab(ProTab):
 
     def closing(self) -> None:
         self.stop()
+        self.access.stop()

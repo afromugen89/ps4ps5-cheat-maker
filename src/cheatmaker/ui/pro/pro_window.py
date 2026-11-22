@@ -111,6 +111,8 @@ class ProWindow(QMainWindow):
         self.addresses.watch = self.watch_targets
         self.watch.make_entry = self._entry_from_code
         self.watch.show_code = lambda addr: self._show(self.code, addr)
+        self.watch.access.add_address = lambda addr, vtype: self.addresses.add(addr, vtype)
+        self.code.sample = self.sample_access
         self.cheats.watch = self.watch_targets
 
     def _show(self, tab: CodeTab | MemoryTab, addr: int) -> None:
@@ -121,6 +123,11 @@ class ProWindow(QMainWindow):
         """Find what writes / accesses (address list, export dialog): the Watch tab."""
         self.tabs.setCurrentWidget(self.watch)
         self.watch.watch(targets)
+
+    def sample_access(self, addr: int) -> None:
+        """What does the instruction at ``addr`` access (Code view): the Watch tab."""
+        self.tabs.setCurrentWidget(self.watch)
+        self.watch.access.sample_at(addr)
 
     def _entry_from_code(self, kind: str, offset: int) -> None:
         self.tabs.setCurrentWidget(self.cheats)

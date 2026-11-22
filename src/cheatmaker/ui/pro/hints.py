@@ -53,6 +53,23 @@ REGS_UNVERIFIED_TIP = (
     "them before you rely on them."
 )
 SHOW_CODE = "Show in Code"
+ACCESS = (
+    "What does an instruction access? Type where it is (e.g. eboot.bin+0x1234) and press "
+    "Run: for {seconds} s every address it reads or writes is listed. The game keeps "
+    "running."
+)
+ACCESS_BUTTON = "What does it access?"
+ACCESS_RUNNING = "Sampling: {n} address(es) so far..."
+ACCESS_DONE = "{n} address(es) seen in {polls} look(s)."
+ACCESS_STOPPED = "Stopped: {n} address(es) seen."
+ACCESS_WATCH_TITLE = "No room for the sampler"
+ACCESS_WATCH_ASK = "{reason}\n\nWatch the instruction instead?"
+ACCESS_WATCHED = (
+    "{n} address(es) from {hits} pass(es), worked out from the registers (unverified until "
+    "console test S-P1)."
+)
+ACCESS_ADD = "Add to address list"
+ACCESS_BUSY = "A sample is running. Stop it first."
 WATCH_SIZE_TIP = "How many bytes to watch: the value's size."
 
 # -- Cheats tab and cave editor (PR-8) ------------------------------------------------------

@@ -131,7 +131,10 @@ class WatchSession:
         max_hits: int = WATCH_HITS,
         clock: Callable[[], float] = time.monotonic,
         on_update: Callable[[list[InstructionRow], int, float], None] | None = None,
+        on_hit: Callable[[StopEvent], None] | None = None,
     ) -> None:
+        """``on_update``: live rows (throttled), and once at the end. ``on_hit``: every
+        stop (the access sampler's fallback counts addresses from the registers)."""
         if not 1 <= len(targets) <= DEBUG_SLOTS:
             raise ValueError(f"Watch 1 to {DEBUG_SLOTS} addresses at a time.")
         self.dbg = dbg
@@ -139,6 +142,7 @@ class WatchSession:
         self.seconds, self.max_hits = seconds, max_hits
         self.clock = clock
         self.on_update = on_update
+        self.on_hit = on_hit
         self._lookup = _Lookup(read)
         self._rows: dict[tuple[int, int | None], InstructionRow] = {}
         self.hits = 0
@@ -194,6 +198,8 @@ class WatchSession:
             if stop is not None:
                 self.dbg.resume()  # the game runs on before anything is decoded
                 self._add(stop)
+                if self.on_hit is not None:
+                    self.on_hit(stop)
             now = self.clock()
             if self.on_update is not None and (stop is None or now - shown >= UPDATE_S):
                 shown = now

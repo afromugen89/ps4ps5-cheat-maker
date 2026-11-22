@@ -354,3 +354,10 @@ registers "unverified" (AC-3.3).
 | C-P4b | Registers (S-P1, AC-3.3) | In C-P4a's row, read First hit: the base register of the instruction (e.g. `r12` for `[r12+0x2ac]`) plus the displacement. | base + displacement equals the health address on 3 hits. When it does, tell us: the "(unverified)" mark can go. | The First hit text and the health address. |
 | C-P4c | Find what accesses (S-P2) | Same address, **Find what accesses**. Open the inventory or HUD, take a hit. | Readers are listed as well as the writer. | The list. |
 | C-P4d | Limits | A value the game reads every frame (e.g. your position). **Find what accesses**, Start. | It ends at 500 hits (or 60 s) by itself, the game stutters only while it runs, and the game runs on afterwards. | How long it took to reach 500 and how bad the stutter was. |
+
+### C-P5 What does this instruction access (runnable with step 18)
+
+| # | Test | Steps | Pass when | Send back |
+|---|---|---|---|---|
+| C-P5a | Sampler (AC-3.4) | Find the health writer with C-P4a. Pick its row, press **What does it access?**, and fight 2-3 enemies for the 20 s. | The game never pauses; the player's and the enemies' health addresses are listed (base + offset), each with a Seen count. Afterwards the game runs normally and Pro > Code at the writer shows the game's own bytes again. | The list and the `action=pro_sample` lines. |
+| C-P5b | No room (AC-3.5) | Only if a game has no spare code at its end: run C-P5a there. | "No room for the sampler..." with the offer to watch instead; Yes lists addresses from an instruction watch, and the game runs on after it. | The message and the `action=pro_sample result=no_room` line. |

@@ -152,3 +152,13 @@ def test_value_target_of_a_cheat():
     assert ws.value_target(Cheat("s", [static]), CODE) == ws.WatchTarget(CODE + 0x40, 2, "write")
     assert ws.value_target(Cheat("c", [code]), CODE) is None
     assert ws.value_target(Cheat("l", [learned]), CODE) is None
+
+
+def test_every_hit_is_handed_on(fake):
+    fake.debugger.stops = [FakeStop(0, _hit(READER, rax=k)) for k in range(3)]
+    seen = []
+    target = [ws.WatchTarget(READER, 1, "execute")]
+    _session(fake, target, on_hit=lambda stop: seen.append(stop.hit.reg("rax"))).run(
+        threading.Event()
+    )
+    assert seen == [0, 1, 2]

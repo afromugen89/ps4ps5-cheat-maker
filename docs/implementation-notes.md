@@ -1066,3 +1066,31 @@ Built from docs/architecture-pro.md (spec docs/spec-pro.md), implementation step
     export dialog's "Make a cave at its writer" (a write watch on the PC-only
     cheat's value) open it.
 - Console tests C-P4a..d.
+
+## Cheat Maker Pro, R1 step 18: access sampler (2026-11-22)
+
+- `core/pro/access_sampler.py`: `sample(session, site, writer, ...)` answers "what
+  does this instruction access" (AC-3.4).
+  - `operand_at` needs a memory operand `[base + disp]`: one 64-bit general register,
+    no index, not RIP or RSP. A displacement of 0 is fine here, unlike Player only.
+  - An enabled cheat that patches the site or the hooked span is refused
+    (`Overlap`, naming it).
+  - The sampler code is `cave.sampler_code`, placed with `find_cave` /
+    `find_table`, keeping out of Pro caves and the code lines of open cheats.
+  - Every 0.25 s the table is read and zeroed. A row's "Seen" count is the number of
+    polls that saw the object. The 64-slot table is hashed, so two objects sharing a
+    slot in the same poll keep only one.
+  - At the end the hook is removed (read back), then after `DISABLE_WAIT` the table
+    and **the sampler cave are zeroed**. This follows Pro's own off rule (AC-8.5), so
+    repeated samples don't use up the cave room. The guided collect leaves its cave
+    in place.
+- No room gives `NoRoomForSampler` (AC-3.5).
+  - The panel offers an execute watch on the instruction instead.
+  - `accesses_from_hits` turns its hits (registers before the instruction runs) into
+    the same rows.
+  - `WatchSession` gained `on_hit` for this.
+- `ui/pro/access_panel.py` sits under the Watch tab's list.
+  - Run / Stop, with rows for Address, Object and Seen, and Add to address list.
+  - It opens from Code ("What does it access?" on a module instruction) and from a
+    Watch row.
+- Console tests C-P5a/b.

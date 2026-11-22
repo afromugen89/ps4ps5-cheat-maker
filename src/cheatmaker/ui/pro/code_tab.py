@@ -36,6 +36,8 @@ class CodeTab(ProTab):
         super().__init__(ctl, tasks, msgs)
         # (kind, module offset) -> the Cheats tab adds the entry (set by the window)
         self.make_entry: Callable[[str, int], None] = lambda kind, offset: None
+        # "What does it access?": the Watch tab samples the instruction (set by the window)
+        self.sample: Callable[[int], None] = lambda addr: None
         self.page: cp.Page | None = None
         self.rows: list[cp.Line] = []
         self.back: list[int] = []
@@ -62,6 +64,7 @@ class CodeTab(ProTab):
         self.cave_btn = QPushButton(hints.CODE_MAKE_CAVE)
         for b in (self.nop_btn, self.cave_btn):
             b.setToolTip(hints.MAKE_ENTRY_TIP)
+        self.access_btn = QPushButton(hints.ACCESS_BUTTON)
         self.hint = QLabel(hints.CODE)
         self.hint.setWordWrap(True)
 
@@ -72,7 +75,7 @@ class CodeTab(ProTab):
         top.addWidget(self.go_btn)
         top.addWidget(self.original)
         actions = QHBoxLayout()
-        for w in (self.aob_btn, self.nop_btn, self.cave_btn):
+        for w in (self.aob_btn, self.nop_btn, self.cave_btn, self.access_btn):
             actions.addWidget(w)
         actions.addStretch(1)
         lay = QVBoxLayout(self.body)
@@ -91,6 +94,7 @@ class CodeTab(ProTab):
         self.aob_btn.clicked.connect(self.copy_aob)
         self.nop_btn.clicked.connect(lambda: self._make("nop"))
         self.cave_btn.clicked.connect(lambda: self._make("cave"))
+        self.access_btn.clicked.connect(self._sample)
         ctl.cheats_changed.connect(self.reload)
         self._update_buttons()
 
@@ -193,6 +197,7 @@ class CodeTab(ProTab):
         self.aob_btn.setEnabled(ln is not None)
         self.nop_btn.setEnabled(in_module)
         self.cave_btn.setEnabled(in_module)
+        self.access_btn.setEnabled(in_module)
         self.back_btn.setEnabled(bool(self.back))
         self.forward_btn.setEnabled(bool(self.forward))
 
@@ -209,6 +214,11 @@ class CodeTab(ProTab):
         QGuiApplication.clipboard().setText(text)
         self.msgs.say(hints.AOB_COPIED.format(aob=text))
         return text
+
+    def _sample(self) -> None:
+        ln = self.selected_line()
+        if ln is not None:
+            self.sample(ln.ip)
 
     def _make(self, kind: str) -> None:
         ln, game = self.selected_line(), self.game
