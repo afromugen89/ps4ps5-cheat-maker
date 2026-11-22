@@ -207,3 +207,49 @@ def test_fake_and_nasm_agree_on_the_subset(nasm):
     assert (
         nasm.assemble(src, CTX, [MULT]).code == FakeAssembler().assemble(fake_src, CTX, [MULT]).code
     )
+
+
+# -- bare numbers are module offsets (review M1) ---------------------------------------
+MODULE = CaveContext(0x1F00, 0x100, ORIGINAL, module_size=0x2000)
+
+
+@pytest.mark.parametrize(
+    ("line", "bad"),
+    [
+        ("mov eax, [0x5000]", "0x5000"),
+        ("mov eax, dword ptr [rel 3000h]", "3000h"),
+        ("jmp 0x3000", "0x3000"),
+        ("  jne short 0x2000", "0x2000"),
+        ("lbl: call 8192", "8192"),
+    ],
+)
+def test_numbers_outside_the_module_are_refused(line, bad):
+    err = asm.check_numbers(f"nop\n{line}\n", 0x2000)
+    assert err is not None and err[0] == 2 and err[1].startswith(f"{bad} is outside")
+    assert FakeAssembler().assemble(f"nop\n{line}\n", MODULE).error == err
+
+
+def test_numbers_inside_the_module_and_segment_operands_pass():
+    src = "mov eax, [0x100]\njmp 0x1fff\nmov rax, fs:[0x28]\nmov rax, [fs:0x28]\n; [0x9999]"
+    assert asm.check_numbers(src, 0x2000) is None
+    assert asm.check_numbers("jmp 0x5000", None) is None
+    assert shim_line("mov rax, fs:[0x28]", 0x1F00) == "mov rax, fs:[0x28]"
+
+
+@pytest.mark.needs_nasm
+def test_nasm_at_a_module_offset_org(nasm):
+    src = "mov eax, [0x100]\ncall 0x200\noriginal\njmp return\n"
+    r = nasm.assemble(src, MODULE)
+    assert r.ok, r.error
+    mov, call, orig, jmp = _decode(r.code, 0x1F00)[:4]
+    assert mov.ip_rel_memory_address == 0x100 and call.near_branch_target == 0x200
+    assert orig.ip_rel_memory_address == 0x116 and jmp.near_branch_target == 0x106
+    assert nasm.assemble("nop\nmov eax, [0x2000]\n", MODULE).error[0] == 2
+    fs = nasm.assemble("mov rax, fs:[0x28]\n", MODULE)
+    assert fs.ok and _decode(fs.code, 0x1F00)[0].memory_displacement == 0x28
+
+
+@pytest.mark.needs_nasm
+def test_nasm_number_overflow_is_an_error(nasm):
+    r = nasm.assemble("nop\nmov eax, 0x1ffffffff\n", MODULE)
+    assert r.error is not None and r.error[0] == 2 and "exceeds" in r.error[1]

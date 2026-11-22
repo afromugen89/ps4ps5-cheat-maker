@@ -12,11 +12,18 @@ The user writes the cave body only. The app wraps it with the symbols it knows:
 PC; AC-8.1 allows 0.5 s). ``FakeAssembler`` understands a tiny subset of the language
 so UI and core tests run without NASM. Both follow the ``Assembler`` protocol.
 
-A light dialect shim lets sources written for Reaper/ReaperPy assemble: ``dword ptr``
-loses ``ptr``, ``xmmword``/``ymmword`` become NASM's ``oword``/``yword``,
-``OriginReturn`` means ``return``, and a memory operand that is just an address
-(``[0x7ff01234]``) becomes RIP-relative to it, as those tools mean it. The shim never
-adds or removes lines, so error line numbers stay the user's.
+**Bare numbers are module offsets**, the same as ``eboot.bin+offset`` everywhere else
+in the app (sources are assembled with ``org`` = the cave's module offset). A memory
+operand that is just a number (``[0x5e1540a]``) is made RIP-relative to that offset,
+and a ``jmp``/``call``/``jcc`` to a number jumps there; a number outside the module
+(``CaveContext.module_size``) is refused with a line error. Reaper/ReaperPy sources
+write absolute console addresses: those need the module base subtracted before they
+assemble here (a later UI step; not done by the shim).
+
+A light dialect shim lets those sources assemble otherwise: ``dword ptr`` loses
+``ptr``, ``xmmword``/``ymmword`` become NASM's ``oword``/``yword`` and
+``OriginReturn`` means ``return``. Segment-prefixed operands (``fs:[0x28]``) are left
+alone. The shim never adds or removes lines, so error line numbers stay the user's.
 """
 
 from __future__ import annotations
@@ -71,14 +78,17 @@ class AsmResult:
 class CaveContext:
     """Where a cave goes and what it is hooked into.
 
-    ``org``: the cave's absolute address. ``hook``: the patched site, or None for a
-    plain block of code (no ``hook``/``return``/``original``). ``original``: the bytes
-    the hook's jump covers. ``symbols``: more names defined with ``equ``."""
+    ``org``: the cave's address (a module offset for Pro caves). ``hook``: the patched
+    site, or None for a plain block of code (no ``hook``/``return``/``original``).
+    ``original``: the bytes the hook's jump covers. ``symbols``: more names defined
+    with ``equ``. ``module_size``: when set, a bare number used as an address in the
+    source must be in ``[0, module_size)``."""
 
     org: int
     hook: int | None = None
     original: bytes = b""
     symbols: Mapping[str, int] = field(default_factory=dict)
+    module_size: int | None = None
 
     @property
     def ret(self) -> int | None:
@@ -133,7 +143,12 @@ _PTR = re.compile(r"\b(byte|word|dword|qword|tword|fword|xmmword|ymmword|zmmword
 _WIDE = {"xmmword": "oword", "ymmword": "yword", "zmmword": "zword"}
 _ORIGIN_RETURN = re.compile(r"\bOriginReturn\b", re.I)
 _NUM = r"(?:0x[0-9a-f]+|[0-9][0-9a-f]*h|\d+)"
-_PLAIN_ADDRESS = re.compile(rf"\[\s*(?:rel\s+)?({_NUM})\s*\]", re.I)
+_PLAIN_ADDRESS = re.compile(rf"(?<![:\w])\[\s*(?:rel\s+)?({_NUM})\s*\]", re.I)
+_BRANCH_NUMBER = re.compile(
+    rf"^\s*(?:[A-Za-z_.][\w.]*:)?\s*(?:j[a-z]+|call|loop[a-z]*)\s+"
+    rf"(?:(?:short|near|strict)\s+)*({_NUM})\s*$",
+    re.I,
+)
 
 
 def _number(text: str) -> int:
@@ -155,6 +170,28 @@ def shim_line(line: str, org: int) -> str:
 
 def shim(source: str, org: int) -> str:
     return "\n".join(shim_line(line, org) for line in source.split("\n"))
+
+
+def check_numbers(source: str, module_size: int | None) -> tuple[int, str] | None:
+    """The first line using a bare number as an address outside the module, as
+    (line, message); None when every one is a module offset (or no size is known)."""
+    if module_size is None:
+        return None
+    for n, line in enumerate(source.split("\n"), 1):
+        code = line.partition(";")[0]
+        numbers = [m.group(1) for m in _PLAIN_ADDRESS.finditer(code)]
+        branch = _BRANCH_NUMBER.match(code)
+        if branch:
+            numbers.append(branch.group(1))
+        for text in numbers:
+            value = _number(text)
+            if not 0 <= value < module_size:
+                return (
+                    n,
+                    f"{text} is outside the game's module (0 to {module_size - 1:#x}): "
+                    "addresses here are module offsets (eboot.bin+offset)",
+                )
+    return None
 
 
 # -- the wrapper -----------------------------------------------------------------
@@ -234,12 +271,16 @@ class NasmAssembler:
         self, source: str, ctx: CaveContext, variables: Sequence[Variable] = ()
     ) -> AsmResult:
         started = time.perf_counter()
+        bad = check_numbers(source, ctx.module_size)
+        if bad is not None:
+            return AsmResult(b"", {}, bad)
         with tempfile.TemporaryDirectory(prefix="cheatmaker-asm-") as tmp:
             folder = Path(tmp)
             (folder / _SOURCE).write_text(wrap(source, ctx, variables), encoding="utf-8")
             try:
                 done = subprocess.run(
-                    [str(self.exe), "-f", "bin", "-o", _OUTPUT, _SOURCE],
+                    # a number too big for its operand is an error, not a silent cut
+                    [str(self.exe), "-Werror=number-overflow", "-f", "bin", "-o", _OUTPUT, _SOURCE],
                     cwd=folder,
                     capture_output=True,
                     text=True,
@@ -308,6 +349,9 @@ class FakeAssembler:
         self.calls.append((source, ctx, tuple(variables)))
         if self.fail is not None:
             return AsmResult(b"", {}, self.fail)
+        bad = check_numbers(source, ctx.module_size)
+        if bad is not None:
+            return AsmResult(b"", {}, bad)
         names = dict(ctx.symbols)
         if ctx.hook is not None:
             names.update(hook=ctx.hook, **{"return": ctx.hook + len(ctx.original)})
@@ -409,6 +453,7 @@ __all__ = [
     "CaveContext",
     "FakeAssembler",
     "NasmAssembler",
+    "check_numbers",
     "default_assembler",
     "insn_text",
     "nasm_formatter",

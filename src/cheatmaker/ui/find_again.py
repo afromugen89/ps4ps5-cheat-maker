@@ -997,7 +997,9 @@ class FindAgain(QObject):
         p = self.ctl.project
         if p is None:
             return
-        if cheat.learned_parts:
+        if cheat.pro is not None:  # its Pro source goes too (delete, Combine)
+            pro_compile.forget(p, cheat.pro.id)
+        elif cheat.learned_parts:
             self._drop_entry(p, cheat.name, self._anchors(cheat))
         elif cheat.anchor is not None:
             p.cheats = [c for c in p.cheats if c.parts or (c.object, c.field) != cheat.anchor]
@@ -1007,8 +1009,13 @@ class FindAgain(QObject):
             self.save()
 
     def renamed(self, cheat: Cheat, old: str) -> None:
-        """A combined cheat's new name is kept in its notes entry (its key)."""
+        """A combined cheat's new name is kept in its notes entry (its key); a Pro
+        cheat's in its source."""
         p = self.ctl.project
+        if cheat.pro is not None:
+            cheat.pro.name = cheat.name
+            self.save()
+            return
         if p is None or not cheat.learned_parts:
             return
         key = self._key(old, self._anchors(cheat))

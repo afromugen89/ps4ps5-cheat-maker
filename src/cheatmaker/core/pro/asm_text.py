@@ -25,6 +25,7 @@ from dataclasses import dataclass
 
 import iced_x86 as ix
 
+from cheatmaker.core import updater as up
 from cheatmaker.core.cheats import MAIN_MODULE, Cheat, Location
 from cheatmaker.core.pro.asm import Assembler, CaveContext, insn_text
 from cheatmaker.core.pro.model import JMP_REL32_SIZE, NOP, ProCheat, ProEntry
@@ -234,6 +235,14 @@ def _jump_target(loc: Location) -> int | None:
     return loc.offset + JMP_REL32_SIZE + struct.unpack_from("<i", on, 1)[0]
 
 
+def _is_routine(loc: Location) -> bool:
+    """A line that is a cave of its own: new code over spare zeros (``updater.is_cave``)
+    or a routine left in place when off (on == off, as the guided builder writes).
+    Any other line patches the game's code and must stay a Bytes entry, or turning it
+    off would no longer put the game's bytes back."""
+    return up.is_cave(loc) or loc.on == loc.off
+
+
 def _check_adoptable(cheat: Cheat) -> None:
     if not cheat.locations:
         raise CantConvert(f"{cheat.name}: there is nothing to write")
@@ -247,14 +256,16 @@ def _check_adoptable(cheat: Cheat) -> None:
 def cave_entries(
     locations: Sequence[Location], assembler: Assembler, comment: str = ""
 ) -> list[ProEntry]:
-    """Pro entries for cheat lines: a jump line and the line it jumps to make one cave
-    entry (its text from ``to_source``); every other line is a Bytes (or NOP) entry."""
+    """Pro entries for cheat lines: a jump line and the cave it jumps to (a line over
+    spare zeros, or one that is the same on and off) make one cave entry (its text from
+    ``to_source``); every other line is a Bytes (or NOP) entry."""
     by_offset = {loc.offset: k for k, loc in enumerate(locations)}
     caves: dict[int, int] = {}  # jump line -> cave line
     for k, loc in enumerate(locations):
         target = _jump_target(loc)
-        if target is not None and by_offset.get(target, k) != k:
-            caves[k] = by_offset[target]
+        j = by_offset.get(target, k) if target is not None else k
+        if j != k and j not in caves.values() and _is_routine(locations[j]):
+            caves[k] = j
     used = set(caves.values())
     entries = []
     for k, loc in enumerate(locations):

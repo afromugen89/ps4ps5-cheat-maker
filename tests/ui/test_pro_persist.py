@@ -7,6 +7,7 @@ import dataclasses
 import pytest
 
 from cheatmaker.core import project as pj
+from cheatmaker.core.cheats import Cheat, Location, LocationKind
 from cheatmaker.core.pro import compile as pro_compile
 from cheatmaker.core.pro.model import ProCheat, ProEntry
 from cheatmaker.settings import Settings
@@ -59,3 +60,47 @@ def test_pro_cheat_is_saved_and_restored(win):
     finder.on_game(dataclasses.replace(game, pid=game.pid + 1))  # the game restarted
     (again,) = [c for c in cf.cheats if c.pro is not None]
     assert again.name == "No damage" and again.pro.entries[1].cave == CAVE
+
+
+def _saved_ids(win) -> list[str]:
+    p = win.ctl.project
+    return [c.id for c in pj.load(pj.project_path(p.title_id, p.version)).pro_cheats]
+
+
+def _with_pro(win):
+    cf = win.ctl.ensure_file()
+    cheat = pro_compile.compile_cheat(_pro())
+    cf.cheats.append(cheat)
+    win.cheats.finder.save()
+    win.ctl.cheats_changed.emit()
+    return cheat
+
+
+def test_deleting_a_pro_cheat_forgets_its_source(win):
+    _with_pro(win)
+    assert _saved_ids(win) == ["p1"]
+    win.cheats.table.selectRow(len(win.cheats.cheats) - 1)
+    win.cheats.do_delete()
+    assert win.ctl.project.pro_cheats == [] and _saved_ids(win) == []
+
+
+def test_combining_a_pro_cheat_forgets_its_source(win):
+    _with_pro(win)
+    other = Cheat("Ammo", [Location(LocationKind.CODE_PATCH, 0x500, b"\x90", b"\x01")])
+    win.ctl.ensure_file().cheats.append(other)
+    win.ctl.cheats_changed.emit()
+    win.cheats.table.selectAll()
+    win.cheats.combine_btn.click()
+    assert [c.name for c in win.cheats.cheats] == ["No damage + Ammo"]
+    assert _saved_ids(win) == []
+
+
+def test_renaming_a_pro_cheat_renames_its_source(win):
+    from cheatmaker.ui.cheats_view import COL_NAME
+
+    cheat = _with_pro(win)
+    row = win.cheats.cheats.index(cheat)
+    win.cheats.table.item(row, COL_NAME).setText("Never hurt")
+    assert cheat.pro is not None and cheat.pro.name == "Never hurt"
+    p = win.ctl.project
+    assert pj.load(pj.project_path(p.title_id, p.version)).pro_cheats[0].name == "Never hurt"

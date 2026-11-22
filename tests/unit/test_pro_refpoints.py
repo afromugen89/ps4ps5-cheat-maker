@@ -200,3 +200,10 @@ def test_bring_over_with_nasm(nasm):
     cave = new.entries[0]
     first = next(iter(ix.Decoder(64, cave.cave_bytes, ip=cave.cave)))
     assert first.ip_rel_memory_address == cave.cave + len(cave.cave_bytes) - 4
+
+
+def test_unconverted_imported_cave_is_refused_with_a_reason():
+    cave = ProEntry("bytes", 0x1F00, bytes(2), b"\x90\xc3")
+    pc = ProCheat("p3", "Imported", [cave, ProEntry("nop", NOP_SITE, NOP_CODE[:3])])
+    _moved, report = rp.bring_over([pc], _image(SHIFT), FakeAssembler())
+    assert "isn't converted to assembly" in report.failed["Imported"]

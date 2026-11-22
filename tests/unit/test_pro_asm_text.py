@@ -221,3 +221,35 @@ def test_cave_entries_pair_jump_and_cave_with_fake():
     ]
     (entry,) = cave_entries(lines, FakeAssembler(), comment="c")
     assert entry.source == "    nop\n    ret\n" and entry.comment == "c"
+
+
+# -- review B1: only real caves pair with a jump ---------------------------------------
+REAL_CODE = Location(
+    LocationKind.CODE_PATCH, 0x3000, bytes.fromhex("9090c390"), bytes.fromhex("554889e5")
+)
+
+
+def _jump_to_real_code() -> list[Location]:
+    jump = Location(
+        LocationKind.CODE_PATCH, 0x100, cv.jmp_patch(0x100, 0x3000, 5), b"\x89\x08\x90\x90\x90"
+    )
+    return [REAL_CODE, jump]
+
+
+def test_a_jump_to_patched_game_code_is_not_a_cave():
+    entries = cave_entries(_jump_to_real_code(), FakeAssembler())
+    assert [(e.kind, e.offset) for e in entries] == [("bytes", 0x3000), ("bytes", 0x100)]
+    assert entries[0].off == REAL_CODE.off and entries[0].on == REAL_CODE.on
+
+
+def test_adopt_keeps_a_jump_to_patched_game_code_as_bytes():
+    pc = adopt(Cheat("Jumpy", _jump_to_real_code()), "p1", FakeAssembler())
+    assert [e.kind for e in pc.entries] == ["bytes", "bytes"]
+    assert pc.entries[0].off == bytes.fromhex("554889e5")
+
+
+def test_a_routine_left_in_place_still_pairs():
+    routine = Location(LocationKind.CODE_PATCH, CAVE, b"\x90\xc3", b"\x90\xc3")
+    jump = Location(LocationKind.CODE_PATCH, 0x100, cv.jmp_patch(0x100, CAVE, 5), bytes(5))
+    (entry,) = cave_entries([routine, jump], FakeAssembler())
+    assert entry.kind == "cave" and entry.cave == CAVE

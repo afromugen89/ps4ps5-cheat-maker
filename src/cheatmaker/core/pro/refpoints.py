@@ -209,6 +209,12 @@ def bring_one(
     """A copy of ``pc`` for the version whose code is ``image`` (and whether a site
     was found by its original bytes only). ``rooms`` (module ranges) is where new caves
     can't go; the caves placed here are added to it. Raises _Fail."""
+    for e in pc.entries:
+        if e.kind == "bytes" and not any(e.off) and any(e.on):
+            raise _Fail(
+                f"the imported cave at +{e.offset:X} isn't converted to assembly "
+                "(use Convert to assembly, then bring it over)"
+            )
     new = ProCheat.from_json(pc.to_json())
     moves: list[tuple[int, int, int]] = []  # old start, old end (incl.), delta
     guessed = False

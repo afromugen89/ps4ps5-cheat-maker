@@ -357,3 +357,121 @@ def test_cave_rooms_and_ranges(s):
     ]
     heap = Cheat("H", [Location(LocationKind.SESSION_ADDRESS, BASE + 0x50, b"\1\2", b"\0\0")])
     assert sites.cheat_ranges(heap, BASE) == [(0x50, 0x52)]
+
+
+# -- review fixes ---------------------------------------------------------------------------
+class _FailOn:
+    """FakeAssembler that fails one source."""
+
+    def __init__(self, bad: str) -> None:
+        self.fake, self.bad = FakeAssembler(), bad
+
+    def assemble(self, source, ctx, variables=()):
+        if source == self.bad:
+            return pc_.AsmResult(b"", {}, (1, "boom"))
+        return self.fake.assemble(source, ctx, variables)
+
+
+def _two_caves(s: Session) -> ProCheat:
+    home = pc_.new_cave_entry(s, HOOK, "original\njmp return\n")
+    second = ProEntry("cave", NOP_SITE, NOP_CODE + b"\xcc\xcc", source="jmp mult\n")
+    pc = ProCheat("p1", "Two", [home, second], [MULT])
+    assert pc_.build_all(s, pc, FakeAssembler()) is None
+    return pc
+
+
+def _target(entry: ProEntry) -> int:
+    return entry.cave + 5 + struct.unpack_from("<i", entry.cave_bytes, 1)[0]
+
+
+def test_moving_the_variables_rebuilds_the_other_caves(s):
+    """Review M2."""
+    pc = _two_caves(s)
+    home, second = pc.entries
+    home.source = "nop\nnop\nnop\nnop\noriginal\njmp return\n"
+    pc_.build(s, pc, home, FakeAssembler())
+    assert _target(second) == pc_.variable_addresses(pc)["mult"] and not second.stale
+
+
+def test_a_cave_that_cant_be_rebuilt_is_stale_and_refused(s):
+    pc = _two_caves(s)
+    home, second = pc.entries
+    home.source = "nop\nnop\nnop\nnop\noriginal\njmp return\n"
+    pc_.build(s, pc, home, _FailOn("jmp mult\n"))
+    assert second.stale and not home.stale
+    assert ProEntry.from_json(second.to_json()).stale
+    with pytest.raises(LockFailed, match="needs assembling again"):
+        pc_.enable(s, pc, pc_.ProWriter(s))
+    pc_.build(s, pc, second, FakeAssembler())
+    assert not second.stale and _target(second) == pc_.variable_addresses(pc)["mult"]
+
+
+def test_stale_and_hook_rules_in_the_model():
+    with pytest.raises(ValueError, match="jump at its hook"):
+        ProEntry("cave", HOOK, HOOK_CODE, b"", cave=0x1F00, cave_bytes=b"\xc3")
+    with pytest.raises(ValueError, match="stale"):
+        ProEntry("bytes", 1, b"\0", b"\1", stale=True)
+    assert "stale" not in ProEntry("cave", HOOK, HOOK_CODE).to_json()
+
+
+def test_take_value_keeps_a_float_that_encodes_the_same(s):
+    """Review M4: 2.1 is stored as a float32; reading it back gives 2.0999999..."""
+    pc = _cheat(s, variables=(Variable("mult", ValueType.FLOAT, 2.1),))
+    cheat = pc_.compile_cheat(pc)
+    assert cheat.value != 2.1
+    pc_.take_value(cheat)
+    assert pc.variable("mult").value == 2.1
+    cheat.set_value(2.5)
+    pc_.take_value(cheat)
+    assert pc.variable("mult").value == 2.5
+
+
+def test_a_failed_read_back_undoes_the_writes_in_reverse(s, fake, monkeypatch):
+    pc = _cheat(s)
+    pc.entries.append(pc_.new_nop_entry(s, NOP_SITE))
+    entry = pc.entries[0]
+    real_write = fake.write
+
+    def write(pid, addr, data):  # the NOP site doesn't take the new bytes
+        real_write(pid, addr, data[:-1] + b"\xcc" if addr == BASE + NOP_SITE else data)
+
+    monkeypatch.setattr(fake, "write", write)
+    with pytest.raises(WriteFailed):
+        pc_.enable(s, pc, pc_.ProWriter(s))
+    order = [a - BASE for _, a, _ in fake.writes]
+    assert order == [entry.cave, HOOK, NOP_SITE, NOP_SITE, HOOK, entry.cave]
+    assert fake.peek(PID, BASE + HOOK, 5) == HOOK_CODE
+    assert fake.peek(PID, BASE + entry.cave, 4) == bytes(4)
+    assert fake.peek(PID, BASE + NOP_SITE, 3)[:2] == NOP_CODE[:2]
+
+
+def test_restore_skips_a_damaged_cheat(caplog, monkeypatch):
+    project = pj.Project("PPSA01234", "01.000", "eboot.bin")
+    project.pro_cheats.append(ProCheat("p1", "X", [ProEntry("nop", NOP_SITE, NOP_CODE)]))
+
+    def bad(_pc):
+        raise ValueError("damaged")
+
+    monkeypatch.setattr(pc_, "compile_cheat", bad)
+    assert pc_.restore(project, []) == []
+    assert "damaged" in caplog.text
+
+
+def test_build_keeps_out_of_open_cheats_lines(s):
+    entry = pc_.new_cave_entry(s, HOOK, "ret\n")
+    first = pc_.new_cave_entry(s, HOOK, "ret\n")
+    pc_.build(s, ProCheat("p8", "A", [first]), first, FakeAssembler())
+    guided = Cheat("G", [Location(LocationKind.CODE_PATCH, first.cave, b"\x90", b"\0")])
+    pc = ProCheat("p1", "B", [entry])
+    pc_.build(s, pc, entry, FakeAssembler(), open_rooms=sites.open_rooms([guided]))
+    assert not entry.cave <= first.cave < entry.cave + len(entry.cave_bytes)
+    alone = pc_.new_cave_entry(s, HOOK, "ret\n")
+    pc_.build(s, ProCheat("p9", "C", [alone]), alone, FakeAssembler())
+    assert alone.cave == first.cave, "without the open lines it would take that room"
+    assert sites.open_rooms([pc_.compile_cheat(pc)], skip="p1") == []
+
+
+def test_sources_are_checked_against_the_module_size(s):
+    entry = pc_.new_cave_entry(s, HOOK, "jmp 0x3000\n")
+    result = pc_.build(s, ProCheat("p1", "Far", [entry]), entry, FakeAssembler())
+    assert result.error is not None and "outside the game's module" in result.error[1]

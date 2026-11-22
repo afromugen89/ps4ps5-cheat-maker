@@ -815,3 +815,26 @@ Built from docs/architecture-pro.md (spec docs/spec-pro.md), implementation step
   a cave no jump reaches stays Bytes. Note: after conversion the compiled cave line is
   the same on and off (step 8 rule) where the imported file had zeros as off-bytes.
   The import dialog itself is step 12.
+- **Review round, steps 6-10 (2026-11-22).**
+  - B1: a jump line pairs with its target as a Cave entry only when the target is a
+    real cave (off-bytes all zero, `updater.is_cave`) or a routine left in place
+    (on == off); a jump into patched game code stays two Bytes entries (adopt and
+    Convert to assembly).
+  - M1 (architect): bare numbers in cave source are module offsets. `CaveContext`
+    carries `module_size`; `[N]`, `[rel N]` and jmp/jcc/call/loop number targets
+    outside `[0, module size)` are refused with a line error, segment-prefixed operands
+    (`fs:[0x28]`) are left alone, and NASM runs with `-Werror=number-overflow`.
+    Converting Reaper's absolute addresses (subtract the module base) is left to the UI.
+  - M2: when building the home cave moves the variables, the cheat's other caves are
+    re-assembled; one that fails or no longer fits is marked `stale` (optional
+    `"stale": true` key in format 5) and `enable` refuses it until it is rebuilt.
+  - M3: deleting or Combining a Pro cheat forgets its source in the `.cmproj`;
+    renaming it in My cheats renames the source.
+  - M4: `take_value` compares encoded bytes, so a float 2.1 isn't rewritten as
+    2.0999999.
+  - Minors: a failed read-back during `enable` puts back every write already made, last
+    first; `restore` skips (and logs) a damaged Pro cheat; a compiled cave entry must
+    have its jump; `build` keeps out of the code lines of cheats in My cheats
+    (`sites.open_rooms`, as `build_dialog._open_rooms`). **Imported caves not converted
+    to assembly are refused by Bring them over** ("isn't converted to assembly"): convert
+    them first, then their source is re-assembled like any Pro cave.

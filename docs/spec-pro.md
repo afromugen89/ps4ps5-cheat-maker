@@ -50,7 +50,7 @@ can't recreate.
 | S-P5 | INT3 breakpoint, single step, halt/resume, get/set registers, XMM from savefpu | Each command does what PROTOCOL.md says on 3 tries |
 | S-P6 | S-P1, S-P2 and S-P5 on a CUSA game | Same results as on PPSA |
 | S-P7 | Hit rate: an instruction hit 60×/s; measure the game's frame stutter and the PC's handling | Recorded numbers; sets the limits in PR-3 and PR-11 |
-| S-P8 | CheatRunner: an mc4 made by the app loads (also one whose game title has `&`, e.g. "Ratchet & Clank", and a cheat name with `& < > "`: check how CheatRunner shows them); a cave in spare space works; two mods share bytes (what verify does); master code format; meaning of "cave of any size" | Kein reports the behaviour; recorded in docs/console-results.md |
+| S-P8 | CheatRunner: an mc4 made by the app loads (also one whose game title has `&`, e.g. "Ratchet & Clank", and a cheat name with `& < > "`: check how CheatRunner shows them); a cave in spare space works; two mods share bytes (what verify does); master code format; meaning of "cave of any size"; whether CheatRunner checks the off-bytes of a cave line whose on and off bytes are the same (Pro and guided routines are written that way) before turning the mod on or off | Kein reports the behaviour; recorded in docs/console-results.md |
 
 ## 5. Shared model (both modes)
 
@@ -67,7 +67,7 @@ can't recreate.
 - Once a cheat has been edited in Pro it is a Pro cheat; the guided wizards (Make it work,
   Lock it options) no longer offer to rebuild it, and say so.
 
-AC-S1. Given a cheat made by Lock it (player only), When Kein opens the Pro window, Then the cheat is listed with two entries (cave, jump), the cave shows assembly text that assembles to the exact saved bytes, and the badge says CheatRunner.
+AC-S1. Given a cheat made by Lock it (player only), When Kein opens the Pro window, Then the cheat is listed with one Cave entry (its hook and its cave) that compiles to the same two lines (cave, jump), the cave shows assembly text that assembles to the exact saved bytes, and the badge says CheatRunner.
 AC-S2. Given a cheat holding a heap address, a pointer path or a found-again anchor, Then its badge says PC only, and hovering it names the reason ("heap address", "pointer path", "found again each run"; plus "freeze" when such a cheat also freezes). Given a frozen value at a game-module (static) address, Then its badge says CheatRunner with the note "written once (CheatRunner can't freeze)", and it is exported (decided 2026-11-22, option C: guided behaviour and TC-60 unchanged).
 AC-S3. Given a format 4 `.cmproj`, When the app loads and saves it, Then the objects, anchors and cheats are unchanged and `format_version` becomes 5.
 

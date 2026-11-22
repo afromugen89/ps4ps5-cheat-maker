@@ -70,6 +70,18 @@ def refuse_overlap(pc: ProCheat, enabled: Iterable[Cheat], module_base: int) -> 
             raise Overlap(f"It overlaps “{other.name}”, which is on. Turn that off first.")
 
 
+def open_rooms(cheats: Iterable[Cheat], skip: str | None = None) -> list[Range]:
+    """The code lines of the cheats in My cheats (as ``build_dialog._open_rooms``): a
+    new cave never goes there. ``skip``: the Pro cheat being built (its own lines)."""
+    return [
+        (loc.offset, loc.offset + len(loc.on))
+        for c in cheats
+        if c.pro is None or c.pro.id != skip
+        for loc in c.locations
+        if loc.kind is LocationKind.CODE_PATCH
+    ]
+
+
 def cave_rooms(cheats: Iterable[ProCheat], skip: str | None = None) -> list[Range]:
     """The placed caves of ``cheats`` (all but the one with id ``skip``): rooms no new
     cave may take, and that guided caves keep out of (``session.reserved_rooms``)."""
@@ -146,6 +158,7 @@ __all__ = [
     "cheat_ranges",
     "entry_ranges",
     "free_room",
+    "open_rooms",
     "pro_ranges",
     "refuse_overlap",
     "room_at",

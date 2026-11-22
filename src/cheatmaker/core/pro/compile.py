@@ -146,7 +146,10 @@ def take_value(cheat: Cheat) -> None:
     if pc is None or pc.editable is None or entry is None or cheat.value is None:
         return
     var = pc.variable(pc.editable)
-    if cheat.value == var.value:
+    try:
+        if var.vtype.encode(cheat.value) == var.encoded():  # same bytes: 2.1 stays 2.1
+            return
+    except (ValueError, OverflowError):
         return
     k = pc.variables.index(var)
     pc.variables[k] = replace(var, value=cheat.value)
@@ -192,7 +195,7 @@ def restore(project, cheats: list[Cheat]) -> list[Cheat]:
             continue
         try:
             cheat = compile_cheat(pc)
-        except LockFailed as exc:
+        except (LockFailed, ValueError) as exc:  # unplaced cave, damaged entry
             log.warning("action=pro_restore id=%s skipped: %s", pc.id, exc)
             continue
         cheats.append(cheat)
@@ -229,21 +232,33 @@ def new_nop_entry(session: Session, offset: int) -> ProEntry:
     return ProEntry("nop", offset, code[: insn.len])
 
 
-def context(pc: ProCheat, entry: ProEntry, org: int | None = None) -> CaveContext:
-    """What a cave's source is assembled with: its place, its hook, and (for a cave
-    other than the home cave) the variables' addresses as symbols."""
+def context(
+    pc: ProCheat, entry: ProEntry, org: int | None = None, module_size: int | None = None
+) -> CaveContext:
+    """What a cave's source is assembled with: its place, its hook, (for a cave other
+    than the home cave) the variables' addresses as symbols, and the module's size
+    (bare numbers in the source are module offsets and must be inside it)."""
     where = entry.cave if org is None else org
     if where is None:
         raise LockFailed("the cave isn't placed yet")
     symbols = {} if entry is home(pc) else variable_addresses(pc)
-    return CaveContext(where, entry.offset, entry.off, symbols)
+    return CaveContext(where, entry.offset, entry.off, symbols, module_size)
 
 
 def assemble(
-    pc: ProCheat, entry: ProEntry, assembler: Assembler, org: int | None = None
+    pc: ProCheat,
+    entry: ProEntry,
+    assembler: Assembler,
+    org: int | None = None,
+    module_size: int | None = None,
 ) -> AsmResult:
     variables = pc.variables if entry is home(pc) else ()
-    return assembler.assemble(entry.source, context(pc, entry, org), variables)
+    return assembler.assemble(entry.source, context(pc, entry, org, module_size), variables)
+
+
+def module_size(session: Session) -> int:
+    game = session.require_game()
+    return game.module_end - game.module_base
 
 
 def _round16(n: int) -> int:
@@ -256,16 +271,26 @@ def build(
     entry: ProEntry,
     assembler: Assembler,
     others: Iterable[ProCheat] = (),
+    open_rooms: Iterable[sites.Range] = (),
 ) -> AsmResult:
     """Assemble ``entry``, place its cave the first time, check the cave budget, and
     store the cave bytes and the jump. Returns the assembler's result; on an error the
-    entry is unchanged. NoRoom when it doesn't fit (AC-8.2)."""
+    entry is unchanged. NoRoom when it doesn't fit (AC-8.2). ``open_rooms``: the code
+    lines of the cheats in My cheats (``sites.open_rooms``), never used for a cave.
+    When the home cave's variables move, the cheat's other caves are re-assembled;
+    one that can't be is marked ``stale`` (it can't be turned on until rebuilt)."""
     if entry.kind != "cave":
         raise ValueError("only a cave entry is assembled")
+    size_limit = module_size(session)
     mine = ProCheat(pc.id, pc.name, [e for e in pc.entries if e is not entry])
-    reserved = sites.cave_rooms(others, skip=pc.id) + sites.cave_rooms([mine])
+    reserved = [
+        *sites.cave_rooms(others, skip=pc.id),
+        *sites.cave_rooms([mine]),
+        *open_rooms,
+    ]
+    before = variable_addresses(pc)
     if entry.cave is None:
-        trial = assemble(pc, entry, assembler, org=entry.offset + FAR)
+        trial = assemble(pc, entry, assembler, entry.offset + FAR, size_limit)
         if not trial.ok:
             return trial
         size = len(trial.code)
@@ -279,7 +304,7 @@ def build(
             addr = cv.find_cave(session, _round16(size), extra_reserved=reserved)
         entry.cave = addr - base
         log.info("action=pro_place id=%s cave=%#x size=%d", pc.id, entry.cave, size)
-    result = assemble(pc, entry, assembler)
+    result = assemble(pc, entry, assembler, module_size=size_limit)
     if not result.ok:
         return result
     room = sites.room_at(session, entry.cave, len(entry.cave_bytes), reserved)
@@ -287,17 +312,41 @@ def build(
         raise NoRoom(f"The cave needs {len(result.code)} bytes, {room} free.")
     entry.cave_bytes = result.code
     entry.on = cv.jmp_patch(entry.offset, entry.cave, len(entry.off))
+    entry.stale = False
+    if entry is home(pc) and variable_addresses(pc) != before:
+        _rebuild_users(session, pc, assembler, reserved)
     return result
 
 
+def _rebuild_users(
+    session: Session, pc: ProCheat, assembler: Assembler, reserved: list[sites.Range]
+) -> None:
+    """Re-assemble the caves other than the home cave at their places (they use the
+    variables' addresses); one that fails or no longer fits is marked stale."""
+    for e in pc.entries:
+        if e.kind != "cave" or e is home(pc) or e.cave is None or not e.cave_bytes:
+            continue
+        result = assemble(pc, e, assembler, module_size=module_size(session))
+        own = [r for r in reserved if r[0] != e.cave]
+        if result.ok and len(result.code) <= sites.room_at(session, e.cave, len(e.cave_bytes), own):
+            e.cave_bytes, e.stale = result.code, False
+        else:
+            e.stale = True
+            log.warning("action=pro_build id=%s cave=%#x result=stale", pc.id, e.cave)
+
+
 def build_all(
-    session: Session, pc: ProCheat, assembler: Assembler, others: Iterable[ProCheat] = ()
+    session: Session,
+    pc: ProCheat,
+    assembler: Assembler,
+    others: Iterable[ProCheat] = (),
+    open_rooms: Iterable[sites.Range] = (),
 ) -> AsmResult | None:
     """Build every cave, the home cave first (the others use its variables). Returns
     the first failed result, else None."""
     others = list(others)
     for entry in (e for e in pc.entries if e.kind == "cave"):
-        result = build(session, pc, entry, assembler, others)
+        result = build(session, pc, entry, assembler, others, open_rooms)
         if not result.ok:
             return result
     return None
@@ -369,18 +418,36 @@ def enable(
     an enabled cheat writes any of the same bytes."""
     game = session.require_game()
     client = session.require_client()
+    if any(e.stale for e in pc.entries):
+        raise LockFailed(f"{pc.name}: a cave needs assembling again before it can go on")
     sites.refuse_overlap(pc, enabled, game.module_base)
     writes = _writes(pc, game.module_base)
-    changed = []
+    changed, before = [], []
     for w in writes:
         found = client.read(game.pid, w.addr, len(w.on))
+        before.append(found)
         if found != w.off and not (w.what == "cave" and found == w.on):
             changed.append((w.addr, w.off, found))
     if changed:
         raise SiteChanged(changed)
-    for w in writes:
-        writer.write_checked(w.addr, w.on, f"{pc.id}:{w.what}")
+    done: list[tuple[_Write, bytes]] = []
+    try:
+        for w, found in zip(writes, before, strict=True):
+            done.append((w, found))
+            writer.write_checked(w.addr, w.on, f"{pc.id}:{w.what}")
+    except CheatMakerError:
+        _undo(writer, pc, done)
+        raise
     log.info("action=pro_enable id=%s entries=%d", pc.id, len(pc.entries))
+
+
+def _undo(writer: ProWriter, pc: ProCheat, done: list[tuple[_Write, bytes]]) -> None:
+    """Put back what a failed ``enable`` wrote, last write first (jumps before caves)."""
+    for w, found in reversed(done):
+        try:
+            writer.write(w.addr, found, f"{pc.id}:undo")
+        except CheatMakerError as exc:  # keep going: put back as much as we can
+            log.warning("action=pro_enable_undo addr=%#x reason=%s", w.addr, exc)
 
 
 def disable(
@@ -429,7 +496,8 @@ def set_variable(
         raise LockFailed(f"{pc.name}: there is no placed cave for the variable")
     k = pc.variables.index(var)
     variables = [*pc.variables[:k], new_var, *pc.variables[k + 1 :]]
-    result = assembler.assemble(entry.source, context(pc, entry), variables)
+    size = module_size(session) if session is not None else None
+    result = assembler.assemble(entry.source, context(pc, entry, module_size=size), variables)
     if not result.ok:
         line, msg = result.error  # type: ignore[misc]
         raise LockFailed(f"The cave doesn't assemble any more (line {line}: {msg})")
@@ -472,6 +540,7 @@ __all__ = [
     "enable",
     "forget",
     "home",
+    "module_size",
     "new_cave_entry",
     "new_nop_entry",
     "refresh",

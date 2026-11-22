@@ -116,3 +116,15 @@ def test_convert_without_a_jump_changes_nothing():
     pc = importer.import_cheats(CheatFile("G", "PPSA01234", "1", [Cheat("c", [loc])])).cheats[0]
     assert importer.convert(pc, FakeAssembler()) == 0
     assert pc.entries[0].kind == "bytes"
+
+
+def test_convert_leaves_a_jump_to_real_code_as_bytes():
+    """Review B1: the target patches game code (off 55 48 89 e5), it isn't a cave."""
+    real = Location(
+        LocationKind.CODE_PATCH, 0x3000, bytes.fromhex("9090c390"), bytes.fromhex("554889e5")
+    )
+    jump = Location(LocationKind.CODE_PATCH, HOOK, cv.jmp_patch(HOOK, 0x3000, 5), HOOK_OFF)
+    cf = CheatFile("G", "PPSA01234", "1", [Cheat("j", [real, jump])])
+    pc = importer.import_cheats(cf).cheats[0]
+    assert importer.convert(pc, FakeAssembler()) == 0
+    assert [(e.kind, e.off) for e in pc.entries] == [("bytes", real.off), ("bytes", HOOK_OFF)]

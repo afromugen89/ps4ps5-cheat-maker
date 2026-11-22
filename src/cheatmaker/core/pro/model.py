@@ -223,6 +223,9 @@ class ProEntry:
     cave_bytes: bytes = b""
     aob: str = ""
     comment: str = ""
+    stale: bool = False
+    """Cave only: its bytes no longer match its source (another cave's variables
+    moved and it couldn't be re-assembled). It can't be turned on until rebuilt."""
 
     def __post_init__(self) -> None:
         if self.kind not in ENTRY_KINDS:
@@ -248,6 +251,10 @@ class ProEntry:
                 raise ValueError(f"a cave hook covers at least {JMP_REL32_SIZE} bytes")
             if self.cave_bytes and self.cave is None:
                 raise ValueError("compiled cave bytes need the cave's place")
+            if self.cave_bytes and len(self.on) < JMP_REL32_SIZE:
+                raise ValueError("a compiled cave needs the jump at its hook")
+        elif self.stale:
+            raise ValueError("only a cave entry can be stale")
 
     @property
     def nop_default(self) -> bool:
@@ -255,7 +262,7 @@ class ProEntry:
 
     def to_json(self) -> dict:
         if self.kind == "cave":
-            return {
+            d = {
                 "kind": "cave",
                 "hook": _hex(self.offset),
                 "cave": None if self.cave is None else _hex(self.cave),
@@ -266,6 +273,9 @@ class ProEntry:
                 "aob": self.aob,
                 "comment": self.comment,
             }
+            if self.stale:  # optional key, still format 5
+                d["stale"] = True
+            return d
         d: dict = {"kind": self.kind, "offset": _hex(self.offset), "off": self.off.hex()}
         if not self.nop_default:  # plain NOPs are implied by the kind
             d["on"] = self.on.hex()
@@ -287,6 +297,7 @@ class ProEntry:
                 source=_text(d, "source", ""),
                 cave=None if cave is None else _offset(cave, "a cave offset"),
                 cave_bytes=_blob(d, "cave_bytes"),
+                stale=d.get("stale", False) is True,
                 **common,
             )
         if kind not in ENTRY_KINDS:
