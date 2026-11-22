@@ -16,11 +16,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from cheatmaker.console.client import (
+    DEBUG_SLOTS,
+    DebugState,
     ForegroundApp,
     MemMap,
     ProcInfo,
     ProgressFn,
     ScanHit,
+    StopEvent,
     WatchHit,
     WatchKind,
     WatchUntil,
@@ -35,7 +38,16 @@ from cheatmaker.console.local_scan import (
     way_parts,
 )
 from cheatmaker.core.values import Compare, Scale, ValueType, part_value
-from cheatmaker.errors import ConnectionLost, ReadFailed, ScanNotSupported, WriteFailed
+from cheatmaker.errors import (
+    ConnectionLost,
+    DebuggerError,
+    DebuggerLost,
+    FirewallBlocked,
+    PortInUse,
+    ReadFailed,
+    ScanNotSupported,
+    WriteFailed,
+)
 
 PROT_R, PROT_W, PROT_X = 1, 2, 4
 
@@ -52,6 +64,136 @@ class FakeProcess:
     title: str = ""
     version: str = "01.000"
     regions: list[_Region] = field(default_factory=list)
+
+
+class FakeClock:
+    """Time that only moves when told: the FakeDebugger moves it while it "waits"."""
+
+    def __init__(self, now: float = 0.0) -> None:
+        self.now = now
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += max(0.0, seconds)
+
+
+@dataclass
+class FakeStop:
+    """A scripted stop: watch ``slot`` fired with ``hit`` (``dr6`` defaults to that
+    slot's bit; give another to test DR6 decoding)."""
+
+    slot: int
+    hit: WatchHit
+    dr6: int | None = None
+    signal: int = 0
+    lwpid: int = 100
+    thread: str = "main"
+
+
+class FakeDebugger:
+    """A stand-in ``DebugSession`` (architecture-pro "FakeConsole extensions").
+
+    Scripted stops come in ``stops`` order; a stop is only delivered while its slot is
+    set. Every call is recorded in ``calls``. Failure modes: ``port_in_use``,
+    ``back_channel=False`` (the firewall, AC-1.3), ``already_debugged_once``,
+    ``game_exits_after=n`` stops (AC-1.2), ``lost_after=n`` stops (keep-alive misses).
+    Waiting moves ``clock`` instead of sleeping: ``gap`` per stop, ``timeout`` when
+    none is left."""
+
+    def __init__(self, console: FakeConsole) -> None:
+        self.console = console
+        self.pid: int | None = None
+        self.state: DebugState = "detached"
+        self.stops: list[FakeStop] = []
+        self.calls: list[tuple] = []
+        self.slots: dict[int, tuple[int, int, str]] = {}
+        self.clock = FakeClock()
+        self.gap = 0.05
+        self.port_in_use = False
+        self.back_channel = True
+        self.already_debugged_once = False
+        self.game_exits_after: int | None = None
+        self.lost_after: int | None = None
+        self.served = 0
+        self.sessions = 0  # attaches that worked
+
+    def flood(self, n: int, slot: int, hit: WatchHit) -> None:
+        """Script ``n`` stops of the same instruction (the hit limit)."""
+        self.stops.extend(FakeStop(slot, hit) for _ in range(n))
+
+    def open(self, pid: int) -> FakeDebugger:
+        self.pid = pid
+        return self
+
+    def attach(self) -> None:
+        if self.state != "detached":
+            raise DebuggerError("The debugger is already attached.")
+        self.console._alive()
+        if self.port_in_use:
+            raise PortInUse("Port 755 is in use by another program.")
+        if self.already_debugged_once:
+            self.already_debugged_once = False
+            self.calls += [("attach", self.pid), ("already_debugged",), ("detach",)]
+        self.calls.append(("attach", self.pid))
+        if not self.back_channel:
+            self.calls.append(("detach",))
+            raise FirewallBlocked("The PS5 didn't connect back on TCP port 755.")
+        self.state = "running"
+        self.sessions += 1
+
+    def _live(self) -> None:
+        if self.state == "detached":
+            raise DebuggerError("The debugger isn't attached.")
+        if self.state == "lost":
+            raise DebuggerLost("The debugger's connection stopped answering.")
+
+    def set_watch(self, slot: int, addr: int, size: int, kind: str) -> None:
+        from cheatmaker.console.debugger import watch_body  # validates like the real one
+
+        watch_body(slot, addr, size, kind)  # type: ignore[arg-type]
+        self._live()
+        self.calls.append(("set", slot, addr, size, kind))
+        self.slots[slot] = (addr, size, kind)
+
+    def clear_watch(self, slot: int) -> None:
+        self._live()
+        self.calls.append(("clear", slot))
+        self.slots.pop(slot, None)
+
+    def next_stop(self, timeout: float) -> StopEvent | None:
+        self._live()
+        if self.game_exits_after is not None and self.served >= self.game_exits_after:
+            self.state = "lost"
+            raise DebuggerLost("The game closed while the debugger was attached.")
+        if self.lost_after is not None and self.served >= self.lost_after:
+            self.state = "lost"
+            raise DebuggerLost("The debugger's connection stopped answering.")
+        k = next((k for k, st in enumerate(self.stops) if st.slot in self.slots), None)
+        if k is None:
+            self.clock.advance(timeout)
+            return None
+        st = self.stops.pop(k)
+        self.served += 1
+        self.clock.advance(min(self.gap, timeout))
+        self.state = "stopped"
+        dr6 = 1 << st.slot if st.dr6 is None else st.dr6
+        return StopEvent(st.lwpid, st.thread, st.hit, dr6=dr6, signal=st.signal)
+
+    def resume(self) -> None:
+        self._live()
+        self.calls.append(("resume",))
+        self.state = "running"
+
+    def detach(self) -> None:
+        if self.state == "detached":
+            return
+        if self.state != "lost":
+            self.calls += [("clear", k) for k in range(DEBUG_SLOTS)]
+        self.calls.append(("detach",))
+        self.slots.clear()
+        self.state = "detached"
 
 
 class FakeConsole:
@@ -79,6 +221,7 @@ class FakeConsole:
         # Called before every read: lets a test "run the game" between requests
         # (e.g. tests/fakegame.py runs installed capture routines).
         self.game_ticks: list[Callable[[], None]] = []
+        self.debugger = FakeDebugger(self)  # what open_debugger hands out
         self.pointer_passes: list[tuple[int, int]] = []
         self.writes: list[tuple[int, int, bytes]] = []
         self._lock = threading.RLock()
@@ -377,6 +520,11 @@ class FakeConsole:
         if until is not None:
             self.until_answers.append(bool(until(list(hits), 0.0)))
         return hits
+
+    def open_debugger(self, pid: int) -> FakeDebugger:
+        self._alive()
+        self._proc(pid)
+        return self.debugger.open(pid)
 
     def watch_writes(
         self,

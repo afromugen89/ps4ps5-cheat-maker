@@ -26,7 +26,8 @@ Copied code: src/cheatmaker/formats/_aes.py is adapted from ReaperPy's aes_cbc.p
 (pure-Python AES-CBC); its MIT notice is kept at the top of that file.
 Used as reference: the .mc4 file handling (public key and IV, layout, cheat name
 sanitising, content sniffing) in src/cheatmaker/formats/mc4.py, and the PS5Debug-NG
-debugger command table.
+debugger command table and session behaviour (port 755 bound before attach, the
+"already debugged" retry, keep-alive) in src/cheatmaker/console/debugger.py.
 
 ------------------------------------------------------------------------------------
 PS5Debug-studio                              https://github.com/alfizari/PS5Debug-studio

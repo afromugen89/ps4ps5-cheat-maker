@@ -1856,6 +1856,15 @@ class Ps5DebugNgClient:
         self._scan_pid = None
         self._scan_ranges_list = []
 
+    # -- the Pro debugger ----------------------------------------------------------
+    def open_debugger(self, pid: int):
+        """A detached ``DebugSession`` on game ``pid``: its own connection to this PS5
+        and the back-channel port this client uses (``interrupt_port``), opened only
+        when it attaches (AC-1.1)."""
+        from cheatmaker.console.debugger import DebugSession  # it builds on this module
+
+        return DebugSession(self.host, self.port, pid, listen_port=self.interrupt_port)
+
     # -- watchpoints ("Lock it", "Find it next time") -------------------------
     def watch_writes(
         self,

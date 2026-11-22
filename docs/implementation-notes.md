@@ -997,3 +997,37 @@ Built from docs/architecture-pro.md (spec docs/spec-pro.md), implementation step
   - BUG-14: a tick or untick in My cheats emits `cheats_changed`, so Pro's tab follows.
   - BUG-15: the cave editor shows new built bytes for the same entry. With a draft, it
     assembles the draft again instead.
+
+## Cheat Maker Pro, R1 step 16: DebugSession (2026-11-22)
+
+- `console/debugger.py`: `DebugSession` has its own connection on 744. It is opened
+  only by `attach()`; `Ps5DebugNgClient.open_debugger(pid)` returns one that is still
+  detached.
+  - The 755 listener is bound before `DEBUG_ATTACH`. A failed bind gives `PortInUse`
+    naming the port.
+  - If the PS5 doesn't dial back within `BACK_CHANNEL_WAIT` (5 s), the session
+    detaches and raises `FirewallBlocked` naming the port (AC-1.3).
+  - On `ALREADY_DEBUG` it detaches, waits 2 s and retries once.
+  - Keep-alive is `VERSION` every 2 s, only while running and idle (never while a
+    thread is stopped or a command holds the socket). Two misses make the session
+    lost.
+  - Stop packets give a `StopEvent`: lwpid, thread name, registers, savefpu, DR6 and
+    signal. DR6 bits 0-3 give the slot. Signal 9 or the back channel closing raises
+    `DebuggerLost`.
+  - `detach()` clears all four slots, sends `DEBUG_DETACH` and closes the sockets. It
+    is idempotent and runs on every end path (`with DebugSession(...)`).
+- Debugger failures are `DebuggerError` subclasses (`errors.py`), never
+  `ConnectionLost`, so a dropped debugger socket never disconnects the main session.
+- `client.py`: `StopEvent`, the `Debugger` protocol, `DEBUG_SLOTS` and
+  `open_debugger(client, pid)`. `open_debugger` is not part of `ConsoleClient`, so
+  simple test doubles stay valid.
+- `FakeDebugger` (`FakeConsole.debugger`, handed out by `open_debugger`):
+  - scripted `FakeStop`s, delivered only while their slot is set;
+  - records every call;
+  - failure modes `port_in_use`, `back_channel=False`, `already_debugged_once`,
+    `game_exits_after` and `lost_after`;
+  - a `FakeClock` that moves instead of sleeping.
+- Tests: `tests/unit/test_debugger.py` runs against a local server that speaks the
+  debugger commands and dials back.
+- Unverified on the console: the dial-back at attach, the keep-alive on the debugger
+  socket, four slots and DR6 (C-P3a..e in docs/console-tests.md, spikes S-P1/S-P2).

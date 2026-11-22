@@ -328,3 +328,20 @@ proven ValueBetween range.
 | C-P2b | Greater / less than as a first scan | Exact **greater than** (your gold − 1), 4-byte whole number. | Your gold is listed; every listed value is greater. Log shows a ValueBetween scan (no BiggerThan). | The count and `action=scan_stats` lines. |
 | C-P2c | Greater / less than on the console | **Unknown first value** (4-byte whole number). Spend gold, then **less than** (old gold), then gain some, **greater than** (the amount before gaining). | The count drops each time and your gold stays listed. Log shows `cmp=between` (no BiggerThan / SmallerThan). | The `action=resident_next` lines. |
 | C-P2d | Paging and three values | After C-P2c, page to the second 1,000 rows (needs > 1,000 matches: stop after the first compare), and look at Previous / First. | Page 2 shows other addresses than page 1 (not the same rows again). Previous holds the value before the last compare; First (if shown) the value at the unknown scan. | Whether page 2 repeated page 1, and one row's Value / Previous / First. |
+
+### C-P3 Pro debugger session (runnable once the Watch tab ships, step 17)
+
+The Pro debugger (`console/debugger.py`) has its own connection and owns port 755. Its
+behaviour follows ReaperPy and our reading of PROTOCOL.md and is **UNVERIFIED** on
+PS5Debug-NG: that the PS5 dials back as soon as it attaches, the "already debugged"
+answer, `VERSION` as a keep-alive on the debugger connection, the four watch slots, and DR6
+in the stop packet. These are spikes S-P1/S-P2. Until they pass, the Watch tab marks
+registers "unverified" (AC-3.3).
+
+| # | Test | Steps | Pass when | Send back |
+|---|---|---|---|---|
+| C-P3a | Attach and the back channel | Pro > Watch. Type your health's address, **Writes**, **Start**. Take a hit, then **Stop**. | The status line says the watch runs within 2 s of Start. The log shows `action=pro_debug_attach` and `action=pro_debug_back_channel`. After Stop the game runs on. | Both log lines and their `took_ms`. |
+| C-P3b | Firewall message | Block TCP port 755 in Windows Firewall (inbound rule), then repeat C-P3a. Remove the rule afterwards. | Within 10 s: "The PS5 didn't connect back on TCP port 755..."; the game runs on; a second Start after removing the rule works. | The message and the `action=pro_debug_attach result=no_back_channel` line. |
+| C-P3c | Already debugged | Start a watch, then end Cheat Maker from Task Manager while it runs. Start Cheat Maker, connect, and start the watch again. | The watch starts (the log shows `result=already_debugged retry=1`), or the message names what the PS5 answered. | The `action=pro_debug_attach` lines. |
+| C-P3d | Four slots and DR6 | Pro > Watch: add health (**Writes**) and ammo (**Accesses**) to the watch list (slots 0 and 1), **Start**. Take a hit, then fire. | Each row's Watch column names its own address; the log's `action=pro_watch_hit` lines show `slot=0` for the health writer and `slot=1` for the ammo instructions. | The `action=pro_watch_hit` lines. |
+| C-P3e | Keep-alive and detach | Start a watch on a value nothing changes and leave it for the full 60 s. Then start one and pull the PC's network cable for 10 s. | The first ends by time with no "stopped answering" message and the game runs on. The second ends within 10 s with "The debugger's connection stopped answering"; the main window stays connected once the cable is back (or says it lost the PS5, as C6). | The `action=pro_debug_keepalive` and `action=pro_debug_lost` lines. |

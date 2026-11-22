@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from typing import Literal, Protocol, runtime_checkable
 
 from cheatmaker.core.values import Compare, Scale, ValueType
+from cheatmaker.errors import DebuggerError
 
 ProgressFn = Callable[[float], None]
 """Called with 0.0..1.0 while a long operation runs."""
@@ -104,6 +105,55 @@ class WatchHit:
 
     def reg(self, name: str) -> int | None:
         return self.regs.get(name.lower())
+
+
+DebugState = Literal["detached", "running", "stopped", "lost"]
+DEBUG_SLOTS = 4
+"""x86 has four hardware watch slots (DR0-DR3)."""
+
+
+@dataclass(frozen=True)
+class StopEvent:
+    """One stop the Pro debugger reported: which thread, its registers (``hit``), the
+    raw FPU state (XMM, R3) and DR6, whose bits 0-3 say which watch slot fired."""
+
+    lwpid: int
+    thread: str
+    hit: WatchHit
+    fpu: bytes = field(default=b"", repr=False)
+    dr6: int = 0
+    signal: int = 0
+
+    @property
+    def slot(self) -> int | None:
+        """The lowest watch slot DR6 names, or None when it names none."""
+        for k in range(DEBUG_SLOTS):
+            if self.dr6 >> k & 1:
+                return k
+        return None
+
+
+class Debugger(Protocol):
+    """A debugger session on one game (architecture-pro ``DebugSession``): attach,
+    up to ``DEBUG_SLOTS`` watches, stops, resume, detach. ``detach`` clears every slot
+    first and is safe to call more than once."""
+
+    state: DebugState
+
+    def attach(self) -> None: ...
+
+    def set_watch(self, slot: int, addr: int, size: int, kind: WatchKind) -> None: ...
+
+    def clear_watch(self, slot: int) -> None: ...
+
+    def next_stop(self, timeout: float) -> StopEvent | None:
+        """The next stop, or None when none came within ``timeout`` seconds. Raises
+        DebuggerLost when the session dropped or the game closed."""
+        ...
+
+    def resume(self) -> None: ...
+
+    def detach(self) -> None: ...
 
 
 WatchUntil = Callable[[list[WatchHit], float], bool]
@@ -249,6 +299,15 @@ class ConsoleClient(Protocol):
         ...
 
     def close(self) -> None: ...
+
+
+def open_debugger(client: object, pid: int) -> Debugger:
+    """``client.open_debugger(pid)``: a new, detached debugger session on game ``pid``
+    with its own connection (nothing is opened until ``attach``)."""
+    opener = getattr(client, "open_debugger", None)
+    if opener is None:
+        raise DebuggerError("This connection has no debugger.")
+    return opener(pid)
 
 
 def batch_of(client: object) -> AbstractContextManager[None]:
