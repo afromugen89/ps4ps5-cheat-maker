@@ -986,3 +986,14 @@ Built from docs/architecture-pro.md (spec docs/spec-pro.md), implementation step
   - O1: unticking a Pro cave cheat in My cheats restores the jumps at once. A timer
     zeroes the caves `DISABLE_WAIT` later (`compile.restore_sites` /
     `clear_caves`), unless the cheat went on again or the game changed.
+- QA re-test (BUG-13..15):
+  - BUG-13: My cheats keeps one pending cave clear per cheat in `ctl.cave_clears`
+    (a token). Any tick or untick, and any Pro On/Off, replaces or drops it. The
+    timer waits for the rest if it fires before `DISABLE_WAIT` has passed since the
+    last restore, and it skips while `ctl.pro_busy` holds the cheat.
+    `compile.clear_caves` (used by `disable` too) reads the other sites first and
+    zeroes nothing unless they all hold their off-bytes. It returns False when it
+    skips.
+  - BUG-14: a tick or untick in My cheats emits `cheats_changed`, so Pro's tab follows.
+  - BUG-15: the cave editor shows new built bytes for the same entry. With a draft, it
+    assembles the draft again instead.

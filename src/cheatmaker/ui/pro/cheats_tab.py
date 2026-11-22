@@ -584,6 +584,9 @@ class CheatsTab(ProTab):
         pc, session = c.pro, self.ctl.session
         if pc is None or on == c.enabled:
             return
+        # a cave clear My cheats left pending is for an earlier untick (QA BUG-13); this
+        # path clears on its own worker, and ``clear_caves`` checks the jumps are back
+        self.ctl.cave_clears.pop(id(c), None)
         if on:
             if c.freeze:  # checked before any write: Pro never freezes (QA BUG-02)
                 self.msgs.say(hints.FREEZE_NOT_IN_PRO)

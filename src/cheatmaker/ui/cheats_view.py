@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import math
+import time
 from collections.abc import Callable
 
 from PySide6.QtCore import Qt, QTimer
@@ -329,6 +331,8 @@ class CheatsView(QWidget):
                 elif not want and c.enabled:
                     self._turn_off(c)
                     self.finder.after_off(c)
+                self.ctl.cheats_changed.emit()  # e.g. Pro's tab shows it on (QA BUG-14)
+                return
             elif item.column() == COL_NAME:
                 name = item.text().strip()
                 if not name:
@@ -361,6 +365,7 @@ class CheatsView(QWidget):
             return
         if c.freeze:  # checked before any write: Pro never freezes (QA BUG-02)
             raise ValueError(FREEZE_REFUSED)
+        self.ctl.cave_clears.pop(id(c), None)  # its cave is needed again (QA BUG-13)
         session = self.ctl.session
         enabled = [x for x in self.cheats if x.enabled and x is not c]
         already = pro_compile.enable(session, c.pro, self._pro_writer, enabled)
@@ -375,24 +380,46 @@ class CheatsView(QWidget):
 
     def _turn_off(self, c: Cheat) -> None:
         """A Pro cheat's jumps go back at once; its caves are zeroed DISABLE_WAIT later
-        by a timer, so the window never stops for the wait (AC-8.5)."""
+        by a timer, so the window never stops for the wait (AC-8.5). One clear is
+        pending per cheat: a later untick replaces it, a tick drops it (QA BUG-13)."""
         if c.pro is None:
             self.ctl.live.turn_off(c)
             return
         session = self.ctl.session
+        self.ctl.cave_clears.pop(id(c), None)
         caves = pro_compile.restore_sites(session, c.pro, self._pro_writer)
         self.ctl.live.turn_off(c, restore=False)  # already written back
         if caves:
-            game = session.game
-            QTimer.singleShot(
-                int(pro_compile.DISABLE_WAIT * 1000), lambda: self._clear_caves(c, game)
-            )
+            token = object()
+            self.ctl.cave_clears[id(c)] = token
+            self._clear_later(c, session.game, token, time.monotonic())
 
-    def _clear_caves(self, c: Cheat, game) -> None:
-        """The second half of turning a Pro cheat off, unless it went on again (its
-        jump leads into the cave again) or the game changed meanwhile."""
+    def _clear_later(self, c: Cheat, game, token: object, restored: float) -> None:
+        """Run ``_clear_caves`` once DISABLE_WAIT has passed since ``restored`` (a timer
+        may fire a little early: then it waits for the rest)."""
+        left = pro_compile.DISABLE_WAIT - (time.monotonic() - restored)
+        QTimer.singleShot(
+            max(1, math.ceil(left * 1000)), lambda: self._clear_caves(c, game, token, restored)
+        )
+
+    def _clear_caves(self, c: Cheat, game, token: object, restored: float) -> None:
+        """The second half of turning a Pro cheat off, unless it was turned on or off
+        again (another token), a Pro task is changing it, or the game changed meanwhile.
+        ``clear_caves`` itself still checks that no jump leads into a cave."""
+        if self.ctl.cave_clears.get(id(c)) is not token:
+            return
+        if time.monotonic() - restored < pro_compile.DISABLE_WAIT:
+            self._clear_later(c, game, token, restored)
+            return
+        del self.ctl.cave_clears[id(c)]
         session = self.ctl.session
-        if c.enabled or c.pro is None or not session.connected or session.game != game:
+        if (
+            c.enabled
+            or c.pro is None
+            or id(c) in self.ctl.pro_busy
+            or not session.connected
+            or session.game != game
+        ):
             return
         try:
             pro_compile.clear_caves(session, c.pro, self._pro_writer)

@@ -551,3 +551,29 @@ def test_enable_reports_already_on_and_is_on_probe(s):
     with _pytest.raises(c.SiteChanged):
         c.enable(session, two, writer)
     assert client.read(PID, MODULE_BASE + 0x10, 1) == other
+
+
+def test_clear_caves_leaves_the_cave_when_a_jump_leads_there_again(s, fake):
+    """QA BUG-13: the jump went back in before the caves were zeroed -> nothing written."""
+    pc = _cheat(s)
+    entry = pc.entries[0]
+    writer = pc_.ProWriter(s)
+    pc_.enable(s, pc, writer)
+    assert pc_.restore_sites(s, pc, writer)
+    fake.poke(PID, BASE + HOOK, entry.on)  # turned on again by another path
+    fake.writes.clear()
+    assert pc_.clear_caves(s, pc, writer) is False
+    assert fake.writes == []
+    assert fake.peek(PID, BASE + entry.cave, len(entry.cave_bytes)) == entry.cave_bytes
+    fake.poke(PID, BASE + HOOK, HOOK_CODE)
+    assert pc_.clear_caves(s, pc, writer) is True
+    assert fake.peek(PID, BASE + entry.cave, len(entry.cave_bytes)) == bytes(len(entry.cave_bytes))
+
+
+def test_disable_keeps_the_cave_when_the_jump_is_back_after_the_wait(s, fake):
+    pc = _cheat(s)
+    entry = pc.entries[0]
+    pc_.enable(s, pc, pc_.ProWriter(s))
+    on_again = lambda _t: fake.poke(PID, BASE + HOOK, entry.on)  # noqa: E731
+    assert pc_.disable(s, pc, pc_.ProWriter(s), sleep=on_again) is False
+    assert fake.peek(PID, BASE + entry.cave, len(entry.cave_bytes)) == entry.cave_bytes

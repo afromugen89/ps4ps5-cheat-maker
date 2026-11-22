@@ -55,6 +55,9 @@ class Controller(QObject):
         self.build_notice_shown = False  # Make it work's "Save your game first", once per run
         self.trace_notice_shown = False  # Find the real one's "Save your game first", once
         self.pro_busy: set[int] = set()  # id() of cheats a Pro task is changing now
+        # id() of a Pro cheat -> the token of its one pending cave clear (My cheats'
+        # timer); turning it on or off again replaces or drops it (QA BUG-13)
+        self.cave_clears: dict[int, object] = {}
         self.project: Project | None = None  # v3 "find it again" notes for this game
         self.before_disconnect: list[Callable[[], None]] = []  # e.g. take hooks out
         # The game's code is being read (fingerprints): one read at a time (UI thread only).

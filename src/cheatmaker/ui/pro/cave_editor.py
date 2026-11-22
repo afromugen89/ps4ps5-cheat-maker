@@ -93,6 +93,7 @@ class CaveEditor(QWidget):
         self.room: int | None = None
         self.size: int | None = None
         self._gen = 0
+        self._shown = b""  # the built bytes the bytes view was last filled from
         self._read_only = True
         self._busy = False  # a build of this cheat runs: nothing is typed meanwhile
 
@@ -142,6 +143,8 @@ class CaveEditor(QWidget):
             self._read_only = read_only
             self._lock()
             self._set_title()
+            if cave.cave_bytes != self._shown:  # built again, or a variable patched in
+                self._bytes_changed(cave)
             return
         self.pc, self.entry = pc, cave
         self._read_only = read_only
@@ -152,7 +155,8 @@ class CaveEditor(QWidget):
         self.source.blockSignals(True)
         self.source.setPlainText(self.draft_of(cave) if cave else "")
         self.source.blockSignals(False)
-        self.bytes_view.setPlainText(hex_lines(cave.cave_bytes) if cave else "")
+        self._shown = cave.cave_bytes if cave else b""
+        self.bytes_view.setPlainText(hex_lines(self._shown))
         self.error.setText("")
         self.budget.setText("")
         self._set_title()
@@ -161,6 +165,18 @@ class CaveEditor(QWidget):
             self.error.setText(hints.ASSEMBLER_MISSING)
         if cave is not None:
             self.refresh_budget()
+
+    def _bytes_changed(self, cave: ProEntry) -> None:
+        """The same entry's built bytes changed (QA BUG-15): show them, unless a draft is
+        being edited; its bytes are assembled again (variables live in the cave)."""
+        self._shown = cave.cave_bytes
+        if self.has_draft(cave):
+            self._gen += 1
+            self.timer.start()
+            return
+        self.bytes_view.setPlainText(hex_lines(cave.cave_bytes))
+        self.size = len(cave.cave_bytes)
+        self._show_budget()
 
     def _set_title(self) -> None:
         cave = self.entry

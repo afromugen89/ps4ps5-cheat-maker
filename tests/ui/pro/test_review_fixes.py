@@ -262,3 +262,54 @@ def test_freeze_cheat_preview_says_why(win, tab):
     tab.select_cheat(c)
     assert not tab.adopt_btn.isEnabled()
     assert tab.editor.error.text() == FREEZE_REFUSED
+
+
+# -- QA re-test: BUG-13..15 ----------------------------------------------------------------
+def _untick(win, cheat) -> None:
+    row = win.ctl.cheat_file.cheats.index(cheat)
+    win.cheats.table.item(row, 0).setCheckState(Qt.CheckState.Unchecked)
+
+
+def test_pending_cave_clear_skipped_while_pro_changes_the_cheat(win, tab, game, qtbot):
+    """QA BUG-13: the timer fires while a Pro task holds the cheat -> no clear."""
+    cheat = new_cheat(tab)
+    entry = cheat.pro.entries[0]
+    tab.on_box.click()
+    _untick(win, cheat)
+    assert id(cheat) in win.ctl.cave_clears
+    win.ctl.pro_busy.add(id(cheat))
+    qtbot.waitUntil(lambda: id(cheat) not in win.ctl.cave_clears, timeout=2000)
+    win.ctl.pro_busy.clear()
+    cave = game.fake.peek(fg.PID, fg.BASE + entry.cave, len(entry.cave_bytes))
+    assert cave == entry.cave_bytes
+
+
+def test_pro_tab_on_drops_the_pending_cave_clear(win, tab, game, qtbot):
+    """QA BUG-13: turning it on in Pro cancels My cheats' clear."""
+    cheat = new_cheat(tab)
+    entry = cheat.pro.entries[0]
+    tab.on_box.click()
+    _untick(win, cheat)
+    tab.select_cheat(cheat)
+    tab.set_on(cheat, True)
+    assert cheat.enabled and id(cheat) not in win.ctl.cave_clears
+    qtbot.wait(700)
+    cave = game.fake.peek(fg.PID, fg.BASE + entry.cave, len(entry.cave_bytes))
+    assert cave == entry.cave_bytes
+
+
+def test_bytes_view_keeps_a_draft_and_shows_new_built_bytes(win, tab):
+    """QA BUG-15: same entry, new built bytes -> shown; with a draft, assembled again."""
+    from cheatmaker.ui.pro.cave_editor import hex_lines
+
+    cheat = new_cheat(tab)
+    entry = cheat.pro.entries[0]
+    ed = tab.editor
+    entry.cave_bytes = entry.cave_bytes[:-1] + b"\x07"
+    win.ctl.cheats_changed.emit()
+    assert ed.bytes_view.toPlainText() == hex_lines(entry.cave_bytes)
+    ed.source.setPlainText("nop\n")  # a draft
+    gen = ed._gen
+    entry.cave_bytes = entry.cave_bytes[:-1] + b"\x08"
+    win.ctl.cheats_changed.emit()
+    assert ed.source.toPlainText() == "nop\n" and ed._gen > gen

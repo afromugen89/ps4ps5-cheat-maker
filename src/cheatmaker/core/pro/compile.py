@@ -514,14 +514,16 @@ def disable(
     pc: ProCheat,
     writer: ProWriter,
     sleep: Callable[[float], None] = time.sleep,
-) -> None:
+) -> bool:
     """Turn ``pc`` off (AC-8.5): jumps and other entries back first, then after
     ``DISABLE_WAIT`` the caves are zeroed; every site is read back. (The UI thread
     uses ``restore_sites`` and, ``DISABLE_WAIT`` later, ``clear_caves`` instead, so the
-    window doesn't stop for the wait.)"""
+    window doesn't stop for the wait.) False when the caves were left alone because a
+    jump leads there again (see ``clear_caves``)."""
     if restore_sites(session, pc, writer):
         sleep(DISABLE_WAIT)
-        clear_caves(session, pc, writer)
+        return clear_caves(session, pc, writer)
+    return True
 
 
 def restore_sites(session: Session, pc: ProCheat, writer: ProWriter) -> bool:
@@ -535,12 +537,29 @@ def restore_sites(session: Session, pc: ProCheat, writer: ProWriter) -> bool:
     return any(w.what == "cave" for w in writes)
 
 
-def clear_caves(session: Session, pc: ProCheat, writer: ProWriter) -> None:
-    """The second half of ``disable``: zero the caves (no jump leads there any more)."""
+def clear_caves(session: Session, pc: ProCheat, writer: ProWriter) -> bool:
+    """The second half of ``disable``: zero the caves. Right before, every other site
+    is read: unless all of them still hold their off-bytes (no jump leads into a cave),
+    nothing is written and False is returned (QA BUG-13: it went on again meanwhile,
+    or the sites can't be read). A cave left in place is harmless; a zeroed cave that
+    a jump leads into crashes the game."""
     game = session.require_game()
-    for w in (w for w in _writes(pc, game.module_base) if w.what == "cave"):
+    client = session.require_client()
+    writes = _writes(pc, game.module_base)
+    try:
+        back = all(
+            client.read(game.pid, w.addr, len(w.off)) == w.off for w in writes if w.what != "cave"
+        )
+    except (LockFailed, ReadFailed) as exc:
+        log.info("action=pro_disable id=%s caves=kept reason=%s", pc.id, exc)
+        return False
+    if not back:
+        log.info("action=pro_disable id=%s caves=kept reason=site_on", pc.id)
+        return False
+    for w in (w for w in writes if w.what == "cave"):
         writer.write_checked(w.addr, w.off, f"{pc.id}:cave")
     log.info("action=pro_disable id=%s caves=cleared", pc.id)
+    return True
 
 
 # -- live variable edit (AC-8.7) -----------------------------------------------------------

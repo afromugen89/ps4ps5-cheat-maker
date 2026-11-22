@@ -693,11 +693,6 @@ def test_rt_adopt_refuses_a_freeze_cheat_and_says_why(win, pro, game):  # TC-40
     assert tab.editor.error.text() == FREEZE_REFUSED
 
 
-@pytest.mark.xfail(
-    reason="BUG-13: a pending cave clear from an earlier untick zeroes the cave too early "
-    "(untick, tick, untick within 0.5 s)",
-    strict=True,
-)
 def test_bug13_cave_cleared_at_least_the_wait_after_the_last_untick(
     win, tab, qtbot, monkeypatch
 ):  # TC-41
@@ -727,11 +722,6 @@ def test_bug13_cave_cleared_at_least_the_wait_after_the_last_untick(
     assert all(t - restores[-1] >= pc_compile.DISABLE_WAIT - 0.02 for t in clears)
 
 
-@pytest.mark.xfail(
-    reason="BUG-13: a pending cave clear from My cheats zeroes the cave while Pro turns "
-    "the cheat on again",
-    strict=True,
-)
 def test_bug13_pro_on_during_the_cave_clear_gap_keeps_the_cave(
     win, tab, game, qtbot, monkeypatch
 ):  # TC-42 (real threads)
@@ -760,11 +750,6 @@ def test_bug13_pro_on_during_the_cave_clear_gap_keeps_the_cave(
     assert cave == entry.cave_bytes, "the jump leads into a zeroed cave"
 
 
-@pytest.mark.xfail(
-    reason="BUG-14: the Pro Cheats tab doesn't follow a tick in My cheats (On box, list "
-    "dot, read-only editor)",
-    strict=True,
-)
 def test_bug14_pro_tab_follows_a_my_cheats_tick(win, tab):  # TC-43
     cheat = new_cheat(tab)
     _tick(win, cheat, True)
@@ -774,11 +759,6 @@ def test_bug14_pro_tab_follows_a_my_cheats_tick(win, tab):  # TC-43
     assert tab.editor.source.isReadOnly() and not tab.editor.build_btn.isEnabled()
 
 
-@pytest.mark.xfail(
-    reason="BUG-15: the cave editor's bytes stay old after a variable value is patched in "
-    "(the same entry is no longer reloaded)",
-    strict=True,
-)
 def test_bug15_bytes_view_shows_a_patched_variable(win, tab):  # TC-44
     from cheatmaker.ui.pro.cave_editor import hex_lines
 
