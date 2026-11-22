@@ -524,3 +524,30 @@ def test_values_use_the_built_layout_not_the_current_list(s):
     assert pc.variable("mult").value == 2.0 and entry.cave_bytes == built
     assert pc_.build(s, pc, entry, FakeAssembler()).ok
     assert pc_.layout_current(pc) and pc_.set_variable(pc, "mult", 5.0) == pc_.SAVED
+
+
+def test_enable_reports_already_on_and_is_on_probe(s):
+    """QA BUG-03: all sites on -> nothing written, True; some on -> SiteChanged."""
+    import pytest as _pytest
+
+    from cheatmaker.core.pro import compile as c
+    from cheatmaker.core.pro.model import ProCheat, ProEntry
+
+    session = s
+    client = session.require_client()
+    game = session.require_game()
+    PID, MODULE_BASE = game.pid, game.module_base
+    off = client.read(PID, MODULE_BASE + 0x100, 2)
+    entry = ProEntry("bytes", 0x100, off, b"\x90\x90")
+    pc = ProCheat("p1", "Nop", [entry])
+    writer = c.ProWriter(session)
+    assert not c.is_on(session, pc)
+    assert c.enable(session, pc, writer) is False
+    assert c.is_on(session, pc)
+    writes = len(client.writes)
+    assert c.enable(session, pc, writer) is True and len(client.writes) == writes
+    other = client.read(PID, MODULE_BASE + 0x10, 1)
+    two = ProCheat("p2", "Two", [entry, ProEntry("bytes", 0x10, other, b"\x91")])
+    with _pytest.raises(c.SiteChanged):
+        c.enable(session, two, writer)
+    assert client.read(PID, MODULE_BASE + 0x10, 1) == other

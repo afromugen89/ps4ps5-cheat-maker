@@ -105,10 +105,12 @@ def first_offset(code: bytes, start: int, target: int) -> int:
 
 
 def _mark(ip: int, size: int, sites: Iterable[Site]) -> str:
-    names = []
+    """The cheats writing over [ip, ip+size), each named once."""
+    names: list[str] = []
     for s in sites:
-        if s.start < ip + size and ip < s.end and s.name not in names:
-            names.append(s.name + (" (on)" if s.on else ""))
+        label = s.name + (" (on)" if s.on else "")
+        if s.start < ip + size and ip < s.end and label not in names:
+            names.append(label)
     return ", ".join(names)
 
 

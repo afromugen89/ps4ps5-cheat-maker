@@ -464,14 +464,15 @@ class Scanner:
         game = self.session.require_game()
         regions = self.session.scannable_regions()
         self.reset()
-        self.session.search_owner = self  # a Pro search running now is replaced
         self.scan_log.new_search(game)
         types = tuple(vt for vt, _w in parts)
         ways = tuple(w for _vt, w in parts)
         rng = window(value, unit)
-        count = client.scan_start(
-            game.pid, regions, types, Compare.BETWEEN, rng, progress, cancel, ways=ways
-        )
+        with self.session.search_lock:
+            self.session.search_owner = self  # a Pro search running now is replaced
+            count = client.scan_start(
+                game.pid, regions, types, Compare.BETWEEN, rng, progress, cancel, ways=ways
+            )
         log.info(
             "action=scan_percent value=%s unit=%s parts=%s count=%d",
             value,

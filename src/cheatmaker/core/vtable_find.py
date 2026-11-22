@@ -37,22 +37,18 @@ def find_by_vtable(
     game = session.require_game()
     client = session.require_client()
     value = game.module_base + vtable
-    session.take_search()
-    try:
-        n = client.scan_start(
-            game.pid,
-            session.scannable_regions(),
-            ValueType.INT64,
-            Compare.EXACT,
-            value,
-            progress,
-            cancel,
-        )
-        hits = sorted(
-            h.address for h in client.scan_results(min(n, MAX_RESULTS)) if h.address % 8 == 0
-        )
-    finally:
-        client.scan_cancel()
+    regions = session.scannable_regions()
+    with session.search_lock:  # one search at a time, as the scanners
+        session.take_search(owner=find_by_vtable)
+        try:
+            n = client.scan_start(
+                game.pid, regions, ValueType.INT64, Compare.EXACT, value, progress, cancel
+            )
+            hits = sorted(
+                h.address for h in client.scan_results(min(n, MAX_RESULTS)) if h.address % 8 == 0
+            )
+        finally:
+            client.scan_cancel()
     log.info("action=vtable_scan vtable=%#x matches=%d aligned=%d", value, n, len(hits))
     return hits
 

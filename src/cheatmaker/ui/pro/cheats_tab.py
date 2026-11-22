@@ -104,6 +104,7 @@ class CheatsTab(ProTab):
         self.exec_dialog: Callable[[object], object] = lambda d: d.exec()
         self.busy = False
         self.preview: ProCheat | None = None  # a guided cheat as it would be adopted
+        self.preview_why = ""  # why a guided cheat can't be adopted
         self._filling = False
 
         self.cheat_list = QListWidget()
@@ -239,11 +240,13 @@ class CheatsTab(ProTab):
             return
         c = self.selected()
         self.preview = None
+        self.preview_why = ""
         if c is not None and c.pro is None and self.assembler is not None:
             try:
                 self.preview = adopt(c, "preview", self.assembler)
             except Exception as exc:  # shown read-only: say why it can't be adopted
                 log.info("action=pro_preview cheat=%s reason=%s", c.name, exc)
+                self.preview_why = str(exc)
         self._fill_detail()
 
     def _fill_detail(self) -> None:
@@ -298,8 +301,10 @@ class CheatsTab(ProTab):
         c = self.selected()
         read_only = c is None or c.pro is None or c.enabled  # its bytes are in the game
         self.editor.set_entry(self.pc, self.selected_entry(), read_only=read_only)
-        if c is not None and c.pro is None and self.preview is not None:
-            self.editor.error.setText(hints.GUIDED_PREVIEW)
+        if c is not None and c.pro is None:
+            self.editor.error.setText(
+                hints.GUIDED_PREVIEW if self.preview is not None else self.preview_why
+            )
         self._update_buttons()
 
     def _update_buttons(self) -> None:
@@ -328,24 +333,39 @@ class CheatsTab(ProTab):
         self._update_buttons()
 
     # -- running work ---------------------------------------------------------------------------
-    def _run(self, work, done, action: str) -> None:
+    def _run(
+        self, work, done, action: str, cheat: Cheat | None = None, while_off: bool = False
+    ) -> None:
         """``work`` on the worker. It never changes a cheat the UI shows: it works on a
         copy, and ``done`` (UI thread) applies the result. A failure changes nothing and
-        saves nothing."""
-        self.busy = True
-        self._update_buttons()
+        saves nothing. ``cheat``: the cheat it changes; My cheats won't toggle it
+        meanwhile. ``while_off``: the result is for the cheat as it was (off, or on);
+        if it went on or off meanwhile, the result is dropped (QA BUG-01)."""
+        was_on = cheat is not None and cheat.enabled
+        self._busy_with(cheat, True)
 
         def finish(result) -> None:
-            self.busy = False
-            done(result)
+            self._busy_with(cheat, False)
+            if while_off and cheat is not None and cheat.enabled != was_on:
+                self.msgs.say(hints.TURNED_ON_MEANWHILE.format(name=cheat.name))
+                self.fill()
+            else:
+                done(result)
             self._update_buttons()
 
         def failed(exc: BaseException) -> None:
-            self.busy = False
+            self._busy_with(cheat, False)
             self.msgs.fail(exc, action)
             self.fill()
 
         self.tasks.run(work, finish, failed)
+
+    def _busy_with(self, cheat: Cheat | None, busy: bool) -> None:
+        self.busy = busy
+        if cheat is not None:
+            (self.ctl.pro_busy.add if busy else self.ctl.pro_busy.discard)(id(cheat))
+        self.editor.set_busy(busy)
+        self._update_buttons()
 
     def _changed(self, cheat: Cheat | None = None) -> None:
         """A Pro source changed: compile it again, keep it in the notes, show it."""
@@ -405,12 +425,13 @@ class CheatsTab(ProTab):
         pc = c.pro
         k = next(i for i, e in enumerate(pc.entries) if e is entry)
         trial = copy.deepcopy(pc)
-        trial.entries[k].source = entry.source if text is None else text
+        source = entry.source if text is None else text
+        trial.entries[k].source = source
         build = self._builder(pc)
 
         def done(built: ProCheat) -> None:
             _apply(pc, built)
-            self.editor.built(entry)
+            self.editor.built(entry, source)
             self._changed(c)
             self.msgs.say(
                 hints.BUILT.format(
@@ -423,7 +444,7 @@ class CheatsTab(ProTab):
             build(trial, trial.entries[k])
             return trial
 
-        self._run(work, done, "pro_build")
+        self._run(work, done, "pro_build", c, while_off=True)
 
     def do_new(self) -> None:
         """A new cheat: a name and a hook; its cave is built at once with the default
@@ -534,7 +555,7 @@ class CheatsTab(ProTab):
             _apply(pc, built)
             self._changed(c)
 
-        self._run(work, done, "pro_entry")
+        self._run(work, done, "pro_entry", c, while_off=True)
 
     def do_remove_entry(self) -> None:
         c, entry = self.selected(), self.selected_entry()
@@ -564,13 +585,30 @@ class CheatsTab(ProTab):
         if pc is None or on == c.enabled:
             return
         if on:
+            if c.freeze:  # checked before any write: Pro never freezes (QA BUG-02)
+                self.msgs.say(hints.FREEZE_NOT_IN_PRO)
+                return
             enabled = [x for x in self.cheats if x.enabled and x is not c]
+            writer = self.writer
 
-            def work() -> None:
-                pc_compile.enable(session, pc, self.writer, enabled)
+            def work() -> bool:
+                return pc_compile.enable(session, pc, writer, enabled)
 
-            def done(_r) -> None:
-                self.ctl.live.mark_on(c)
+            def done(already: bool) -> None:
+                try:
+                    self.ctl.live.mark_on(c)
+                except Exception as exc:  # never leave it in the game while shown off
+                    if not already:
+                        self._run(
+                            lambda: pc_compile.disable(session, pc, writer, self.sleep),
+                            lambda _r: None,
+                            "pro_toggle",
+                            c,
+                        )
+                    self.msgs.fail(exc, "pro_toggle")
+                    return
+                if already:
+                    self.msgs.say(hints.ALREADY_ON.format(name=c.name))
                 self.ctl.cheats_changed.emit()
 
         else:
@@ -582,7 +620,7 @@ class CheatsTab(ProTab):
                 self.ctl.live.turn_off(c, restore=False)  # already written back
                 self.ctl.cheats_changed.emit()
 
-        self._run(work, done, "pro_toggle")
+        self._run(work, done, "pro_toggle", c)
 
     # -- variables (R1: constants in the cave) ------------------------------------------------
     def do_add_variable(self) -> None:
@@ -679,7 +717,7 @@ class CheatsTab(ProTab):
             self.msgs.say(text.format(name=var.name, value=var.vtype.text(value)))
             self._changed(c)
 
-        self._run(work, done, "pro_variable")
+        self._run(work, done, "pro_variable", c, while_off=True)
 
     # -- import / export ----------------------------------------------------------------------
     def do_import(self) -> None:

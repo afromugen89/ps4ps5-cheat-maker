@@ -32,7 +32,7 @@ from cheatmaker.core.pro.asm import AsmResult, Assembler, CaveContext
 from cheatmaker.core.pro.model import JMP_REL32_SIZE, ProCheat, ProEntry, Variable
 from cheatmaker.core.session import Session
 from cheatmaker.core.values import ValueType
-from cheatmaker.errors import CheatMakerError, LockFailed, WriteFailed
+from cheatmaker.errors import CheatMakerError, LockFailed, ReadFailed, WriteFailed
 
 log = logging.getLogger(__name__)
 
@@ -446,11 +446,16 @@ def _writes(pc: ProCheat, base: int) -> list[_Write]:
 
 def enable(
     session: Session, pc: ProCheat, writer: ProWriter, enabled: Iterable[Cheat] = ()
-) -> None:
+) -> bool:
     """Turn ``pc`` on (AC-8.4). Every site must hold its off-bytes (a cave: zeros, or
     the same cave a cheat file left there); otherwise SiteChanged and nothing is
     written. Then caves, jumps, other entries, each read back. Overlap (AC-8.8) when
-    an enabled cheat writes any of the same bytes."""
+    an enabled cheat writes any of the same bytes.
+
+    When every site already holds its on-bytes (the cheat is in the game, e.g. after
+    a Refresh or an app restart while the game ran) nothing is written and True is
+    returned ("was already on"); otherwise False. Some sites on and some off is still
+    SiteChanged (QA BUG-03)."""
     game = session.require_game()
     client = session.require_client()
     if any(e.stale for e in pc.entries):
@@ -463,6 +468,9 @@ def enable(
         before.append(found)
         if found != w.off and not (w.what == "cave" and found == w.on):
             changed.append((w.addr, w.off, found))
+    if all(found == w.on for w, found in zip(writes, before, strict=True)):
+        log.info("action=pro_enable id=%s result=already_on", pc.id)
+        return True
     if changed:
         raise SiteChanged(changed)
     done: list[tuple[_Write, bytes]] = []
@@ -474,6 +482,22 @@ def enable(
         _undo(writer, pc, done)
         raise
     log.info("action=pro_enable id=%s entries=%d", pc.id, len(pc.entries))
+    return False
+
+
+def is_on(session: Session, pc: ProCheat) -> bool:
+    """Every site of ``pc`` holds its on-bytes right now (it runs in the game). A
+    stale or unbuilt cheat, or one that can't be read, is not on."""
+    game = session.require_game()
+    client = session.require_client()
+    if any(e.stale for e in pc.entries):
+        return False
+    try:
+        writes = _writes(pc, game.module_base)
+        return all(client.read(game.pid, w.addr, len(w.on)) == w.on for w in writes)
+    except (LockFailed, ReadFailed) as exc:
+        log.info("action=pro_probe id=%s result=unknown reason=%s", pc.id, exc)
+        return False
 
 
 def _undo(writer: ProWriter, pc: ProCheat, done: list[tuple[_Write, bytes]]) -> None:
@@ -492,17 +516,31 @@ def disable(
     sleep: Callable[[float], None] = time.sleep,
 ) -> None:
     """Turn ``pc`` off (AC-8.5): jumps and other entries back first, then after
-    ``DISABLE_WAIT`` the caves are zeroed; every site is read back."""
+    ``DISABLE_WAIT`` the caves are zeroed; every site is read back. (The UI thread
+    uses ``restore_sites`` and, ``DISABLE_WAIT`` later, ``clear_caves`` instead, so the
+    window doesn't stop for the wait.)"""
+    if restore_sites(session, pc, writer):
+        sleep(DISABLE_WAIT)
+        clear_caves(session, pc, writer)
+
+
+def restore_sites(session: Session, pc: ProCheat, writer: ProWriter) -> bool:
+    """The first half of ``disable``: jumps and other entries back, read back. True
+    when caves are left to zero (after ``DISABLE_WAIT``, with ``clear_caves``)."""
     game = session.require_game()
     writes = _writes(pc, game.module_base)
     for w in (w for w in writes if w.what != "cave"):
         writer.write_checked(w.addr, w.off, f"{pc.id}:{w.what}")
-    caves = [w for w in writes if w.what == "cave"]
-    if caves:
-        sleep(DISABLE_WAIT)
-    for w in caves:
-        writer.write_checked(w.addr, w.off, f"{pc.id}:cave")
     log.info("action=pro_disable id=%s", pc.id)
+    return any(w.what == "cave" for w in writes)
+
+
+def clear_caves(session: Session, pc: ProCheat, writer: ProWriter) -> None:
+    """The second half of ``disable``: zero the caves (no jump leads there any more)."""
+    game = session.require_game()
+    for w in (w for w in _writes(pc, game.module_base) if w.what == "cave"):
+        writer.write_checked(w.addr, w.off, f"{pc.id}:cave")
+    log.info("action=pro_disable id=%s caves=cleared", pc.id)
 
 
 # -- live variable edit (AC-8.7) -----------------------------------------------------------
@@ -564,6 +602,7 @@ __all__ = [
     "build",
     "build_all",
     "built_variables",
+    "clear_caves",
     "compile_cheat",
     "context",
     "crosses_ff",
@@ -571,6 +610,7 @@ __all__ = [
     "enable",
     "forget",
     "home",
+    "is_on",
     "layout_current",
     "module_size",
     "new_cave_entry",
@@ -578,6 +618,7 @@ __all__ = [
     "record_layout",
     "refresh",
     "restore",
+    "restore_sites",
     "set_variable",
     "store",
     "take_value",

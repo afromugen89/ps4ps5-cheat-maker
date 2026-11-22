@@ -32,6 +32,7 @@ class MemoryTab(ProTab):
         super().__init__(ctl, tasks, msgs)
         self.page: mp.MemPage | None = None
         self.target: int | None = None
+        self._gen = 0  # page requests: only the last one asked for is shown
 
         self.hint = QLabel(hints.MEMORY)
         self.hint.setWordWrap(True)
@@ -94,14 +95,20 @@ class MemoryTab(ProTab):
 
     def go(self, addr: int) -> None:
         """Show the page holding ``addr`` with that byte selected (also "Show in Memory")."""
-        session = self.ctl.session
+        self._gen += 1
+        gen, session = self._gen, self.ctl.session
+
+        def failed(exc: BaseException) -> None:
+            if gen == self._gen:
+                self.msgs.fail(exc, "pro_memory")
+
         self.tasks.run(
-            lambda: mp.read_page(session, addr),
-            lambda page: self._loaded(page, addr),
-            lambda exc: self.msgs.fail(exc, "pro_memory"),
+            lambda: mp.read_page(session, addr), lambda page: self._loaded(gen, page, addr), failed
         )
 
-    def _loaded(self, page: mp.MemPage, addr: int) -> None:
+    def _loaded(self, gen: int, page: mp.MemPage, addr: int) -> None:
+        if gen != self._gen:
+            return  # a newer page was asked for
         self.page, self.target = page, addr
         self.place.setText(place_text(addr, self.game))
         rows = len(page.data) // mp.ROW

@@ -242,8 +242,9 @@ def test_enable_twice_and_overlap_with_itself_is_allowed(s):  # TC-21
     pc = built_cheat(s)
     writer = pc_.ProWriter(s)
     pc_.enable(s, pc, writer)
-    with pytest.raises(pc_.SiteChanged):  # already on: the hook holds the jump now
-        pc_.enable(s, pc, writer, [pc_.compile_cheat(pc)])
+    # already on (every site holds its on-bytes): taken as on, nothing written
+    # (steps 11-15 QA BUG-03, coordinator's decision; was SiteChanged before)
+    assert pc_.enable(s, pc, writer, [pc_.compile_cheat(pc)]) is True
     pc_.disable(s, pc, writer, sleep=lambda t: None)
     pc_.enable(s, pc, writer)
 

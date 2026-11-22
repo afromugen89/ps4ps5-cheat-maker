@@ -93,6 +93,8 @@ class CaveEditor(QWidget):
         self.room: int | None = None
         self.size: int | None = None
         self._gen = 0
+        self._read_only = True
+        self._busy = False  # a build of this cheat runs: nothing is typed meanwhile
 
         self.title = QLabel("")
         self.source = QPlainTextEdit()
@@ -133,7 +135,16 @@ class CaveEditor(QWidget):
 
     # -- entry ---------------------------------------------------------------------
     def set_entry(self, pc: ProCheat | None, entry: ProEntry | None, read_only=False) -> None:
-        self.pc, self.entry = pc, entry if entry is not None and entry.kind == "cave" else None
+        """Show ``entry``. The same entry shown again (the list was refreshed) keeps the
+        text, the cursor and a pending assemble; only read-only and Build follow."""
+        cave = entry if entry is not None and entry.kind == "cave" else None
+        if cave is not None and cave is self.entry and pc is self.pc:
+            self._read_only = read_only
+            self._lock()
+            self._set_title()
+            return
+        self.pc, self.entry = pc, cave
+        self._read_only = read_only
         self.timer.stop()
         self._gen += 1
         self.room = self.size = None
@@ -141,25 +152,34 @@ class CaveEditor(QWidget):
         self.source.blockSignals(True)
         self.source.setPlainText(self.draft_of(cave) if cave else "")
         self.source.blockSignals(False)
-        self.source.setReadOnly(cave is None or read_only)
         self.bytes_view.setPlainText(hex_lines(cave.cave_bytes) if cave else "")
         self.error.setText("")
         self.budget.setText("")
+        self._set_title()
+        self._lock()
+        if self.entry is not None and self.assembler is None:
+            self.error.setText(hints.ASSEMBLER_MISSING)
+        if cave is not None:
+            self.refresh_budget()
+
+    def _set_title(self) -> None:
+        cave = self.entry
         self.title.setText(
             f"Cave hooked at +{cave.offset:#x}"
             + ("" if cave.cave is None else f", at +{cave.cave:#x}")
             if cave
             else "Pick a cave entry to see its assembly."
         )
-        self._update_build(read_only)
-        if cave is not None:
-            self.refresh_budget()
 
-    def _update_build(self, read_only: bool = False) -> None:
-        ok = self.entry is not None and self.assembler is not None and not read_only
-        self.build_btn.setEnabled(ok)
-        if self.entry is not None and self.assembler is None:
-            self.error.setText(hints.ASSEMBLER_MISSING)
+    def set_busy(self, busy: bool) -> None:
+        """A build (or other change) of this cheat runs: lock the text and Build."""
+        self._busy = busy
+        self._lock()
+
+    def _lock(self) -> None:
+        locked = self.entry is None or self._read_only or self._busy
+        self.source.setReadOnly(locked)
+        self.build_btn.setEnabled(not locked and self.assembler is not None)
 
     def draft_of(self, entry: ProEntry) -> str:
         """The text being edited for ``entry``: an unbuilt draft, else its source."""
@@ -169,9 +189,12 @@ class CaveEditor(QWidget):
     def has_draft(self, entry: ProEntry) -> bool:
         return self.draft_of(entry) != entry.source
 
-    def built(self, entry: ProEntry) -> None:
-        """``entry`` was built from its draft (now its source)."""
-        self._drafts.pop(id(entry), None)
+    def built(self, entry: ProEntry, text: str) -> None:
+        """``entry`` was built from ``text`` (now its source). A draft typed since then
+        stays a draft."""
+        kept = self._drafts.get(id(entry))
+        if kept is not None and kept[0] is entry and kept[1] == text:
+            del self._drafts[id(entry)]
 
     def _typed(self) -> None:
         """Typing changes only the draft; the cheat keeps its built source until Build."""

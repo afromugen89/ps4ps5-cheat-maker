@@ -208,10 +208,6 @@ def test_refresh_to_another_game_info_drops_pro_freezes_consistently(win, pro, g
     assert lst.table.item(0, 4).checkState() == Qt.CheckState.Unchecked
 
 
-@pytest.mark.xfail(
-    reason="BUG-09: the SiteChanged dialog shows a literal \\n instead of line breaks",
-    strict=True,
-)
 def test_bug09_site_changed_dialog_has_real_line_breaks(win, tab, game, warnings):  # TC-07
     new_cheat(tab)
     game.fake.poke(fg.PID, fg.WRITER, b"\x90" * 5)
@@ -249,11 +245,6 @@ def test_toggles_are_disabled_while_a_build_runs(win, tab, qtbot, monkeypatch): 
         qtbot.waitUntil(lambda: not tab.tasks.busy, timeout=5000)
 
 
-@pytest.mark.xfail(
-    reason="BUG-01: a Build finishing applies new cave bytes to a cheat turned on in My "
-    "cheats meanwhile",
-    strict=True,
-)
 def test_bug01_build_never_changes_a_cheat_that_went_on_meanwhile(
     win, tab, game, qtbot, monkeypatch
 ):  # TC-10 (real threads)
@@ -272,10 +263,6 @@ def test_bug01_build_never_changes_a_cheat_that_went_on_meanwhile(
         assert in_game == entry.cave_bytes
 
 
-@pytest.mark.xfail(
-    reason="BUG-05: text typed while a Build runs is thrown away when the build ends",
-    strict=True,
-)
 def test_bug05_typing_during_a_build_is_kept(win, tab, qtbot, monkeypatch):  # TC-11
     cheat = new_cheat(tab)
     entry = cheat.pro.entries[0]
@@ -296,11 +283,6 @@ def test_bug05_typing_during_a_build_is_kept(win, tab, qtbot, monkeypatch):  # T
     assert not tab.editor.build_btn.isEnabled() or not editable
 
 
-@pytest.mark.xfail(
-    reason="BUG-08: a cheats-list refresh while typing moves the cursor to the start and "
-    "drops the pending assemble",
-    strict=True,
-)
 def test_bug08_a_list_refresh_keeps_typing_and_its_assemble(win, tab, qtbot):  # TC-12
     new_cheat(tab)
     ed = tab.editor
@@ -313,11 +295,6 @@ def test_bug08_a_list_refresh_keeps_typing_and_its_assemble(win, tab, qtbot):  #
     qtbot.waitUntil(lambda: ed.bytes_view.toPlainText().startswith("90 "), timeout=1500)
 
 
-@pytest.mark.xfail(
-    reason="BUG-02: Edit in Pro on a guided freeze cheat: turning it on writes the value, "
-    "then fails; the cheat shows Off and can't go on again",
-    strict=True,
-)
 @pytest.mark.parametrize("where", ["pro", "my_cheats"])
 def test_bug02_adopted_freeze_cheat_turns_on_or_writes_nothing(
     win, pro, game, qtbot, where
@@ -339,11 +316,6 @@ def test_bug02_adopted_freeze_cheat_turns_on_or_writes_nothing(
     assert c.enabled or game.fake.peek(fg.PID, STATIC, 4) == off
 
 
-@pytest.mark.xfail(
-    reason="BUG-03: after a Refresh that keeps the game process, a Pro cheat still in the "
-    "game shows Off and can't be turned on or off",
-    strict=True,
-)
 def test_bug03_pro_cheat_still_in_the_game_after_refresh_can_be_turned_off(
     win, tab, game, warnings
 ):  # TC-14
@@ -362,11 +334,6 @@ def test_bug03_pro_cheat_still_in_the_game_after_refresh_can_be_turned_off(
     assert game.fake.peek(fg.PID, fg.WRITER, len(entry.off)) == entry.off
 
 
-@pytest.mark.xfail(
-    reason="BUG-07: Convert to assembly lets an assembler failure other than CantConvert "
-    "escape the dialog",
-    strict=True,
-)
 def test_bug07_convert_says_why_when_the_assembler_fails(win, tab, tmp_path, qtbot):  # TC-15
     path = _cave_file(tmp_path)
     tab.pick_file = lambda: str(path)
@@ -389,14 +356,23 @@ def test_bug07_convert_says_why_when_the_assembler_fails(win, tab, tmp_path, qtb
     assert raised == [] and said and said[0]
 
 
-def test_my_cheats_untick_of_a_cave_cheat_blocks_the_ui_for_the_disable_wait(win, tab):  # TC-16
-    """Observation O1, pinned: the AC-8.5 wait runs on the UI thread from My cheats."""
+def test_my_cheats_untick_of_a_cave_cheat_never_blocks_the_ui(win, tab, game, qtbot):  # TC-16
+    """Observation O1, fixed: the jump goes back at once; the AC-8.5 wait before the
+    cave is zeroed runs on a timer, not on the UI thread."""
     cheat = new_cheat(tab)
+    entry = cheat.pro.entries[0]
     tab.on_box.click()
     started = time.monotonic()
     _tick(win, cheat, False)
     assert not cheat.enabled
-    assert time.monotonic() - started >= pc_compile.DISABLE_WAIT
+    assert time.monotonic() - started < pc_compile.DISABLE_WAIT
+    assert game.fake.peek(fg.PID, fg.WRITER, len(entry.off)) == entry.off
+    cave = fg.BASE + entry.cave
+    assert game.fake.peek(fg.PID, cave, len(entry.cave_bytes)) == entry.cave_bytes, "not yet"
+    qtbot.waitUntil(
+        lambda: game.fake.peek(fg.PID, cave, len(entry.cave_bytes)) == bytes(len(entry.cave_bytes)),
+        timeout=3000,
+    )
 
 
 def test_import_of_another_games_file_is_added_without_a_word(win, tab, tmp_path):  # TC-17
@@ -420,11 +396,6 @@ def test_import_of_another_games_file_is_added_without_a_word(win, tab, tmp_path
 
 
 # == Code view and Memory view (steps 13-14) ======================================================
-@pytest.mark.xfail(
-    reason="BUG-06: the Code view keeps the old bytes after a cheat is turned on: "
-    "'(on)' next to the unpatched instruction",
-    strict=True,
-)
 def test_bug06_code_view_shows_the_patched_bytes_after_a_toggle(pro):  # TC-18
     tab = pro.cheats
     tab.sleep = lambda _s: None
@@ -438,10 +409,6 @@ def test_bug06_code_view_shows_the_patched_bytes_after_a_toggle(pro):  # TC-18
     assert line.text.startswith("jmp"), "the game now holds the jump"
 
 
-@pytest.mark.xfail(
-    reason="BUG-10: an instruction covered by two lines of one cheat that is on is marked twice",
-    strict=True,
-)
 def test_bug10_one_cheat_is_named_once_per_instruction(win, pro):  # TC-19
     c = Cheat(
         "Two",
@@ -459,7 +426,6 @@ def test_bug10_one_cheat_is_named_once_per_instruction(win, pro):  # TC-19
     assert marks == ["Two (on)"]
 
 
-@pytest.mark.xfail(reason="BUG-12: a Go that fails still adds the page to Back", strict=True)
 def test_bug12_failed_go_leaves_back_alone(pro):  # TC-20
     code = pro.code
     code.go(fg.WRITER)
@@ -468,10 +434,6 @@ def test_bug12_failed_go_leaves_back_alone(pro):  # TC-20
     assert code.back == [] and not code.back_btn.isEnabled()
 
 
-@pytest.mark.xfail(
-    reason="BUG-11: an older page load that finishes last replaces the page asked for last",
-    strict=True,
-)
 @pytest.mark.parametrize("view", ["memory", "code"])
 def test_bug11_the_last_page_asked_for_wins(pro, qtbot, monkeypatch, view):  # TC-21
     """Real threads: the first request is held back until the second has shown."""
@@ -561,11 +523,6 @@ def test_guided_value_search_waits_for_the_pro_scan_holding_the_lock(win, monkey
     assert win.ctl.session.search_owner is win.ctl.scanner
 
 
-@pytest.mark.xfail(
-    reason="BUG-04: the guided percent search and Find it again's class search start a "
-    "console search without Session.search_lock",
-    strict=True,
-)
 @pytest.mark.parametrize("which", ["percent", "class_search"])
 def test_bug04_every_guided_search_start_honours_the_search_lock(win, monkeypatch, which):  # TC-24
     from cheatmaker.core.vtable_find import find_by_vtable

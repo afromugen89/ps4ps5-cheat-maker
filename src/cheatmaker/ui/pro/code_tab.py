@@ -40,6 +40,7 @@ class CodeTab(ProTab):
         self.rows: list[cp.Line] = []
         self.back: list[int] = []
         self.forward: list[int] = []
+        self._gen = 0  # page requests: only the last one asked for is shown
 
         self.place = QLineEdit()
         self.place.setPlaceholderText("eboot.bin+0x1234")
@@ -90,7 +91,7 @@ class CodeTab(ProTab):
         self.aob_btn.clicked.connect(self.copy_aob)
         self.nop_btn.clicked.connect(lambda: self._make("nop"))
         self.cave_btn.clicked.connect(lambda: self._make("cave"))
-        ctl.cheats_changed.connect(self._show)
+        ctl.cheats_changed.connect(self.reload)
         self._update_buttons()
 
     # -- navigation ------------------------------------------------------------------------
@@ -103,19 +104,35 @@ class CodeTab(ProTab):
         self.go(addr)
 
     def go(self, addr: int, remember: bool = True) -> None:
-        """Load the page at ``addr`` and select its instruction (AC-6.1)."""
-        if remember and self.page is not None:
-            self.back.append(self.page.target)
-            self.forward.clear()
-        session = self.ctl.session
-        self.tasks.run(lambda: cp.read_page(session, addr), self._loaded, self._load_failed)
+        """Load the page at ``addr`` and select its instruction (AC-6.1). ``remember``:
+        the page shown now goes on Back once the new one has loaded."""
+        self._gen += 1
+        gen, session = self._gen, self.ctl.session
+        came_from = self.page.target if remember and self.page is not None else None
+        self.tasks.run(
+            lambda: cp.read_page(session, addr),
+            lambda page: self._loaded(gen, page, came_from),
+            lambda exc: self._load_failed(gen, exc),
+        )
 
-    def _loaded(self, page: cp.Page) -> None:
+    def reload(self) -> None:
+        """Read the page again (a cheat was turned on or off: the game's bytes changed)."""
+        if self.page is not None and self.running:
+            self.go(self.page.target, remember=False)
+
+    def _loaded(self, gen: int, page: cp.Page, came_from: int | None) -> None:
+        if gen != self._gen:
+            return  # a newer page was asked for
+        if came_from is not None:
+            self.back.append(came_from)
+            self.forward.clear()
         self.page = page
         self.place.setText(place_text(page.target, self.game))
         self._show()
 
-    def _load_failed(self, exc: BaseException) -> None:
+    def _load_failed(self, gen: int, exc: BaseException) -> None:
+        if gen != self._gen:
+            return
         self.msgs.fail(exc, "pro_code")
         self._update_buttons()
 

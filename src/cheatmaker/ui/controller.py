@@ -8,10 +8,11 @@ from PySide6.QtCore import QObject, Signal
 
 from cheatmaker.core.cheats import CheatFile
 from cheatmaker.core.freezer import Freezer, LiveCheats
+from cheatmaker.core.pro import compile as pro_compile
 from cheatmaker.core.project import Project
 from cheatmaker.core.scanner import Scanner
 from cheatmaker.core.session import ClientFactory, GameInfo, Session
-from cheatmaker.errors import ConnectionLost
+from cheatmaker.errors import CheatMakerError, ConnectionLost
 from cheatmaker.settings import Settings
 from cheatmaker.ui.messages import LOST, report
 from cheatmaker.ui.tasks import TaskRunner
@@ -53,6 +54,7 @@ class Controller(QObject):
         self.hit_test_warned = False  # AC-H6 warning is shown once per run
         self.build_notice_shown = False  # Make it work's "Save your game first", once per run
         self.trace_notice_shown = False  # Find the real one's "Save your game first", once
+        self.pro_busy: set[int] = set()  # id() of cheats a Pro task is changing now
         self.project: Project | None = None  # v3 "find it again" notes for this game
         self.before_disconnect: list[Callable[[], None]] = []  # e.g. take hooks out
         # The game's code is being read (fingerprints): one read at a time (UI thread only).
@@ -91,6 +93,7 @@ class Controller(QObject):
         self.live.trackers.clear()  # objects are somewhere else in a new run
         self.freezer.clear()
         self.frozen_addresses.clear()
+        same_run = game is not None and game.pid == self._run_pid
         if game is not None and game.pid != self._run_pid:  # a new game run
             self._run_pid = game.pid
             if self.cheat_file is not None:  # a Lock it value's address was the old run's
@@ -100,8 +103,24 @@ class Controller(QObject):
             self.cheat_file is None or self.cheat_file.title_id != game.title_id
         ):
             self.cheat_file = CheatFile(game.title, game.title_id, game.version)
+        if same_run:
+            self._probe_pro_cheats()
         self.game_changed.emit(game)
         self.cheats_changed.emit()
+
+    def _probe_pro_cheats(self) -> None:
+        """Same game process after a Refresh: a Pro cheat whose bytes are all still in
+        the game stays On (it runs; the player must be able to turn it off)."""
+        if self.cheat_file is None:
+            return
+        for c in self.cheat_file.cheats:
+            if c.pro is None or c.freeze:
+                continue
+            try:
+                if pro_compile.is_on(self.session, c.pro):
+                    self.live.mark_on(c)
+            except CheatMakerError as exc:  # can't tell: it stays off; the reason is logged
+                report(exc, "pro_probe")
 
     def ensure_file(self) -> CheatFile:
         if self.cheat_file is None:

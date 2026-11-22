@@ -110,7 +110,15 @@ FIND_ACCESSES = "Find what accesses"
 WRITE_FAILED = "The PS5 didn't take the new bytes ({reason}). Check the game is running."
 SITE_CHANGED_TITLE = "The game's code isn't what the cheat expects"
 SITE_CHANGED = "Nothing was written. These places hold other bytes than recorded:"
-SITE_ROW = "{place}\\n    expected: {expected}\\n    found:    {found}"
+SITE_ROW = "{place}\n    expected: {expected}\n    found:    {found}"
 CLOSE_FROZEN_TITLE = "Stop the freezes?"
 CLOSE_FROZEN = "Closing Pro stops the {n} frozen address(es) in the address list. Close it?"
 GUIDED_BUSY = "The main window is busy (a search or a read is running). Try again when it's done."
+CONVERT_FAILED = "{name} can't be converted: the assembler failed ({reason})."
+TURNED_ON_MEANWHILE = (
+    "{name} was turned on meanwhile, so the result wasn't kept. Turn it off, then try again."
+)
+ALREADY_ON = "{name} was already on in the game."
+FREEZE_NOT_IN_PRO = (
+    "A freeze cheat can't be edited in Pro. Use Lock it or Make it work on it first."
+)

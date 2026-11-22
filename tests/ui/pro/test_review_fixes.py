@@ -145,7 +145,7 @@ def test_my_cheats_toggle_refuses_an_overlap(win, tab, game):
     assert "First" in win.status.text() and len(game.fake.writes) == writes
 
 
-def test_my_cheats_toggle_uses_pro_on_and_off(win, tab, game):
+def test_my_cheats_toggle_uses_pro_on_and_off(win, tab, game, qtbot):
     cheat = new_cheat(tab)
     entry = cheat.pro.entries[0]
     row = win.ctl.cheat_file.cheats.index(cheat)
@@ -154,7 +154,7 @@ def test_my_cheats_toggle_uses_pro_on_and_off(win, tab, game):
     win.cheats.table.item(row, 0).setCheckState(Qt.CheckState.Unchecked)
     assert not cheat.enabled
     assert game.fake.peek(fg.PID, fg.WRITER, len(entry.off)) == entry.off
-    assert game.fake.peek(fg.PID, fg.BASE + entry.cave, 1) == b"\x00"
+    qtbot.waitUntil(lambda: game.fake.peek(fg.PID, fg.BASE + entry.cave, 1) == b"\x00")
 
 
 def test_my_cheats_site_changed_writes_nothing(win, tab, game):
@@ -212,3 +212,53 @@ def test_close_asks_when_rows_are_frozen(win, pro, questions):
     del pro.confirm_close
     pro.close()
     assert questions == [hints.CLOSE_FROZEN_TITLE] and not win.ctl.freezer.keys
+
+
+# -- QA round (steps 11-15) ------------------------------------------------------------------
+def test_already_on_in_the_game_is_taken_as_on(win, tab, game):
+    """QA BUG-03: every site holds the cheat's bytes: nothing is written, it shows On."""
+    cheat = new_cheat(tab)
+    tab.on_box.click()
+    win.ctl.live.turn_off(cheat, restore=False)  # the app forgot (e.g. restarted)
+    win.ctl.cheats_changed.emit()
+    writes = len(game.fake.writes)
+    tab.on_box.click()
+    assert cheat.enabled and len(game.fake.writes) == writes
+    assert win.pro.status.text() == hints.ALREADY_ON.format(name=cheat.name)
+
+
+def test_my_cheats_waits_while_pro_changes_the_cheat(win, tab):
+    """QA BUG-01: My cheats doesn't toggle a cheat a Pro task is changing."""
+    cheat = new_cheat(tab)
+    win.ctl.pro_busy.add(id(cheat))
+    row = win.ctl.cheat_file.cheats.index(cheat)
+    win.cheats.table.item(row, 0).setCheckState(Qt.CheckState.Checked)
+    win.ctl.pro_busy.clear()
+    assert not cheat.enabled
+    assert win.status.text() == guided_hints.PRO_BUSY.format(name=cheat.name)
+
+
+def test_a_draft_typed_after_the_build_started_stays(tab):
+    """QA BUG-05: ``built`` only drops the text it built."""
+    cheat = new_cheat(tab)
+    entry = cheat.pro.entries[0]
+    tab.editor._drafts[id(entry)] = (entry, "later\n")
+    tab.editor.built(entry, "earlier\n")
+    assert tab.editor.draft_of(entry) == "later\n"
+
+
+def test_freeze_cheat_preview_says_why(win, tab):
+    """QA BUG-02: Edit in Pro refuses a freeze cheat and says so."""
+    from cheatmaker.core.cheats import Cheat, Location, LocationKind
+    from cheatmaker.core.pro.asm_text import FREEZE_REFUSED
+
+    c = Cheat(
+        "Kept",
+        [Location(LocationKind.MODULE_VALUE, 0x4100, b"\x63\0\0\0", b"\0\0\0\0")],
+        freeze=True,
+    )
+    win.ctl.ensure_file().cheats.append(c)
+    win.ctl.cheats_changed.emit()
+    tab.select_cheat(c)
+    assert not tab.adopt_btn.isEnabled()
+    assert tab.editor.error.text() == FREEZE_REFUSED

@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QCheckBox,
     QFileDialog,
@@ -29,6 +29,7 @@ from cheatmaker.core import updater as up
 from cheatmaker.core.cheats import Cheat, Location, LocationKind, combine, versions_differ
 from cheatmaker.core.locker import NOP
 from cheatmaker.core.pro import compile as pro_compile
+from cheatmaker.core.pro.asm_text import FREEZE_REFUSED
 from cheatmaker.core.pro.compile import SiteChanged
 from cheatmaker.core.pro.sites import Overlap
 from cheatmaker.core.values import parse_number
@@ -315,7 +316,9 @@ class CheatsView(QWidget):
             return
         c = self.cheats[item.row()]
         try:
-            if item.column() == COL_ON:
+            if item.column() == COL_ON and id(c) in self.ctl.pro_busy:
+                self.ctl.message.emit(hints.PRO_BUSY.format(name=c.name))
+            elif item.column() == COL_ON:
                 want = item.checkState() == Qt.CheckState.Checked
                 if want and not c.enabled:
                     if self.finder.confirm(c):  # AC-12.2: ask once per run
@@ -356,16 +359,45 @@ class CheatsView(QWidget):
         if c.pro is None:
             self.ctl.live.turn_on(c)
             return
+        if c.freeze:  # checked before any write: Pro never freezes (QA BUG-02)
+            raise ValueError(FREEZE_REFUSED)
+        session = self.ctl.session
         enabled = [x for x in self.cheats if x.enabled and x is not c]
-        pro_compile.enable(self.ctl.session, c.pro, self._pro_writer, enabled)
-        self.ctl.live.mark_on(c)
+        already = pro_compile.enable(session, c.pro, self._pro_writer, enabled)
+        try:
+            self.ctl.live.mark_on(c)
+        except Exception:  # never leave it in the game while shown off
+            if not already:
+                pro_compile.disable(session, c.pro, self._pro_writer)
+            raise
+        if already:
+            self.ctl.message.emit(hints.PRO_ALREADY_ON.format(name=c.name))
 
     def _turn_off(self, c: Cheat) -> None:
+        """A Pro cheat's jumps go back at once; its caves are zeroed DISABLE_WAIT later
+        by a timer, so the window never stops for the wait (AC-8.5)."""
         if c.pro is None:
             self.ctl.live.turn_off(c)
             return
-        pro_compile.disable(self.ctl.session, c.pro, self._pro_writer)
+        session = self.ctl.session
+        caves = pro_compile.restore_sites(session, c.pro, self._pro_writer)
         self.ctl.live.turn_off(c, restore=False)  # already written back
+        if caves:
+            game = session.game
+            QTimer.singleShot(
+                int(pro_compile.DISABLE_WAIT * 1000), lambda: self._clear_caves(c, game)
+            )
+
+    def _clear_caves(self, c: Cheat, game) -> None:
+        """The second half of turning a Pro cheat off, unless it went on again (its
+        jump leads into the cave again) or the game changed meanwhile."""
+        session = self.ctl.session
+        if c.enabled or c.pro is None or not session.connected or session.game != game:
+            return
+        try:
+            pro_compile.clear_caves(session, c.pro, self._pro_writer)
+        except Exception as exc:
+            self.ctl.fail(exc, "toggle")
 
     def do_build(self, c: Cheat) -> None:
         """Make it work on this cheat's value; the result replaces it."""

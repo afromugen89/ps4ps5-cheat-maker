@@ -462,3 +462,5 @@ TRACE_HOW = {
     "caller": "the caller",
     "exec": "an execute breakpoint",
 }
+PRO_BUSY = "{name} is being changed in the Pro window. Try again in a moment."
+PRO_ALREADY_ON = "{name} was already on in the game."

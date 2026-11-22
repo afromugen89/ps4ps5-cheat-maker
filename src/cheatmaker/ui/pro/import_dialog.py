@@ -20,7 +20,9 @@ from cheatmaker.core.pro.asm import Assembler
 from cheatmaker.core.pro.asm_text import CantConvert
 from cheatmaker.core.pro.importer import ImportResult
 from cheatmaker.core.pro.model import ProCheat, ProEntry
+from cheatmaker.errors import CheatMakerError
 from cheatmaker.ui.controller import Controller
+from cheatmaker.ui.messages import report
 from cheatmaker.ui.pro import hints
 from cheatmaker.ui.pro.cave_editor import mono
 
@@ -119,6 +121,10 @@ class ImportDialog(QDialog):
             n = importer.convert(pc, self.assembler)
         except CantConvert as exc:
             self.message.setText(str(exc))
+            return
+        except (CheatMakerError, OSError) as exc:  # the assembler itself failed: say why
+            self.message.setText(hints.CONVERT_FAILED.format(name=pc.name, reason=exc))
+            report(exc, "pro_import_convert")
             return
         self.message.setText(
             hints.CONVERTED.format(name=pc.name, n=n) if n else hints.NO_CAVE.format(name=pc.name)

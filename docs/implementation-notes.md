@@ -959,3 +959,30 @@ Built from docs/architecture-pro.md (spec docs/spec-pro.md), implementation step
       (`busy.short_wait`, honoured by the NG socket lock off the UI thread) and counts
       busy as alive.
     - A failed Pro action saves nothing.
+- **QA round, BUG-01..12 (2026-11-22).**
+  - BUG-01: a Pro task records the cheat it changes (`Controller.pro_busy`). My cheats
+    refuses to toggle that cheat meanwhile. A build, entry or variable result for a
+    cheat that went on or off meanwhile is dropped ("turned on meanwhile").
+  - BUG-02 (coordinator's call): Edit in Pro refuses freeze cheats (`FREEZE_REFUSED`;
+    the preview says why). Turning a Pro cheat on checks `freeze` before any write. If
+    `mark_on` still raises, the writes are undone.
+  - BUG-03 (coordinator's call): `compile.enable` returns True and writes nothing when
+    every site already holds its on-bytes ("was already on in the game"). Some sites
+    on and some off is still SiteChanged. A Refresh that keeps the PID probes the Pro
+    cheats (`compile.is_on`) and marks the running ones On.
+  - BUG-04: the percent search and Find it again's class search take
+    `Session.search_lock` and the owner.
+  - BUG-05: the editor and Build are locked while a build runs; `built(entry, text)`
+    drops the draft only when it is the text that was built.
+  - BUG-06: the Code view reads its page again on every cheat change.
+  - BUG-07: Convert to assembly reports an assembler failure in the dialog.
+  - BUG-08: a list refresh keeps the editor (text, cursor, pending assemble) when the
+    same entry is still shown.
+  - BUG-09: the SiteChanged dialog has real line breaks.
+  - BUG-10: a cheat is named once per instruction.
+  - BUG-11: Code and Memory page loads carry a request number; only the last one
+    asked for is shown.
+  - BUG-12: Back gets the old page only after the new one has loaded.
+  - O1: unticking a Pro cave cheat in My cheats restores the jumps at once. A timer
+    zeroes the caves `DISABLE_WAIT` later (`compile.restore_sites` /
+    `clear_caves`), unless the cheat went on again or the game changed.
