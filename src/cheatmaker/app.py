@@ -4,8 +4,71 @@ from __future__ import annotations
 
 import logging
 import sys
+from pathlib import Path
 
 from cheatmaker import __version__
+
+SELF_CHECK = "--self-check"
+SELF_CHECK_FILE = "self-check.txt"
+
+
+def self_check_path() -> Path:
+    """Where ``--self-check`` writes its report: next to CheatMaker.exe in the build
+    (a windowed exe has no console to print to), the app's folder from source."""
+    from cheatmaker.paths import app_data_dir
+
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).parent / SELF_CHECK_FILE
+    return app_data_dir() / SELF_CHECK_FILE
+
+
+def _self_check_lines() -> tuple[list[str], bool]:
+    try:
+        from cheatmaker.paths import NASM_EXE_NAME, bundled_nasm_dir
+        from cheatmaker.ui.main_window import MainWindow  # noqa: F401 (loads every screen)
+        from cheatmaker.ui.pro.pro_window import ProWindow  # noqa: F401
+    except Exception as exc:  # report it: this is the smoke test's whole point
+        return [f"modules: FAILED ({type(exc).__name__}: {exc})"], False
+    # the build's own copy, not the nasm_path setting or PATH: the check is that the
+    # build ships it
+    nasm = bundled_nasm_dir() / NASM_EXE_NAME
+    found = nasm.is_file()
+    return [
+        f"modules: ok (version {__version__})",
+        f"assembler: {nasm if found else f'MISSING ({nasm})'}",
+    ], found
+
+
+def _write_report(text: str) -> Path | None:
+    from cheatmaker.paths import app_data_dir
+
+    log = logging.getLogger(__name__)
+    for path in dict.fromkeys((self_check_path(), app_data_dir() / SELF_CHECK_FILE)):
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text + "\n", encoding="utf-8")
+        except OSError as exc:  # e.g. the exe's folder is read-only: try the next
+            log.warning("action=self_check path=%s write_failed=%s", path, exc)
+            continue
+        return path
+    return None
+
+
+def self_check(out=None) -> int:
+    """``CheatMaker.exe --self-check`` (the Windows build's smoke test): every screen's
+    module loads (so the bundled Qt, iced-x86 and app code are all there), and the
+    bundled assembler is there. No window opens. The report goes to ``out``, the log
+    and ``self-check.txt`` (``self_check_path``). 0 when all is well."""
+    out = out or sys.stdout
+    lines, ok = _self_check_lines()
+    log = logging.getLogger(__name__)
+    for line in lines:
+        print(line, file=out)
+        log.info("action=self_check %s", line)
+    path = _write_report("\n".join(lines))
+    if path is not None:
+        print(f"report: {path}", file=out)
+    return 0 if ok else 1
 
 
 def main() -> int:
@@ -19,6 +82,8 @@ def main() -> int:
     )
 
     path = setup_logging()
+    if SELF_CHECK in sys.argv[1:]:
+        return self_check()
     install_crash_hook()
     unexpected = check_previous_run()  # before this run's start line, which it looks for
     install_native_crash_log(ended_unexpectedly=unexpected)

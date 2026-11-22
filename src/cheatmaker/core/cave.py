@@ -42,7 +42,7 @@ import iced_x86 as ix
 from cheatmaker.console.client import MemMap
 from cheatmaker.core.cheats import Cheat, Location, LocationKind, value_positions
 from cheatmaker.core.locker import Read, Writer, nop_unsafe, writes_memory
-from cheatmaker.core.session import Session
+from cheatmaker.core.session import GUIDED_COLLECT, Session
 from cheatmaker.core.values import ValueType
 from cheatmaker.errors import LockFailed, ScanCancelled
 
@@ -686,7 +686,12 @@ def find_cave(
 
 
 def find_table(session: Session) -> int:
-    """Zero bytes at the very end of the game's writable data for the sampler table."""
+    """Zero bytes at the very end of the game's writable data for the sampler table.
+    There is one such place, so it is refused (TableInUse) while someone holds it
+    (``Session.claim_table``); callers find it, then claim it for as long as it is
+    hooked."""
+    if session.table_owner is not None:
+        raise session.table_in_use()
     game = session.require_game()
     client = session.require_client()
     data_maps = [m for m in _module_maps(session) if m.writable and not m.executable]
@@ -718,24 +723,27 @@ def collect_objects(
     orig = b"".join(read(i.ip, i.len) for i in span)
     cave = find_cave(session, CAVE_ROOM, extra_reserved=extra_reserved)
     table = find_table(session)
-    code = sampler_code(span, target, table, cave)
-    client.write(game.pid, cave, code)
-    client.write(game.pid, writer.address, jmp_patch(writer.address, cave, len(orig)))
-    log.info("action=player_only_collect hook=%#x cave=%#x table=%#x", writer.address, cave, table)
-    try:
-        waited = 0.0
-        while waited < seconds:
-            if cancel is not None and cancel.is_set():
-                raise ScanCancelled("collecting cancelled")
-            sleep(0.25)
-            waited += 0.25
-    finally:
-        client.write(game.pid, writer.address, orig)  # unhook
-        sleep(0.5)  # let threads finish their last pass through the cave
-        raw = read(table, TABLE_SIZE)
-        client.write(game.pid, table, bytes(TABLE_SIZE))
-        # The cave's code stays: a thread preempted inside it could still be running
-        # it. Nothing jumps there any more, and the next cave goes below it.
+    with session.claim_table(GUIDED_COLLECT):  # not while a Pro sample runs (BUG-01)
+        code = sampler_code(span, target, table, cave)
+        client.write(game.pid, cave, code)
+        client.write(game.pid, writer.address, jmp_patch(writer.address, cave, len(orig)))
+        log.info(
+            "action=player_only_collect hook=%#x cave=%#x table=%#x", writer.address, cave, table
+        )
+        try:
+            waited = 0.0
+            while waited < seconds:
+                if cancel is not None and cancel.is_set():
+                    raise ScanCancelled("collecting cancelled")
+                sleep(0.25)
+                waited += 0.25
+        finally:
+            client.write(game.pid, writer.address, orig)  # unhook
+            sleep(0.5)  # let threads finish their last pass through the cave
+            raw = read(table, TABLE_SIZE)
+            client.write(game.pid, table, bytes(TABLE_SIZE))
+            # The cave's code stays: a thread preempted inside it could still be running
+            # it. Nothing jumps there any more, and the next cave goes below it.
     objs = sorted({v for (v,) in struct.iter_unpack("<Q", raw) if v})
     log.info("action=player_only_collect objects=%d", len(objs))
     return objs

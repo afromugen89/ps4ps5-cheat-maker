@@ -65,6 +65,7 @@ from cheatmaker.errors import (
     ProjectFileError,
     ReadFailed,
     ScanCancelled,
+    TableInUse,
 )
 
 log = logging.getLogger(__name__)
@@ -804,6 +805,8 @@ def collect_classes(
         objs = cv.collect_objects(
             session, writer, seconds, cancel, sleep=sleep, extra_reserved=reserved or ()
         )
+    except TableInUse:  # a Pro sample has the table: not "no room", the hook way stays
+        raise
     except LockFailed as exc:
         raise _failed(item.obj, "collect", NO_ROOM, exc) from exc
     maps = rf.MapIndex(session.require_client().maps(game.pid))

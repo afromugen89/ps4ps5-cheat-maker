@@ -35,6 +35,8 @@ class Settings:
     nasm_path: str = ""  # Pro cave editor: an assembler to use instead of the bundled one
     # Pro window: title IDs whose safety notice was shown (once per game)
     pro_notice_shown: list[str] = field(default_factory=list)
+    pro_watch_seconds: int = 60  # Pro Watch: a watch ends after this long (spec PR-3)
+    pro_watch_hits: int = 500  # ... or after this many hits
 
     @classmethod
     def path(cls) -> Path:
@@ -86,6 +88,8 @@ class Settings:
             isinstance(x, str) for x in s.pro_notice_shown
         ):
             s.pro_notice_shown = []
+        s.pro_watch_seconds = _clamped(s.pro_watch_seconds, 60, 5, 600)
+        s.pro_watch_hits = _clamped(s.pro_watch_hits, 500, 1, 5000)
         return s
 
     def save(self) -> None:
@@ -94,3 +98,10 @@ class Settings:
         tmp = p.with_suffix(".tmp")
         tmp.write_text(json.dumps(asdict(self), indent=2), encoding="utf-8")
         tmp.replace(p)
+
+
+def _clamped(value: object, default: int, low: int, high: int) -> int:
+    """A whole number from the file kept within [low, high]; anything else: default."""
+    if not isinstance(value, int) or isinstance(value, bool):
+        return default
+    return max(low, min(high, value))

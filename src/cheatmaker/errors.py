@@ -76,6 +76,11 @@ class LockFailed(CheatMakerError):
     action = "lock"
 
 
+class TableInUse(LockFailed):
+    """The sampler table (``cave.find_table``) is held by another collect or sample
+    (``Session.claim_table``): they would share it and lose each other's objects."""
+
+
 class ProjectFileError(CheatFileError):
     """A ``.cmproj`` (find-it-again data) can't be read."""
 
@@ -92,3 +97,26 @@ class BuildFailed(CheatMakerError):
     """Make it work couldn't make a cheat. The message is plain text for the player."""
 
     action = "build"
+
+
+class DebuggerError(CheatMakerError):
+    """The Pro debugger (its own connection, port 755) failed. Never a lost main
+    connection: reads, writes and frozen cheats go on."""
+
+    action = "pro_debug"
+
+
+class DebuggerInUse(DebuggerError):
+    """Another part of the app has the debugger (one user at a time)."""
+
+
+class PortInUse(DebuggerError):
+    """The PC can't listen on the back-channel port (another program has it)."""
+
+
+class FirewallBlocked(DebuggerError):
+    """The PS5 never dialled back on the back-channel port after attaching."""
+
+
+class DebuggerLost(DebuggerError):
+    """The debugger's connection or back channel dropped, or the game closed."""

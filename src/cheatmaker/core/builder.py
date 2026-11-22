@@ -45,7 +45,7 @@ from cheatmaker.core.locker import (
     find_writers,
     writes_memory,
 )
-from cheatmaker.core.session import Session
+from cheatmaker.core.session import GUIDED_COLLECT, Session
 from cheatmaker.core.values import ValueType
 from cheatmaker.errors import (
     BuildFailed,
@@ -963,42 +963,43 @@ class Builder:
             extra_reserved=self.extra_reserved + self._kept_reserved,
         )
         table = cv.find_table(self.session)
-        code = cv.sampler_code(span, target, table, room)
-        inst = _Installed(
-            Candidate((Part(writer, Method.HOOK),)),
-            0,
-            sites=[(writer.address, orig, cv.jmp_patch(writer.address, room, len(orig)))],
-            rooms=[(room, cv.CAVE_ROOM), (table, cv.TABLE_SIZE)],
-            routines=[(room, code)],
-            method="collect",
-            place=self.place,
-        )
-        failed = self._install(inst, cancel)
-        if failed is not None:
-            if failed.rollback is Rollback.NOT_RESTORED:
-                raise BuildFailed(RESTART)
-            if failed.result is TryResult.CANCELLED:
-                raise ScanCancelled("collecting cancelled")
-            raise BuildFailed(f"Couldn't start Collect: {failed.hint}.")
-        try:
-            waited = 0.0
-            while waited < COLLECT_S:
-                if cancel.is_set() or self._taken_back(inst) is not None:
+        with self.session.claim_table(GUIDED_COLLECT):  # not during a Pro sample (BUG-01)
+            code = cv.sampler_code(span, target, table, room)
+            inst = _Installed(
+                Candidate((Part(writer, Method.HOOK),)),
+                0,
+                sites=[(writer.address, orig, cv.jmp_patch(writer.address, room, len(orig)))],
+                rooms=[(room, cv.CAVE_ROOM), (table, cv.TABLE_SIZE)],
+                routines=[(room, code)],
+                method="collect",
+                place=self.place,
+            )
+            failed = self._install(inst, cancel)
+            if failed is not None:
+                if failed.rollback is Rollback.NOT_RESTORED:
+                    raise BuildFailed(RESTART)
+                if failed.result is TryResult.CANCELLED:
                     raise ScanCancelled("collecting cancelled")
-                self.sleep(POLL_S)
-                waited += POLL_S
-            raw = read(table, cv.TABLE_SIZE)  # entries added after this are only lost
-        finally:
-            # Cancelled with places kept: every place goes back in one run (one wait).
-            if cancel.is_set() and self._kept:
-                rb = self._end_all(inst, "cancelled")
-            else:
-                rb = self._end(inst, "collected")
-        if rb is Rollback.NOT_RESTORED:
-            raise BuildFailed(RESTART)
-        objs = sorted({v for (v,) in struct.iter_unpack("<Q", raw) if v})
-        log.info("action=player_only_collect objects=%d", len(objs))
-        return objs
+                raise BuildFailed(f"Couldn't start Collect: {failed.hint}.")
+            try:
+                waited = 0.0
+                while waited < COLLECT_S:
+                    if cancel.is_set() or self._taken_back(inst) is not None:
+                        raise ScanCancelled("collecting cancelled")
+                    self.sleep(POLL_S)
+                    waited += POLL_S
+                raw = read(table, cv.TABLE_SIZE)  # entries added after this are only lost
+            finally:
+                # Cancelled with places kept: every place goes back in one run (one wait).
+                if cancel.is_set() and self._kept:
+                    rb = self._end_all(inst, "cancelled")
+                else:
+                    rb = self._end(inst, "collected")
+            if rb is Rollback.NOT_RESTORED:
+                raise BuildFailed(RESTART)
+            objs = sorted({v for (v,) in struct.iter_unpack("<Q", raw) if v})
+            log.info("action=player_only_collect objects=%d", len(objs))
+            return objs
 
     # -- B4/B5: one fix at a time -------------------------------------------------------
     def next_candidate(self) -> Candidate | None:

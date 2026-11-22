@@ -35,3 +35,8 @@ def test_report_logs_action_and_reason(caplog):  # AC-9.1
     text = caplog.text
     assert "action=write reason=WriteFailed: console said no" in text
     assert "action=save unexpected error" in text
+
+
+def test_a_busy_sampler_table_is_said_as_is():  # BUG-07: guided screens show it plainly
+    text = "The sampler (Pro's What does it access?) is using the game's spare data."
+    assert user_message(e.TableInUse(text)) == text

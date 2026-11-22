@@ -20,6 +20,7 @@ from PySide6.QtWidgets import QLabel, QMainWindow, QMessageBox, QTabWidget, QVBo
 from cheatmaker.core.pro.addresses import place_text
 from cheatmaker.core.pro.asm import Assembler, AssemblerNotFound, default_assembler
 from cheatmaker.core.pro.compile import SiteChanged
+from cheatmaker.core.pro.watch_session import WatchTarget
 from cheatmaker.core.session import GameInfo
 from cheatmaker.ui.controller import Controller
 from cheatmaker.ui.pro import hints
@@ -29,21 +30,12 @@ from cheatmaker.ui.pro.code_tab import CodeTab
 from cheatmaker.ui.pro.memory_tab import MemoryTab
 from cheatmaker.ui.pro.scanner_tab import ScannerTab
 from cheatmaker.ui.pro.tab import ProMessages, ProTab, game_text
+from cheatmaker.ui.pro.watch_tab import WatchTab
 from cheatmaker.ui.tasks import TaskRunner
 
 log = logging.getLogger(__name__)
 
 POLL_MS = 2000
-
-
-class _Placeholder(ProTab):
-    def __init__(self, ctl: Controller, tasks: TaskRunner, msgs: ProMessages, text: str) -> None:
-        super().__init__(ctl, tasks, msgs)
-        lay = QVBoxLayout(self.body)
-        label = QLabel(text)
-        label.setWordWrap(True)
-        lay.addWidget(label)
-        lay.addStretch(1)
 
 
 class ProWindow(QMainWindow):
@@ -108,19 +100,34 @@ class ProWindow(QMainWindow):
         self.add_tab(self.code, hints.TAB_CODE)
         self.memory = MemoryTab(self.ctl, self.tasks, self.msgs)
         self.add_tab(self.memory, hints.TAB_MEMORY)
-        self.add_tab(
-            _Placeholder(self.ctl, self.tasks, self.msgs, hints.WATCH_LATER), hints.TAB_WATCH
-        )
+        self.watch = WatchTab(self.ctl, self.tasks, self.msgs)
+        self.add_tab(self.watch, hints.TAB_WATCH)
         self.cheats = CheatsTab(self.ctl, self.tasks, self.assembler, self.save, self.msgs)
         self.add_tab(self.cheats, hints.TAB_CHEATS)
         self.code.make_entry = self._entry_from_code
         self.scanner.add_address = lambda addr, vtype: self.addresses.add(addr, vtype)
         self.scanner.show_code = lambda addr: self._show(self.code, addr)
         self.addresses.show_memory = lambda addr: self._show(self.memory, addr)
+        self.addresses.watch = self.watch_targets
+        self.watch.make_entry = self._entry_from_code
+        self.watch.show_code = lambda addr: self._show(self.code, addr)
+        self.watch.access.add_address = lambda addr, vtype: self.addresses.add(addr, vtype)
+        self.code.sample = self.sample_access
+        self.cheats.watch = self.watch_targets
 
     def _show(self, tab: CodeTab | MemoryTab, addr: int) -> None:
         self.tabs.setCurrentWidget(tab)
         tab.go(addr)
+
+    def watch_targets(self, targets: list[WatchTarget]) -> None:
+        """Find what writes / accesses (address list, export dialog): the Watch tab."""
+        self.tabs.setCurrentWidget(self.watch)
+        self.watch.watch(targets)
+
+    def sample_access(self, addr: int) -> None:
+        """What does the instruction at ``addr`` access (Code view): the Watch tab."""
+        self.tabs.setCurrentWidget(self.watch)
+        self.watch.access.sample_at(addr)
 
     def _entry_from_code(self, kind: str, offset: int) -> None:
         self.tabs.setCurrentWidget(self.cheats)

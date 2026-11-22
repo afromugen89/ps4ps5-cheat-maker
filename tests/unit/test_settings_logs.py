@@ -112,3 +112,17 @@ def test_settings_carry_declined_round_trips_and_bad_values_reset():  # spec-gam
     for bad in ('"PPSA01285"', "[1, 2]", "null", '{"a": 1}'):
         p.write_text('{"carry_declined": ' + bad + "}", encoding="utf-8")
         assert Settings.load().carry_declined == []
+
+
+def test_pro_watch_limits_default_clamp_and_reset():  # spec-pro PR-3
+    s = Settings.load()
+    assert (s.pro_watch_seconds, s.pro_watch_hits) == (60, 500)
+    s.save()  # makes the folder
+    Settings.path().write_text(
+        '{"pro_watch_seconds": 100000, "pro_watch_hits": 0}', encoding="utf-8"
+    )
+    assert (Settings.load().pro_watch_seconds, Settings.load().pro_watch_hits) == (600, 1)
+    Settings.path().write_text(
+        '{"pro_watch_seconds": "long", "pro_watch_hits": true}', encoding="utf-8"
+    )
+    assert (Settings.load().pro_watch_seconds, Settings.load().pro_watch_hits) == (60, 500)

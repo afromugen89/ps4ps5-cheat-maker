@@ -15,7 +15,7 @@ import iced_x86 as ix
 
 from cheatmaker.console.client import WatchUntil
 from cheatmaker.core.cheats import Cheat, Location, LocationKind
-from cheatmaker.core.session import Session
+from cheatmaker.core.session import GUIDED_DEBUGGER, Session
 from cheatmaker.errors import ConsoleBusy, LockFailed, ReadFailed
 
 log = logging.getLogger(__name__)
@@ -311,7 +311,8 @@ def find_writers(
     unsafe: switching it off leaves that branch looking at stale flags."""
     client = session.require_client()
     game = session.require_game()
-    rips = client.watch_writes(game.pid, address, size, timeout_s, until=until)
+    with session.claim_debugger(GUIDED_DEBUGGER):
+        rips = client.watch_writes(game.pid, address, size, timeout_s, until=until)
     log.info("action=lock_watch address=%#x rips=%d", address, len(rips))
     if not rips:
         raise LockFailed("nothing changed the value while we were watching")

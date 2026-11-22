@@ -78,6 +78,16 @@ def _apply(pc: ProCheat, built: ProCheat) -> None:
     pc.editable = built.editable
 
 
+def _preview_key(c: Cheat) -> tuple:
+    """Everything ``adopt`` reads from a guided cheat: a preview is made again only when
+    one of these changed."""
+    lines = tuple(
+        (loc.kind, loc.offset, loc.on, loc.off, loc.module, loc.section, loc.anchor)
+        for loc in c.locations
+    )
+    return (c.name, c.hint, c.freeze, c.anchor, c.found_again, lines)
+
+
 def _number(text: str, vtype: ValueType) -> float | int:
     text = text.strip()
     if vtype.is_float:
@@ -102,9 +112,13 @@ class CheatsTab(ProTab):
         self.ask_text: Callable[[str, str, str], str | None] = self._ask_text
         self.pick_file: Callable[[], str] = self._pick_file
         self.exec_dialog: Callable[[object], object] = lambda d: d.exec()
+        # "Make a cave at its writer" in the export dialog: the Watch tab (set by the window)
+        self.watch: Callable[[list], None] = lambda targets: None
         self.busy = False
         self.preview: ProCheat | None = None  # a guided cheat as it would be adopted
         self.preview_why = ""  # why a guided cheat can't be adopted
+        # id(cheat) -> (cheat, its lines when previewed, preview, why not)
+        self._previews: dict[int, tuple[Cheat, tuple, ProCheat | None, str]] = {}
         self._filling = False
 
         self.cheat_list = QListWidget()
@@ -219,6 +233,8 @@ class CheatsTab(ProTab):
 
     def fill(self) -> None:
         keep = self.selected()
+        shown = {id(c) for c in self.cheats}
+        self._previews = {k: v for k, v in self._previews.items() if k in shown}
         self._filling = True
         try:
             self.cheat_list.clear()
@@ -242,12 +258,24 @@ class CheatsTab(ProTab):
         self.preview = None
         self.preview_why = ""
         if c is not None and c.pro is None and self.assembler is not None:
-            try:
-                self.preview = adopt(c, "preview", self.assembler)
-            except Exception as exc:  # shown read-only: say why it can't be adopted
-                log.info("action=pro_preview cheat=%s reason=%s", c.name, exc)
-                self.preview_why = str(exc)
+            self.preview, self.preview_why = self._preview_of(c)
         self._fill_detail()
+
+    def _preview_of(self, c: Cheat) -> tuple[ProCheat | None, str]:
+        """A guided cheat as it would be adopted, or why it can't be. Kept per cheat
+        until its lines change, so a list refresh (e.g. a tick in My cheats) doesn't run
+        the assembler again (O10)."""
+        key = _preview_key(c)
+        kept = self._previews.get(id(c))
+        if kept is not None and kept[0] is c and kept[1] == key:
+            return kept[2], kept[3]
+        try:
+            preview, why = adopt(c, "preview", self.assembler), ""  # type: ignore[arg-type]
+        except Exception as exc:  # shown read-only: say why it can't be adopted
+            log.info("action=pro_preview cheat=%s reason=%s", c.name, exc)
+            preview, why = None, str(exc)
+        self._previews[id(c)] = (c, key, preview, why)
+        return preview, why
 
     def _fill_detail(self) -> None:
         c, pc = self.selected(), self.pc
@@ -748,4 +776,4 @@ class CheatsTab(ProTab):
         self.msgs.say(hints.IMPORTED.format(n=added))
 
     def do_export(self) -> None:
-        self.exec_dialog(ExportDialog(self.ctl, self.msgs, self))
+        self.exec_dialog(ExportDialog(self.ctl, self.msgs, self, watch=self.watch))

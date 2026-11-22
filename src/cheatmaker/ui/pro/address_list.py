@@ -1,6 +1,7 @@
 """The Pro address list (spec PR-2): description, type, value, set, freeze, group,
-comment and badge, plus Show in Memory and Pointer scan. Freezes use the shared
-Freezer under ``pro:`` keys, so they never touch a guided freeze."""
+comment and badge, plus Show in Memory, Pointer scan and Find what writes / accesses.
+Freezes use the shared Freezer under ``pro:`` keys, so they never touch a guided
+freeze."""
 
 from __future__ import annotations
 
@@ -20,8 +21,10 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from cheatmaker.console.client import WatchKind
 from cheatmaker.core.pro import addresses as ad
 from cheatmaker.core.pro import compile as pc_compile
+from cheatmaker.core.pro.watch_session import MAX_WATCH_SLOTS, WatchTarget
 from cheatmaker.core.values import ValueType
 from cheatmaker.ui.controller import Controller
 from cheatmaker.ui.pointer_dialog import PointerDialog
@@ -51,6 +54,7 @@ class AddressListTab(ProTab):
         self.rows: list[ad.AddressRow] = []
         self.writer = pc_compile.ProWriter(ctl.session, warn=self.msgs.say)
         self.show_memory: Callable[[int], None] = lambda addr: None  # set by the window
+        self.watch: Callable[[list[WatchTarget]], None] = lambda targets: None  # the window
         self.ask_text: Callable[[str, str, str], str | None] = self._ask_text
         self.exec_dialog: Callable[[object], object] = lambda d: d.exec()
         self._filling = False
@@ -68,9 +72,6 @@ class AddressListTab(ProTab):
         self.pointer_btn = QPushButton("Pointer scan...")
         self.writes_btn = QPushButton(hints.FIND_WRITES)
         self.accesses_btn = QPushButton(hints.FIND_ACCESSES)
-        for b in (self.writes_btn, self.accesses_btn):
-            b.setEnabled(False)  # the Watch tab (architecture step 17)
-            b.setToolTip(hints.WATCH_LATER)
 
         row = QHBoxLayout()
         for w in (
@@ -94,6 +95,8 @@ class AddressListTab(ProTab):
         self.refresh_btn.clicked.connect(self.refresh_values)
         self.memory_btn.clicked.connect(self._show_memory)
         self.pointer_btn.clicked.connect(self.do_pointer)
+        self.writes_btn.clicked.connect(lambda: self.find_what("write"))
+        self.accesses_btn.clicked.connect(lambda: self.find_what("access"))
         self.table.itemChanged.connect(self._item_changed)
         self.table.itemSelectionChanged.connect(self._update_buttons)
         self._update_buttons()
@@ -169,6 +172,20 @@ class AddressListTab(ProTab):
         self.memory_btn.setEnabled(one)
         self.pointer_btn.setEnabled(one)
         self.refresh_btn.setEnabled(bool(self.rows))
+        picked = 0 < len(self.selected_rows()) <= MAX_WATCH_SLOTS
+        self.writes_btn.setEnabled(picked)
+        self.accesses_btn.setEnabled(picked)
+
+    def find_what(self, kind: WatchKind) -> None:
+        """Find what writes / accesses the picked rows (up to 4): the Watch tab."""
+        rows = self.selected_rows()[:MAX_WATCH_SLOTS]
+        try:
+            targets = [WatchTarget(r.address, r.vtype.size, kind) for r in rows]
+        except ValueError as exc:  # an address the PS5 can't watch at that size
+            self.msgs.fail(exc, "pro_watch")
+            return
+        if targets:
+            self.watch(targets)
 
     def frozen_count(self) -> int:
         return sum(row.frozen is not None for row in self.rows)

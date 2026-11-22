@@ -33,7 +33,7 @@ from cheatmaker.core import updater as up
 from cheatmaker.core.cheats import Cheat, Location, LocationKind, value_positions
 from cheatmaker.core.locker import MAX_INSN, instruction_before, touches_memory, writes_memory
 from cheatmaker.core.project import HookAnchor, HookFilter, ObjectSpec, Role
-from cheatmaker.core.session import Session
+from cheatmaker.core.session import GUIDED_DEBUGGER, Session
 from cheatmaker.core.values import ValueType
 from cheatmaker.errors import ConsoleBusy, FindFailed, LockFailed, ReadFailed, ScanCancelled
 
@@ -144,7 +144,10 @@ def find_hooks(
     the watch early (the hits so far are used; the caller checks ``cancel``)."""
     game = session.require_game()
     client = session.require_client()
-    hits = client.watch(game.pid, address, size, "access", seconds, until=_until_cancelled(cancel))
+    with session.claim_debugger(GUIDED_DEBUGGER):
+        hits = client.watch(
+            game.pid, address, size, "access", seconds, until=_until_cancelled(cancel)
+        )
     log.info("action=hook_watch address=%#x hits=%d", address, len(hits))
     read = lambda a, n: client.read(game.pid, a, n)  # noqa: E731
     cands = [
@@ -419,7 +422,8 @@ def prove_slot(
     client = session.require_client()
     if client.read(game.pid, slot, cv.SLOT_SIZE) != bytes(cv.SLOT_SIZE):
         raise FindFailed("The spare memory Cheat Maker wanted to use isn't free.")
-    hits = client.watch(game.pid, slot, 8, "write", seconds, until=_until_cancelled(cancel))
+    with session.claim_debugger(GUIDED_DEBUGGER):
+        hits = client.watch(game.pid, slot, 8, "write", seconds, until=_until_cancelled(cancel))
     if cancel is not None and cancel.is_set():
         raise ScanCancelled("checking the spare memory was cancelled")
     still_zero = client.read(game.pid, slot, cv.SLOT_SIZE) == bytes(cv.SLOT_SIZE)

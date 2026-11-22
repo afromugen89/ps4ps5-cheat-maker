@@ -24,7 +24,61 @@ TAB_CODE = "Code"
 TAB_MEMORY = "Memory"
 TAB_WATCH = "Watch"
 TAB_CHEATS = "Cheats"
-WATCH_LATER = "Find what writes or accesses an address comes in a later update."
+
+# -- Watch (PR-3) -----------------------------------------------------------------------------
+WATCH = (
+    "Add up to 4 addresses, pick Writes or Accesses, then Start and play until the value "
+    "changes. Each instruction that touched it is listed with how often. The game pauses "
+    "briefly at every hit."
+)
+WATCH_OWNER = "Pro's Watch tab"
+WATCH_KINDS = {"write": "Writes", "access": "Accesses", "execute": "Runs"}
+WATCH_FULL = "Watch at most 4 addresses at a time. Remove one first."
+WATCH_NONE = "Add an address to watch first."
+WATCH_BUSY = "A watch is running. Stop it first."
+WATCH_STARTING = "Starting the watch (the PS5 connects back on port 755)..."
+WATCH_RUNNING = "Watching: {hits} hit(s) · {left} s left"
+WATCH_ENDED = {
+    "time": "Time's up: {hits} hit(s).",
+    "hits": "Stopped at {hits} hits (the limit).",
+    "stopped": "Stopped: {hits} hit(s).",
+    "lost": "The watch ended: {reason} The list shows the hits so far.",
+    "failed": "The watch couldn't go on: {reason}",
+    "repeats": "{reason}",
+}
+WATCH_GAME_GONE = "The game isn't running, so the watch ended. Nothing was written."
+WATCH_PICK_ROW = "Pick an instruction in the list first."
+WATCH_NOT_MODULE = "That instruction isn't in the game's own code, so no cheat can patch it."
+REGS_UNVERIFIED = " (unverified)"
+REGS_UNVERIFIED_TIP = (
+    "Registers other than RIP aren't proven on PS5Debug-NG yet (console test S-P1). Check "
+    "them before you rely on them."
+)
+SHOW_CODE = "Show in Code"
+ACCESS = (
+    "What does an instruction access? Type where it is (e.g. eboot.bin+0x1234) and press "
+    "Run: for {seconds} s every address it reads or writes is listed. The game keeps "
+    "running."
+)
+ACCESS_BUTTON = "What does it access?"
+ACCESS_RUNNING = "Sampling: {n} address(es) so far..."
+ACCESS_DONE = "{n} address(es) seen in {polls} look(s)."
+ACCESS_STOPPED = "Stopped: {n} address(es) seen."
+ACCESS_SITE_CHANGED = (
+    "The instruction was changed by another cheat while sampling, so it was left as "
+    "it is; the sampler's jump may remain until the game restarts."
+)
+ACCESS_WATCH_TITLE = "No room for the sampler"
+ACCESS_WATCH_ASK = (
+    "{reason}\n\nWatch the instruction instead? The game pauses briefly each time it runs."
+)
+ACCESS_WATCHED = (
+    "{n} address(es) from {hits} pass(es), worked out from the registers (unverified until "
+    "console test S-P1)."
+)
+ACCESS_ADD = "Add to address list"
+ACCESS_BUSY = "A sample is running. Stop it first."
+WATCH_SIZE_TIP = "How many bytes to watch: the value's size."
 
 # -- Cheats tab and cave editor (PR-8) ------------------------------------------------------
 CHEATS = "Pick a cheat. Guided cheats open read-only: press Edit in Pro to change them."
@@ -64,7 +118,11 @@ EXPORT_COUNT = "{n} cheat(s) go in the file."
 EXPORT_LEFT_OUT = "These need Cheat Maker running, so they are left out:"
 EXPORT_NONE_LEFT_OUT = "Every cheat goes in the file."
 MAKE_CAVE = "Make a cave at its writer"
-MAKE_CAVE_LATER = "Needs the Watch tab, which comes in a later update."
+MAKE_CAVE_TIP = (
+    "Watch what writes this value, then pick the writer and press Make cave entry here: a "
+    "cave at the writer works in CheatRunner."
+)
+MAKE_CAVE_CANT = "Cheat Maker can't tell where this value is right now, so it can't be watched."
 EXPORT_SAVED = "Saved to {path}."
 IMPORT_TITLE = "Import a cheat file"
 IMPORT_REFUSED = "Not imported:"

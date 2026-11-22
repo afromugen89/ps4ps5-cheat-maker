@@ -313,6 +313,13 @@ and frozen cheats stopped working. Searches now run on their own connection to t
 Pro features (docs/spec-pro.md, docs/architecture-pro.md). Each C-P test names the step
 that makes it runnable in the app.
 
+### C-P1 Pro window (step 11)
+
+| # | Test | Steps | Pass when | Send back |
+|---|---|---|---|---|
+| C-P1a | Same game, no new connection (AC-1.1) | Connect and start a game. Press **Pro**. Look at each tab. | The top line shows the same title, title ID, version and PID as the main window; the safety notice shows once for this game (not again after closing and reopening Pro). The log has no new `action=connect` and no `action=pro_debug_attach` lines. | The two top lines. |
+| C-P1b | Game closed (AC-1.2) | With Pro open (and a watch running, once step 17 is in), close the game on the PS5. | Within 5 s every tab says "Game not running"; a running watch ends with "Nothing was written"; the app stays connected. | The `action=pro_game_alive` line and its time. |
+
 ### C-P2 Pro scanner codes (runnable once the Pro Scanner tab ships, step 15)
 
 The guided screens never send these, so nothing the app does today depends on them.
@@ -328,3 +335,54 @@ proven ValueBetween range.
 | C-P2b | Greater / less than as a first scan | Exact **greater than** (your gold − 1), 4-byte whole number. | Your gold is listed; every listed value is greater. Log shows a ValueBetween scan (no BiggerThan). | The count and `action=scan_stats` lines. |
 | C-P2c | Greater / less than on the console | **Unknown first value** (4-byte whole number). Spend gold, then **less than** (old gold), then gain some, **greater than** (the amount before gaining). | The count drops each time and your gold stays listed. Log shows `cmp=between` (no BiggerThan / SmallerThan). | The `action=resident_next` lines. |
 | C-P2d | Paging and three values | After C-P2c, page to the second 1,000 rows (needs > 1,000 matches: stop after the first compare), and look at Previous / First. | Page 2 shows other addresses than page 1 (not the same rows again). Previous holds the value before the last compare; First (if shown) the value at the unknown scan. | Whether page 2 repeated page 1, and one row's Value / Previous / First. |
+
+### C-P3 Pro debugger session (runnable once the Watch tab ships, step 17)
+
+The Pro debugger (`console/debugger.py`) has its own connection and owns port 755. Its
+behaviour follows ReaperPy and our reading of PROTOCOL.md and is **UNVERIFIED** on
+PS5Debug-NG: that the PS5 dials back as soon as it attaches, the "already debugged"
+answer, `VERSION` as a keep-alive on the debugger connection, the four watch slots, and DR6
+in the stop packet. These are spikes S-P1/S-P2. Until they pass, the Watch tab marks
+registers "unverified" (AC-3.3).
+
+| # | Test | Steps | Pass when | Send back |
+|---|---|---|---|---|
+| C-P3a | Attach and the back channel | Pro > Watch. Type your health's address, **Writes**, **Start**. Take a hit, then **Stop**. | The status line says the watch runs within 2 s of Start. The log shows `action=pro_debug_attach` and `action=pro_debug_back_channel`. After Stop the game runs on. | Both log lines and their `took_ms`. |
+| C-P3a3 | Wired and Wi-Fi | Only on a PS5 with both a cable and Wi-Fi connected: connect Cheat Maker to one of its addresses, then do C-P3a. | The watch starts. If the PS5 dials back from its other address, Cheat Maker refuses it (`action=pro_debug_back_channel peer=... result=not_the_console`) and says the firewall message after 10 s. | Which address the PS5 dialled back from, the `pro_debug_back_channel` lines, and what the status line said. |
+| C-P3a2 | A second watch right away (Windows TIME_WAIT) | Right after C-P3a's Stop, press **Start** again at once, then **Stop**; repeat three times. | Every Start runs within 2 s; never "Port 755 is in use" (port 755 is bound with `SO_EXCLUSIVEADDRUSE` and the last connection may still be in TIME_WAIT). | Any "in use" message, and the `action=pro_debug_listen` lines if there are any. |
+| C-P3b | Firewall message | Block TCP port 755 in Windows Firewall (inbound rule), then repeat C-P3a. Remove the rule afterwards. | Within 10 s of Start (the attach reply and the dial-back share one 10 s deadline): "The PS5 didn't connect back on TCP port 755..."; the game runs on (Cheat Maker sends `DEBUG_DETACH` on a fresh connection); a second Start after removing the rule works. | The message and the `action=pro_debug_attach result=no_back_channel` line. |
+| C-P3c | Already debugged | Start a watch, then end Cheat Maker from Task Manager while it runs. Start Cheat Maker, connect, and start the watch again. | The watch starts (the log shows `result=already_debugged retry=1`), or the message names what the PS5 answered. | The `action=pro_debug_attach` lines. |
+| C-P3d | Four slots and DR6 | Pro > Watch: add health (**Writes**) and ammo (**Accesses**) to the watch list (slots 0 and 1), **Start**. Take a hit, then fire. | Each row's Watch column names its own address; the log's `action=pro_watch_hit` lines show `slot=0` for the health writer and `slot=1` for the ammo instructions. | The `action=pro_watch_hit` lines, and the raw stop status from the `action=pro_debug_stop ... status=0x...` lines (expected `0x57f`: stopped by SIGTRAP; Cheat Maker treats 0 as a hit too until this is known). |
+| C-P3e | Keep-alive and detach | Start a watch on a value nothing changes and leave it for the full 60 s. Then start one and pull the PC's network cable for 10 s. | The first ends by time with no "stopped answering" message and the game runs on. The second ends within 10 s with "The debugger's connection stopped answering"; the main window stays connected once the cable is back (or says it lost the PS5, as C6). | The `action=pro_debug_keepalive` and `action=pro_debug_lost` lines. |
+
+### C-P4 Watch tab (runnable with step 17; spikes S-P1/S-P2)
+
+| # | Test | Steps | Pass when | Send back |
+|---|---|---|---|---|
+| C-P4a | Find what writes (AC-3.1, AC-3.2) | Find your health in Pro > Scanner, add it to the address list, press **Find what writes**. Take 3 hits, then **Stop**. | Within 1 s of each hit the writer's count goes up; it ends at ≥ 3; its instruction is a write to memory (the one *before* the reported RIP). After Stop the game runs on and the list stays. | A screenshot of the list and the `action=pro_watch_*` lines. |
+| C-P4b | Registers (S-P1, AC-3.3) | In C-P4a's row, read First hit: the base register of the instruction (e.g. `r12` for `[r12+0x2ac]`) plus the displacement. | base + displacement equals the health address on 3 hits. When it does, tell us: the "(unverified)" mark can go. | The First hit text and the health address. |
+| C-P4c | Find what accesses (S-P2) | Same address, **Find what accesses**. Open the inventory or HUD, take a hit. | Readers are listed as well as the writer. | The list. |
+| C-P4d | Limits | A value the game reads every frame (e.g. your position). **Find what accesses**, Start. | It ends at 500 hits (or 60 s) by itself, the game stutters only while it runs, and the game runs on afterwards. | How long it took to reach 500 and how bad the stutter was. |
+
+### C-P5 What does this instruction access (runnable with step 18)
+
+| # | Test | Steps | Pass when | Send back |
+|---|---|---|---|---|
+| C-P5a | Sampler (AC-3.4) | Find the health writer with C-P4a. Pick its row, press **What does it access?**, and fight 2-3 enemies for the 20 s. | The game never pauses; the player's and the enemies' health addresses are listed (base + offset), each with a Seen count. Afterwards the game runs normally and Pro > Code at the writer shows the game's own bytes again. | The list and the `action=pro_sample` lines. |
+| C-P5b | No room (AC-3.5) | Only if a game has no spare code at its end: set `"trace_exec_breakpoint": true` in settings.json, then run C-P5a there. | "No room for the sampler..." with the offer to watch instead (without the setting: the message only); Yes lists addresses from an instruction watch, and the game runs on after it. | The message and the `action=pro_sample result=no_room` line. |
+
+### C-P6 to C-P14 the rest of Pro (step 19 build)
+
+| # | Test | Steps | Pass when | Send back |
+|---|---|---|---|---|
+| C-P6 | Code view (AC-6.1, AC-6.2) | Pro > Code, type the writer from C-P4a (`eboot.bin+0x...`), **Go**. Then turn on a Pro cheat hooked there and tick **Show original**. | The page shows within 1 s with that instruction selected; with the cheat on, the line shows the cheat's name, and Show original shows the game's own instruction. | The time to load and a screenshot. |
+| C-P7 | Memory view (AC-7.1) | Pro > Memory, type an address at the end of a memory map (from the address list: a heap value, then Next page until the end). | `??` where the game has no memory; no disconnect. | A screenshot. |
+| C-P8a | Cave editor (AC-8.1, AC-8.2) | Make a cave entry at the writer, type `original` and `jmp return`, then a typo on a new line. | Bytes show within 0.5 s of stopping typing; the typo shows its line number and NASM's message; **Build** places it and shows "Cave: N bytes · room for M". | The `action=pro_asm` and `action=pro_build` lines. |
+| C-P8b | On and off (AC-8.4, AC-8.5, AC-8.6, AC-8.8) | Turn the cheat on, take damage, turn it off, take damage. Then make a second cheat with a NOP entry at the same writer and turn both on. | On: the cave is written before the jump (log order), the game runs with the cheat. Off: the jump goes back first, the cave is zeroed half a second later. The second cheat is refused naming the first (AC-8.8). Any `action=pro_write_ff` line shows a warning once. | The `action=pro_enable`, `action=pro_disable` and `action=pro_write` lines. |
+| C-P8c | Live variable (AC-8.7) | Add a float variable `mult` = 2.0 used by the cave (`mulss xmm1, [mult]`), Build, turn on, change it to 5.0. | Only the variable's 4 bytes are written (one `action=pro_write` of len=4) and the game uses the new value at once. | The write line. |
+| C-P9 | Reference points (AC-9.1, AC-9.2) | After a game update: open the old version's Pro cheats with **Bring them over**. | Each Pro entry is found again by its fingerprint, or listed as "can't find". | The `action=pro_carry` lines. |
+| C-P10 | Import (AC-14.1) | Import a `.mc4` made by ReaperPy (or another tool) and a `.json`; press **Convert to assembly** on a cave. | Bytes entries per line; the converted cave re-assembles to the same bytes (or names the instruction it can't express); a section ≠ 0 mod is refused with a message. | The `action=pro_import` lines. |
+| C-P11 | Windows build (step 19) | On a PC without Python, unzip the build and run `CheatMaker.exe --self-check`, then start it normally, open Pro and type a cave. | `--self-check` exits 0 (run it from PowerShell: `Start-Process ... -Wait -PassThru`); the cave editor assembles (no "Assembler not found"); Windows Firewall asks about port 755 on the first watch. | Anything the antivirus said about `nasm.exe`. |
+| C-P12 | Export runs in CheatRunner (AC-12.3) | Export the project as `.json`, `.shn` and `.mc4` (one at a time), send each to the PS5, restart the game, turn each cheat on in CheatRunner with the PC off. | Each cheat works with the PC off, in every format. | Which formats loaded, and any cheat that didn't work. |
+| C-P13 | mc4 names (AC-12.4, S-P8) | A game whose title has `&` (e.g. Ratchet & Clank) and a cheat named `A & B <x> "y"`; export `.shn` and `.mc4` and load both in CheatRunner. | The `.shn` shows the name as typed; the `.mc4` shows `A + B (x) 'y'`; both load. | How CheatRunner shows both names. |
+| C-P14 | Log audit (spec §7) | After C-P4a, C-P5a, C-P8b and C-P12, press **Copy log**. | Every Pro write, attach, watch and export has its `action=pro_*` line (`pro_write`, `pro_debug_attach`, `pro_watch_start` / `pro_watch_end`, `pro_sample`, `pro_export`). | The copied log. |

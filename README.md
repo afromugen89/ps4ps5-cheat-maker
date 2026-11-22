@@ -48,6 +48,7 @@ ruff check src tests tools && ruff format --check src tests tools
 - `tools/record_dump.py`: record a real game's memory for `FakeConsole.from_dump()`.
 - `tools/watch_regs.py`: console test C10a, which instructions touch a value and their registers.
 - `tools/fetch_nasm.py`: downloads the pinned NASM (SHA-256 checked) into `vendor/nasm/` for the Pro cave editor; tests marked `needs_nasm` skip without it.
+- `cheatmaker.spec`: the Windows build (PyInstaller folder build with NASM in `nasm/` and the notices). Run `python tools/fetch_nasm.py`, then `pyinstaller --noconfirm cheatmaker.spec`; check it with `dist\CheatMaker\CheatMaker.exe --self-check` (exit code 0: every module loads and the bundled assembler is there; the report is also written to `self-check.txt` next to the exe and to the log).
 - `docs/console-tests.md`: checks that need a real PS5.
 - `.claude/agents/`: the five workflow agents (requirements-challenger, architect, feature-implementor, pr-reviewer, qa-engineer).
 

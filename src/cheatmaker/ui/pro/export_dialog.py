@@ -3,6 +3,7 @@ and the PC-only cheats listed with why they are left out."""
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from pathlib import Path
 
@@ -21,17 +22,26 @@ from PySide6.QtWidgets import (
 from cheatmaker import formats
 from cheatmaker.console.uploader import save_to_pc
 from cheatmaker.core.pro.badge import pc_only, runner_cheats
+from cheatmaker.core.pro.watch_session import WatchTarget, value_target
 from cheatmaker.paths import default_save_dir
 from cheatmaker.ui.controller import Controller
 from cheatmaker.ui.pro import hints
 from cheatmaker.ui.pro.tab import ProMessages
 from cheatmaker.ui.save_dialog import ask_overwrite
 
+log = logging.getLogger(__name__)
 EXPORT_FORMATS = (("json", ".json (GoldHEN)"), ("shn", ".shn"), ("mc4", ".mc4"))
 
 
 class ExportDialog(QDialog):
-    def __init__(self, ctl: Controller, msgs: ProMessages, parent=None) -> None:
+    def __init__(
+        self,
+        ctl: Controller,
+        msgs: ProMessages,
+        parent=None,
+        watch: Callable[[list[WatchTarget]], None] | None = None,
+    ) -> None:
+        """``watch``: "Make a cave at its writer" hands the value to the Watch tab."""
         super().__init__(parent)
         self.setWindowTitle(hints.EXPORT_TITLE)
         self.ctl = ctl
@@ -48,8 +58,9 @@ class ExportDialog(QDialog):
         self.left_label = QLabel("")
         self.left_out = QListWidget()
         self.make_cave_btn = QPushButton(hints.MAKE_CAVE)
-        self.make_cave_btn.setEnabled(False)  # needs Watch (architecture step 17)
-        self.make_cave_btn.setToolTip(hints.MAKE_CAVE_LATER)
+        self.make_cave_btn.setToolTip(hints.MAKE_CAVE_TIP)
+        self.watch = watch or (lambda targets: None)
+        self.left: list = []  # (cheat, badge) of the PC-only cheats, as listed
         self.file_label = QLabel("")
         self.result = QLabel("")
         self.result.setWordWrap(True)
@@ -79,6 +90,8 @@ class ExportDialog(QDialog):
         self.fmt.currentIndexChanged.connect(lambda _i: self._refresh())
         self.save_btn.clicked.connect(self.do_export)
         self.close_btn.clicked.connect(self.accept)
+        self.make_cave_btn.clicked.connect(self.make_cave)
+        self.left_out.currentRowChanged.connect(lambda _r: self._update_make_cave())
         self._fill()
         self._refresh()
 
@@ -90,6 +103,7 @@ class ExportDialog(QDialog):
         n = len(runner_cheats(self.cf.cheats))
         self.count.setText(hints.EXPORT_COUNT.format(n=n))
         left = pc_only(self.cf.cheats, self.ctl.project)
+        self.left = list(left)
         self.left_label.setText(hints.EXPORT_LEFT_OUT if left else hints.EXPORT_NONE_LEFT_OUT)
         self.left_out.setHidden(not left)
         self.make_cave_btn.setHidden(not left)
@@ -98,6 +112,32 @@ class ExportDialog(QDialog):
             item.setToolTip(badge.tooltip)
             self.left_out.addItem(item)
         self.save_btn.setEnabled(n > 0)
+        self._update_make_cave()
+
+    def _target(self) -> tuple[WatchTarget | None, str]:
+        """The watch for the picked PC-only cheat, or why there is none."""
+        k, game = self.left_out.currentRow(), self.ctl.session.game
+        if game is None or not 0 <= k < len(self.left):
+            return None, hints.MAKE_CAVE_TIP
+        try:
+            target = value_target(self.left[k][0], game.module_base)
+        except ValueError as exc:  # an address the PS5 can't watch
+            return None, str(exc)
+        return target, hints.MAKE_CAVE_TIP if target is not None else hints.MAKE_CAVE_CANT
+
+    def _update_make_cave(self) -> None:
+        target, tip = self._target()
+        self.make_cave_btn.setEnabled(target is not None)
+        self.make_cave_btn.setToolTip(tip)
+
+    def make_cave(self) -> None:
+        """AC-12.1: watch what writes the picked cheat's value; the Watch tab then makes
+        the cave entry at the writer."""
+        target, _tip = self._target()
+        if target is None:
+            return
+        self.accept()
+        self.watch([target])
 
     def _refresh(self) -> None:
         self.file_label.setText(f"File: {self.cf.file_name(self.format)}")
@@ -117,5 +157,12 @@ class ExportDialog(QDialog):
             self.msgs.fail(exc, "pro_export")
             return None
         self.saved = path
+        log.info(
+            "action=pro_export format=%s cheats=%d left_out=%d path=%s",
+            self.format,
+            len(runner_cheats(self.cf.cheats)),
+            len(self.left),
+            path,
+        )
         self.result.setText(hints.EXPORT_SAVED.format(path=path))
         return path

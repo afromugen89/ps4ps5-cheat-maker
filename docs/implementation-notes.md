@@ -997,3 +997,277 @@ Built from docs/architecture-pro.md (spec docs/spec-pro.md), implementation step
   - BUG-14: a tick or untick in My cheats emits `cheats_changed`, so Pro's tab follows.
   - BUG-15: the cave editor shows new built bytes for the same entry. With a draft, it
     assembles the draft again instead.
+
+## Cheat Maker Pro, R1 step 16: DebugSession (2026-11-22)
+
+- `console/debugger.py`: `DebugSession` has its own connection on 744. It is opened
+  only by `attach()`; `Ps5DebugNgClient.open_debugger(pid)` returns one that is still
+  detached.
+  - The 755 listener is bound before `DEBUG_ATTACH`. A failed bind gives `PortInUse`
+    naming the port.
+  - The attach reply and the PS5's dial-back share one deadline, `ATTACH_DEADLINE`
+    (10 s). If either misses it, the session detaches and raises `FirewallBlocked`
+    naming the port (AC-1.3). This was 5 s for the dial-back alone until the review
+    fixes below.
+  - On `ALREADY_DEBUG` it detaches, waits 2 s and retries once.
+  - Keep-alive is `VERSION` every 2 s, only while running and idle (never while a
+    thread is stopped or a command holds the socket). One miss makes the session
+    lost (the review fixes below changed this from two).
+  - Stop packets give a `StopEvent`: lwpid, thread name, registers, savefpu, DR6 and
+    signal. DR6 bits 0-3 give the slot. Signal 9 or the back channel closing raises
+    `DebuggerLost`.
+  - `detach()` clears all four slots, sends `DEBUG_DETACH` and closes the sockets. It
+    is idempotent and runs on every end path (`with DebugSession(...)`).
+- Debugger failures are `DebuggerError` subclasses (`errors.py`), never
+  `ConnectionLost`, so a dropped debugger socket never disconnects the main session.
+- `client.py`: `StopEvent`, the `Debugger` protocol, `DEBUG_SLOTS` and
+  `open_debugger(client, pid)`. `open_debugger` is not part of `ConsoleClient`, so
+  simple test doubles stay valid.
+- `FakeDebugger` (`FakeConsole.debugger`, handed out by `open_debugger`):
+  - scripted `FakeStop`s, delivered only while their slot is set;
+  - records every call;
+  - failure modes `port_in_use`, `back_channel=False`, `already_debugged_once`,
+    `game_exits_after` and `lost_after`;
+  - a `FakeClock` that moves instead of sleeping.
+- Tests: `tests/unit/test_debugger.py` runs against a local server that speaks the
+  debugger commands and dials back.
+- Unverified on the console: the dial-back at attach, the keep-alive on the debugger
+  socket, four slots and DR6 (C-P3a..e in docs/console-tests.md, spikes S-P1/S-P2).
+
+## Cheat Maker Pro, R1 step 17: Watch tab (2026-11-22)
+
+- `core/pro/watch_session.py`: `WatchSession` runs up to 4 `WatchTarget`s (one per
+  slot) on a `Debugger` until Stop, `seconds` or `max_hits`.
+  - Each stop is resumed at once, then grouped into an `InstructionRow` per
+    (instruction, slot). A row holds the count and the first and last hit.
+  - Data watches name the instruction ending at RIP (`locker.instruction_before`
+    with `touches_memory`). Execute watches name the instruction at RIP. Lookups are
+    cached per RIP. An unreadable or undecodable RIP gives "?".
+  - DR6 that names no running slot goes to the only watch, else to slot None.
+  - Every end path detaches. `DebuggerLost` ends with `LOST` and keeps the rows.
+  - `REGISTERS_VERIFIED = False` until S-P1 passes; it drives the "(unverified)"
+    headers (AC-3.3).
+  - `value_target(cheat, base)` gives the watch for "Make a cave at its writer".
+- `Session.claim_debugger(owner)`: one debugger user at a time.
+  - The guided watches (Lock it's `find_writers`, the anchor hook and slot checks, and
+    both tracer watches) claim it as `GUIDED_DEBUGGER`; the Watch tab claims it as
+    "Pro's Watch tab".
+  - A second claimant gets `DebuggerInUse` naming the holder. Guided screens show it
+    through the new `DebuggerError` entry in `ui/messages.py`; no other guided
+    behaviour changes.
+- Settings `pro_watch_seconds` (60; kept to 5-600) and `pro_watch_hits` (500; kept
+  to 1-5000).
+- `ui/pro/watch_tab.py`:
+  - a watch list of up to 4 (address, size, Writes/Accesses), Start/Stop, and live
+    counts by signal;
+  - result columns Watch, Address, Instruction, Count, First hit and Last hit;
+  - actions Show in Code, Make cave entry here and Make NOP entry here (module code
+    only);
+  - the game going away, a new game or closing Pro stops the watch.
+  - The address list's Find what writes / accesses (up to 4 picked rows) and the
+    export dialog's "Make a cave at its writer" (a write watch on the PC-only
+    cheat's value) open it.
+- Console tests C-P4a..d.
+
+## Cheat Maker Pro, R1 step 18: access sampler (2026-11-22)
+
+- `core/pro/access_sampler.py`: `sample(session, site, writer, ...)` answers "what
+  does this instruction access" (AC-3.4).
+  - `operand_at` needs a memory operand `[base + disp]`: one 64-bit general register,
+    no index, not RIP or RSP. A displacement of 0 is fine here, unlike Player only.
+  - An enabled cheat that patches the site or the hooked span is refused
+    (`Overlap`, naming it).
+  - The sampler code is `cave.sampler_code`, placed with `find_cave` /
+    `find_table`, keeping out of Pro caves and the code lines of open cheats.
+  - Every 0.25 s the table is read and zeroed. A row's "Seen" count is the number of
+    polls that saw the object. The 64-slot table is hashed, so two objects sharing a
+    slot in the same poll keep only one.
+  - At the end the hook is removed (read back), then after `DISABLE_WAIT` the table
+    and **the sampler cave are zeroed**. This follows Pro's own off rule (AC-8.5), so
+    repeated samples don't use up the cave room. The guided collect leaves its cave
+    in place.
+- No room gives `NoRoomForSampler` (AC-3.5).
+  - The panel offers an execute watch on the instruction instead.
+  - `accesses_from_hits` turns its hits (registers before the instruction runs) into
+    the same rows.
+  - `WatchSession` gained `on_hit` for this.
+- `ui/pro/access_panel.py` sits under the Watch tab's list.
+  - Run / Stop, with rows for Address, Object and Seen, and Add to address list.
+  - It opens from Code ("What does it access?" on a module instruction) and from a
+    Watch row.
+- Console tests C-P5a/b.
+
+## Cheat Maker Pro, R1 step 19: packaging and docs (2026-11-22)
+
+- `cheatmaker.spec` (PyInstaller folder build, `dist/CheatMaker/`):
+  - `vendor/nasm/nasm.exe` goes to `nasm/` (where `paths.bundled_nasm_dir` looks when
+    frozen), with NASM's LICENSE beside it;
+  - `NOTICE`, `LICENSE` and `licenses/` go next to the app;
+  - no console window.
+  - It refuses to build without NASM unless `CHEATMAKER_NO_NASM=1` is set.
+- `CheatMaker.exe --self-check` (`app.self_check`) is the build's smoke test. It
+  imports every screen and finds the assembler, with no window; exit code 0 when all
+  is well.
+- CI gained a `build` job (Windows): fetch NASM, run PyInstaller, then
+  `--self-check` and check that `nasm.exe` and `NOTICE` are in the build. The job is
+  skipped while `tools/fetch_nasm.py` has no pinned SHA-256 (still open from step 1).
+- Log audit: every `action=` in `core/pro`, `ui/pro` and `console/debugger.py` is
+  `pro_*`, checked by a test. Export now logs `action=pro_export`.
+- `docs/user-guide.md` chapter 10 (Pro mode). `docs/console-tests.md`: C-P1, and
+  C-P6 to C-P14. C-P2 to C-P5 were added with their steps.
+- NOTICE credits ReaperPy for the debugger behaviour (step 16).
+- O10: the Pro Cheats tab keeps each guided cheat's preview, or the reason it can't
+  be adopted, in `_previews`.
+  - The cache is keyed by the cheat object and everything `adopt` reads: name, hint,
+    freeze, anchor, found again, and every line's kind, offset, on, off, module,
+    section and anchor.
+  - A list refresh, such as a My cheats tick, no longer runs the assembler. A changed
+    cheat gets a new preview.
+  - Entries for cheats no longer listed are dropped on `fill`.
+
+## Cheat Maker Pro, R1 steps 16-19: review fixes (2026-11-22)
+
+- **B1, a disconnect during a Pro job.** `ui/pro/tab.py` `JobGuard` follows Find the
+  real one (`trace_dialog`). The access sampler, its execute-watch fallback and the
+  Watch tab start their job through it:
+  - it registers a `Controller.before_disconnect` callback;
+  - Disconnect, Connect again or closing the app sets the job's cancel and waits up
+    to `STOP_WAIT_S` (3 s) for the job to finish, while the link still works. The
+    sampler's hook is out and the debugger detached before the main link closes;
+  - the callback is removed when the job ends.
+- **M1, the attach order.** The 755 accept runs on a thread before `DEBUG_ATTACH` is
+  sent, so a PS5 that dials back before replying works.
+  - The attach reply and the dial-back share one `ATTACH_DEADLINE` (10 s).
+  - A missing reply or no dial-back gives `FirewallBlocked` naming the port.
+    `DEBUG_DETACH` is then still sent: on the session's wire if it is live, else on a
+    fresh connection.
+  - `FakeDebugger` gained `never_reply` and `dial_before_reply`. The test server can
+    dial first or never reply.
+- **M2.** `ps5debug_ng.listen_options` sets `SO_EXCLUSIVEADDRUSE` on Windows and
+  `SO_REUSEADDR` elsewhere. Both the Pro listener and the guided `watch()` listener
+  use it. The guided behaviour is otherwise unchanged.
+- **M3, signals.** SIGTRAP (5) is a hit, and signal 9 means the game closed. Any other
+  signal ends the watch `LOST` with "The game stopped with signal N, not at a watch."
+  and detaches. Signal 0 also counts as a hit: what NG puts in the status field is
+  unverified (S-P1), and 0 is what an empty field gives. `FakeStop.signal` defaults
+  to 5.
+- **M4.**
+  - The execute-watch fallback for "No room for the sampler" is offered only with
+    `trace_exec_breakpoint` on, the same opt-in as guided. Otherwise only the
+    message shows.
+  - `WatchSession` ends `REPEATS` after `REPEAT_HITS` (16) stops in a row with the
+    same lwpid, RIP and registers. This is the rule of the tracer's
+    execute fallback (`tracer._repeats`). The tracer checks a finished batch of hits,
+    so the rule is written again here for a running stream.
+- **M5 / m7, the sampler's end.**
+  - The hook write (with its read-back) is inside the `try`, so a failed read-back
+    still restores the game's bytes.
+  - `_unhook` first reads the site:
+    - the game's bytes: nothing to do;
+    - the hook: restore it;
+    - anything else: something wrote there meanwhile, so it is left alone and logged
+      (`result=site_changed`).
+  - The sampler cave is zeroed only after a successful unhook, so nothing can still
+    jump into it.
+  - There is no extra refusal for a guided cheat turned on over an active sample.
+    That would need a new hook into the guided Lock it path, and the read-check
+    already keeps both sides safe.
+- **M6.** `WatchTarget` refuses an address that isn't a multiple of its size
+  (`MISALIGNED`, which names the aligned address to watch instead).
+  - The address list's Find what writes / accesses shows the message.
+  - The export dialog's "Make a cave at its writer" is disabled with the message as
+    its tooltip.
+  - The narrowed span is named in the message but not offered as a button.
+- **m1.** A failed keep-alive marks the wire dead at once and the session lost (it was
+  two misses). Detach then goes over a fresh connection.
+- **m2.**
+  - `WatchSession.run` turns any `CheatMakerError` into `FAILED` with its message and
+    always returns the rows so far.
+  - A `ConsoleBusy` while naming an instruction shows "?" for that hit and isn't
+    cached.
+- **m3.** When DR6 has several bits set, the slot is the one whose target the
+  instruction's memory operand touches (`operand_touches`). With no single match, the
+  slot is "?".
+- **m4.** `MAX_WATCH_SLOTS = 4` (S-P2 checks that four slots work). The address list
+  and the Watch tab use it.
+- **m5, decision: no gate.** The Watch tab stays live before S-P1 passes. Its
+  register columns are marked "(unverified)" (`REGISTERS_VERIFIED = False`).
+- **m6.** `--self-check`:
+  - sets up logging first;
+  - logs every line (`action=self_check`);
+  - writes `self-check.txt` next to the exe (or the app folder when run from source,
+    or when the exe's folder can't be written);
+  - checks the bundled `nasm/` copy directly, ignoring `nasm_path` and PATH.
+
+  CI prints the report.
+- **m8.** `FakeDebugger.detach` mirrors `DebugSession`: it clears the four slots and
+  sends detach, or sends only a fresh detach when the wire is dead.
+
+### Re-review fixes (2026-11-22)
+
+- **M-new.** Repeat detection (`REPEAT_HITS`) applies only to execute stops: every
+  watch that may have fired (the DR6 slots, or all watches when DR6 names none) is an
+  execute watch. A data watch traps after the instruction, so the same write from the
+  same place every frame is normal and runs on to the hit limit. A data stop between
+  execute stops restarts the count.
+- **m-A, the accept thread.**
+  - It sets `_back` (with its timeout) before it signals `_accepted`, under a lock
+    shared with `_close`.
+  - A dial back that arrives once the session is closing is closed, not kept.
+  - When the attach reply times out but the PS5 has already dialled back, the port
+    is open. That is `ATTACH_NO_REPLY` (a `DebuggerError`), not `FirewallBlocked`.
+- **m-D.** `_close` shuts the listener (`SHUT_RDWR`). The accept also polls every
+  `ACCEPT_POLL_S` (0.2 s) for the session's end, so a failed attach no longer waits
+  for the accept's deadline on OSes where closing a listener doesn't wake `accept`.
+- **m-B.** `ConnectionLost` (the main link, e.g. while naming an instruction) is no
+  longer turned into `FAILED`. It is re-raised after the detach, so the Watch tab's
+  error path reaches `Controller.fail` (every cheat off, "Lost connection").
+- **m-C.** `operand_touches` documents its limits: the registers are the ones after
+  the instruction ran, and `fs:`/`gs:` operands never match because the segment
+  bases aren't in the stop. A miss only makes the hit's watch "?".
+- **Stop status.** Every stop logs `action=pro_debug_stop ... status=0x...` with the
+  raw wait status. Console test C-P3d records it, to settle the signal-0 decision.
+- **Site changed.** When the sampler's unhook finds other bytes at the site,
+  `SampleResult.site_changed` is set. The panel then says once, before the result
+  line, that the instruction was changed by another cheat and the sampler's jump may
+  remain until the game restarts.
+
+### QA fixes (2026-11-22, qa/reports/2026-11-22-pro-steps-16-19.md)
+
+- **BUG-01, one sampler table.** `cave.find_table` always gives the same bytes at the
+  end of the game's data. The Pro sampler and the guided Player only collect (Lock it,
+  Make it work, Find it again, Bring them over) could therefore share it and wipe each
+  other's objects.
+  - `Session.claim_table(owner)` works like `claim_debugger`: one owner, named, and
+    always released.
+  - `find_table` refuses with `TableInUse` (a `LockFailed`) while someone holds the
+    table. Callers find the table, then claim it for as long as it is hooked: the
+    sampler, `cave.collect_objects` and `Builder` collect.
+  - A guided collect during a sample stops at once: "The sampler (Pro's What does it
+    access?) is using…". A sample during a guided collect is refused the same way.
+    Otherwise guided behaviour is unchanged.
+- **BUG-02.** After a failed attach, the fresh-connection `DEBUG_DETACH` runs on a
+  daemon thread, so `FirewallBlocked` comes within the deadline. The detach is still
+  always tried.
+- **BUG-05.** A new game while a watch runs sets a flag. When that watch ends or
+  fails, the old game's watch list and rows are cleared. The game only going away
+  (the same game) keeps them.
+- **BUG-04 / BUG-06.** These were doc fixes: user guide §10.3, and the step-16 notes
+  above (the 10 s shared deadline, one keep-alive miss). `GUIDED_DEBUGGER` now also
+  names Find it next time and Bring them over.
+- **Dial-back source.** The 755 dial-back is taken only from the console's IP
+  (`_console_ip(host)`). Other peers are closed and the wait goes on. A host name that
+  doesn't resolve accepts any peer, as before.
+- `action=pro_debug_stop` is logged at INFO for the first `STOP_LOG_INFO` (20) stops
+  of a session, and at DEBUG after that.
+- Console test C-P3a2: a second watch right after the first (Windows TIME_WAIT on
+  port 755).
+- **BUG-07.** Two guided collects swallowed `TableInUse`. Both now re-raise it before
+  their broad excepts, and the screen shows the sampler's message:
+  - Find it next time's `refind._field_filter` used to learn the hook with no Player
+    only filter.
+  - Bring them over's `carry.collect_classes` reported "no spare room", and the
+    dialog then dropped the hook way. Now the run rolls back with the old notes (and
+    their hook way) untouched.
+- **BUG-08.** `ACCEPT_POLL_S`'s docstring is back under it. Console test C-P3a3 is new:
+  a PS5 on both cable and Wi-Fi may dial back from its other address.

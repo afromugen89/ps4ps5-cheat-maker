@@ -760,6 +760,143 @@ where it got stuck.
 
 ---
 
+## 10. Pro mode (for experienced users)
+
+Pro is a second window for people who want to make each decision themselves. You scan by
+hand, find the instruction behind a value, read code and memory, and write NOP, byte and
+code-cave cheats in assembly. It uses the main window's connection and game, so connect
+there first. Then press **Pro** in the main window.
+
+> The first time you open Pro on a game it reminds you: single-player and offline only,
+> and back up your save first. Pro changes the game's memory and code directly.
+
+The line at the top shows the same game as the main window (title, title ID, version,
+PID). If the game closes, every tab says "Game not running" within a few seconds and any
+watch stops. Start the game again, then press **Refresh** in the main window. Pro has its
+own status line at the bottom; messages from Pro show there, not in the main window.
+
+### 10.1 Scanner and Address list
+
+- **Scanner**:
+  - Pick where to look: **Game data**, **All writable memory**, **All readable memory**
+    or **Game module**.
+  - Pick a number type (signed and unsigned whole numbers of 1, 2, 4 or 8 bytes, decimal
+    or double) and a compare (exact, between, greater or less than, increased or
+    decreased (by), changed, unchanged, unknown first value).
+  - Press **First scan**, change the value in the game, then **Next scan** until few are
+    left. Results come 1,000 at a time with the current, previous and (where the PS5
+    gives it) first value.
+  - **Find AOB** searches the game's code for bytes, with `??` for any byte.
+  - Double-click a result, or press **Add to address list**.
+- **Address list**:
+  - Type in **Value** to set it once. Tick **Freeze** to keep it there (10 times a
+    second).
+  - Group, comment and description are yours to fill in. The badge says whether a
+    cheat made from the address could run in CheatRunner.
+  - **Show in Memory**, **Pointer scan...**, **Find what writes** and **Find what
+    accesses** work on the picked rows.
+
+Only one search runs on the PS5 at a time. A Pro scan replaces the main window's search
+and the other way round, and each side says so.
+
+### 10.2 Code and Memory
+
+- **Code** shows 256 instructions at a time from any address (`eboot.bin+0x1234` or
+  `0x...`).
+  - Double-click a jump or call to follow it; use **Back** and **Forward** to retrace.
+  - Places a cheat that is on has patched show the cheat's name. **Show original** shows
+    the game's own bytes there.
+  - **Copy AOB** copies a fingerprint of the instruction (changing addresses left as
+    `??`).
+  - **Make NOP entry**, **Make cave entry** and **What does it access?** work on the
+    picked instruction.
+- **Memory** shows 4 KiB at a time in hex, with every number type at the picked byte.
+  `??` marks memory the game doesn't have. It is read-only for now.
+
+### 10.3 Watch: find what writes or accesses
+
+1. Add up to 4 addresses with their size and **Writes** or **Accesses** (or press Find
+   what writes / Find what accesses in the address list).
+2. Press **Start** and play until the value changes. The game pauses for a moment at each
+   hit.
+3. Each instruction that touched the value is listed with its hit count and the registers
+   of its first and last hit. The list stays when the watch ends (Stop, 60 s or 500 hits;
+   see `pro_watch_seconds` and `pro_watch_hits` in settings.json).
+4. Pick a row, then **Show in Code**, **Make cave entry here** or **Make NOP entry
+   here**.
+
+The register columns say "(unverified)" until a console test has proven them; check them
+before you rely on them. The debugger needs TCP port **755** open on the PC. If Windows
+Firewall blocks it, Pro says so within 10 seconds: allow Cheat Maker on private networks.
+Only one part of the app can use the debugger at a time. While a Pro watch runs, Lock it,
+Make it work, Find the real one, Find it next time and Bring them over don't wait: they
+stop at once with "The debugger is in use by Pro's Watch tab". Stop the watch, then try
+again. It works the other way round too: a Pro watch can't start while one of them is
+watching.
+
+**What does it access?** (under the Watch list, or from Code) hooks an instruction for 20
+seconds without stopping the game. It lists every address it read or wrote, the object
+(the register it uses) and how often it was seen. The hook comes out at the end. While it
+runs, the Player only collect (Lock it, Make it work, Find it again, Bring them over) can't
+start: it says the sampler is using the space it needs. Wait for the sample to end, or
+stop it. If the
+game has no spare room for the sampler, Pro says so. With `"trace_exec_breakpoint": true`
+in settings.json (the same opt-in as Find the real one), it offers to watch the instruction
+instead, which pauses the game each time the instruction runs.
+
+### 10.4 Cheats: entries, caves and variables
+
+The Cheats tab lists every cheat in My cheats. Guided cheats open read-only; press **Edit
+in Pro** to change one (freeze cheats can't be edited in Pro). After that, Lock it and
+Make it work leave it alone and say so.
+
+A Pro cheat is a list of **entries**:
+
+- **Bytes**: new bytes at a place.
+- **NOP**: an instruction switched off.
+- **Cave**: your assembly in spare space at the end of the game's code, reached by a jump
+  at the hook.
+
+The cave editor uses NASM syntax. It gives you:
+
+- `hook`: the patched place;
+- `return`: the first byte after the instructions the jump covers;
+- `original`: those instructions;
+- each variable by name.
+
+Bytes appear next to the text as you type, or the first error with its line. **Build**
+places the cave and keeps it. The editor says how big the cave is and how much room is
+free.
+
+**Variables** are constants at the end of the cave (int8 to int64, unsigned, float,
+double). Changing a value patches it straight into the built cave, and into the game when
+the cheat is on. Tick **In file** for the one variable CheatRunner users may change.
+
+**On** turns the cheat on:
+
+- Every place must still hold the bytes recorded for it. Otherwise nothing is written and
+  Pro shows what it expected and what it found.
+- Two cheats that change the same bytes can't be on together.
+- Turning off puts the jump back first and clears the cave half a second later.
+
+If the editor says **Assembler not found**, reinstall Cheat Maker or set `nasm_path` in
+settings.json to your `nasm.exe`. Turning cheats on and exporting still work without it.
+
+### 10.5 Export and import
+
+- **Export...** writes `.json` (GoldHEN), `.shn` or `.mc4` named `{TITLEID}_{VERSION}`.
+  Only cheats CheatRunner can run go in. The rest (heap addresses, pointer paths, values
+  found again each run) are listed with the reason. **Make a cave at its writer** watches
+  what writes such a value, so you can make a cave there that works in CheatRunner.
+- **Import...** reads `.json`, `.shn` or `.mc4` files as Bytes entries; caves show their
+  code. **Convert to assembly** turns an imported cave into a Cave entry that assembles
+  to the same bytes.
+
+Pro cheats are saved in the game's notes (`.cmproj`) with their source and their built
+bytes, and **Bring them over** moves them to a new game version like any other cheat.
+
+---
+
 ## Good to know
 
 Some of the newer features (Make it work, Find the real one behind it, Lock it, Player only, Find it next time, Bring them over, Test
