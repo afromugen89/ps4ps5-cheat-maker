@@ -37,6 +37,7 @@ def test_lists_every_object_the_writer_touches(g):  # AC-3.4
     assert {r.address for r in result.rows} == {o + fg.HP for o in seen}
     assert all(r.count == 1 for r in result.rows) and result.polls == 2
     assert result.operand.text == "vmovss [r12+0x2ac], xmm1"
+    assert not result.site_changed
 
 
 def test_hook_table_and_cave_are_cleared_at_the_end(g):  # AC-3.4
@@ -100,7 +101,8 @@ def test_a_site_changed_meanwhile_is_left_alone_and_the_cave_kept(g):  # m7
     def sleep(_s: float) -> None:
         g.fake.poke(fg.PID, fg.WRITER, other)
 
-    _sample(g, sleep=sleep)
+    result = _sample(g, sleep=sleep)
+    assert result.site_changed
     assert g.fake.peek(fg.PID, fg.WRITER, len(other)) == other
     assert g.fake.peek(fg.PID, cave, cv.CAVE_ROOM) != bytes(cv.CAVE_ROOM)
 

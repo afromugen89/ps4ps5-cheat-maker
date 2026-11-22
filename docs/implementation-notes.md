@@ -1200,3 +1200,32 @@ Built from docs/architecture-pro.md (spec docs/spec-pro.md), implementation step
   CI prints the report.
 - **m8.** `FakeDebugger.detach` mirrors `DebugSession`: it clears the four slots and
   sends detach, or sends only a fresh detach when the wire is dead.
+
+### Re-review fixes (2026-11-22)
+
+- **M-new.** Repeat detection (`REPEAT_HITS`) applies only to execute stops: every
+  watch that may have fired (the DR6 slots, or all watches when DR6 names none) is an
+  execute watch. A data watch traps after the instruction, so the same write from the
+  same place every frame is normal and runs on to the hit limit. A data stop between
+  execute stops restarts the count.
+- **m-A, the accept thread.**
+  - It sets `_back` (with its timeout) before it signals `_accepted`, under a lock
+    shared with `_close`.
+  - A dial back that arrives once the session is closing is closed, not kept.
+  - When the attach reply times out but the PS5 has already dialled back, the port
+    is open. That is `ATTACH_NO_REPLY` (a `DebuggerError`), not `FirewallBlocked`.
+- **m-D.** `_close` shuts the listener (`SHUT_RDWR`). The accept also polls every
+  `ACCEPT_POLL_S` (0.2 s) for the session's end, so a failed attach no longer waits
+  for the accept's deadline on OSes where closing a listener doesn't wake `accept`.
+- **m-B.** `ConnectionLost` (the main link, e.g. while naming an instruction) is no
+  longer turned into `FAILED`. It is re-raised after the detach, so the Watch tab's
+  error path reaches `Controller.fail` (every cheat off, "Lost connection").
+- **m-C.** `operand_touches` documents its limits: the registers are the ones after
+  the instruction ran, and `fs:`/`gs:` operands never match because the segment
+  bases aren't in the stop. A miss only makes the hit's watch "?".
+- **Stop status.** Every stop logs `action=pro_debug_stop ... status=0x...` with the
+  raw wait status. Console test C-P3d records it, to settle the signal-0 decision.
+- **Site changed.** When the sampler's unhook finds other bytes at the site,
+  `SampleResult.site_changed` is set. The panel then says once, before the result
+  line, that the instruction was changed by another cheat and the sampler's jump may
+  remain until the game restarts.

@@ -225,6 +225,53 @@ def test_no_attach_reply_is_the_firewall_and_detaches_on_a_fresh_connection(serv
     assert _wait(lambda: server.fresh_detaches == 1) and s.state == "detached"
 
 
+def test_dial_back_without_an_attach_reply_is_not_the_firewall(server):  # m-A
+    """It connected back, so the port is open: a stuck attach, said as such."""
+    server.dial_first = True
+    server.reply_attach = False
+    s = session(server, deadline=0.4)
+    with pytest.raises(DebuggerError, match="connected back") as caught:
+        s.attach()
+    assert not isinstance(caught.value, FirewallBlocked)
+    assert _wait(lambda: server.fresh_detaches == 1) and s.state == "detached"
+
+
+def test_a_failed_attach_doesnt_wait_for_the_accept_deadline(server):  # m-D
+    server.attach_answers = [Status.ERROR]
+    server.dial_back = False
+    s = session(server, deadline=5.0)
+    started = time.monotonic()
+    with pytest.raises(DebuggerError, match="wouldn't attach"):
+        s.attach()
+    assert time.monotonic() - started < 1.0  # the accept thread woke at once
+    assert s.state == "detached" and s._threads == []
+
+
+def test_a_dial_back_after_the_session_closed_is_closed(server):  # m-A
+    s = session(server)
+    a, b = socket.socketpair()
+    with b:
+        s._end.set()
+        s._take_back(a, ("127.0.0.1", 0))
+        assert s._back is None and a.fileno() == -1  # closed, not kept
+        s._end.clear()
+        c, d = socket.socketpair()
+        with c, d:
+            s._take_back(c, ("127.0.0.1", 0))
+            assert s._back is c
+
+
+def test_accept_until_stops_when_the_session_ends():  # m-D
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        end = threading.Event()
+        threading.Timer(0.1, end.set).start()
+        started = time.monotonic()
+        assert dbg._accept_until(listener, time.monotonic() + 5, end) is None
+        assert time.monotonic() - started < 1.0
+
+
 def test_attach_deadline_covers_reply_and_dial_back(server):
     """The whole attach stays within the deadline (AC-1.3: 10 s by default)."""
     assert dbg.ATTACH_DEADLINE <= 10
@@ -272,7 +319,8 @@ def test_set_watch_packet_and_validation(server):
         assert server.commands[-1][1] == struct.pack("<IIIIQ", 2, 0, 0, 0, 0)
 
 
-def test_a_stop_is_decoded_and_resume_continues(server):
+def test_a_stop_is_decoded_and_resume_continues(server, caplog):
+    caplog.set_level("INFO", logger="cheatmaker.console.debugger")
     s = session(server)
     with s:
         s.set_watch(1, ADDR, 4, "write")
@@ -282,6 +330,7 @@ def test_a_stop_is_decoded_and_resume_continues(server):
         assert (stop.lwpid, stop.thread, stop.slot, stop.signal) == (77, "GameThread", 1, 5)
         assert stop.hit.rip == 0x400105 and stop.hit.reg("rax") == 7
         assert stop.fpu[:4] == b"FPU!" and len(stop.fpu) == dbg.FPU_SIZE
+        assert "action=pro_debug_stop lwpid=77 status=0x57f signal=5" in caplog.text  # C-P3d
         s.resume()
         assert s.state == "running"
         assert server.commands[-1] == (Cmd.DEBUG_CONTINUE, struct.pack("<I", 0))

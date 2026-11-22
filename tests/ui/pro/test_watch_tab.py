@@ -56,6 +56,18 @@ def test_end_clears_detaches_and_keeps_the_list(watch, game):  # AC-3.2
     assert watch.ctl.session.debug_owner is None
 
 
+def test_the_main_link_dropping_mid_watch_reaches_the_controller(watch, game, win, pro):  # m-B
+    from cheatmaker.ui.messages import LOST
+
+    game.fake.debugger.stops = [FakeStop(0, _hit(AFTER_WRITER)), FakeStop(0, _hit(fg.WRITER))]
+    game.fake.game_ticks.append(game.fake.disconnect)  # the first read is the last
+    _add(watch)
+    watch.start_btn.click()
+    assert not win.ctl.session.connected  # handled as a lost link (AC-1.4)
+    assert pro.status.text() == LOST
+    assert not watch.watching and game.fake.debugger.state == "detached"
+
+
 def test_registers_marked_unverified(watch):  # AC-3.3
     assert not ws.REGISTERS_VERIFIED
     header = watch.table.horizontalHeaderItem(COL_FIRST).text()

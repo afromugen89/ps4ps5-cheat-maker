@@ -34,6 +34,16 @@ def test_sample_lists_addresses_and_unhooks(panel, game, pro):  # AC-3.4
     assert not panel.sampling and panel.run_btn.isEnabled()
 
 
+def test_a_site_changed_by_another_cheat_is_said_once(panel, game, pro):  # m7
+    other = b"\x90" * len(fg.VMOVSS_W)
+    panel.sleep = lambda _s: game.fake.poke(fg.PID, fg.WRITER, other)
+    said: list[str] = []
+    pro.msgs.say = said.append
+    panel.sample_at(fg.WRITER)
+    assert panel.state.text().startswith(hints.ACCESS_SITE_CHANGED)
+    assert sum(hints.ACCESS_SITE_CHANGED in t for t in said) == 1
+
+
 def test_add_a_sampled_address_to_the_list(panel, pro):
     panel.sample_at(fg.WRITER)
     panel.table.selectRow(0)

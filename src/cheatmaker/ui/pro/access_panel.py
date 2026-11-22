@@ -179,6 +179,8 @@ class AccessPanel(QWidget):
             if result.cancelled
             else hints.ACCESS_DONE.format(n=n, polls=result.polls)
         )
+        if result.site_changed:
+            text = f"{hints.ACCESS_SITE_CHANGED} {text}"
         self.state.setText(text)
         self.msgs.say(text)
         self.update_buttons()

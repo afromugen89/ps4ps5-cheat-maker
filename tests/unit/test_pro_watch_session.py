@@ -58,7 +58,7 @@ def test_time_limit_ends_clears_and_detaches(fake):  # AC-3.2
 
 
 def test_hit_limit_ends_the_session(fake):
-    fake.debugger.stops = [FakeStop(0, _hit(WRITER + 3, rax=k)) for k in range(600)]
+    fake.debugger.flood(600, 0, _hit(WRITER + 3))
     result = _session(fake, max_hits=500).run(threading.Event())
     assert result.ended == ws.HITS and result.hits == 500 and result.rows[0].count == 500
     assert fake.debugger.calls.count(("resume",)) == 500
@@ -146,6 +146,20 @@ def test_an_error_mid_watch_keeps_the_rows(fake, monkeypatch):  # m2
     assert result.rows[0].count == 2 and d.state == "detached"
 
 
+def test_a_lost_main_link_is_raised_after_the_detach(fake):  # m-B
+    from cheatmaker.errors import ConnectionLost
+
+    def read(a, n):
+        raise ConnectionLost("the PS5 went away")
+
+    dbg = fake.open_debugger(PID)
+    dbg.stops = [FakeStop(0, _hit(WRITER + 3))]
+    s = ws.WatchSession(dbg, read, [ws.WatchTarget(VALUE, 4, "write")], clock=dbg.clock)
+    with pytest.raises(ConnectionLost):
+        s.run(threading.Event())
+    assert dbg.state == "detached" and dbg.calls[-1] == ("detach",)
+
+
 def test_busy_connection_shows_unknown_and_asks_again(fake):  # m2
     from cheatmaker.errors import ConsoleBusy
 
@@ -175,6 +189,25 @@ def test_the_same_stop_again_and_again_ends_the_watch(fake):  # M4
     assert "16 times in a row" in result.message
 
 
+@pytest.mark.parametrize("kind", ["write", "access"])
+def test_identical_data_watch_hits_are_normal(fake, kind):  # M-new
+    # a data watch traps after the instruction: the same write every frame is the game
+    fake.debugger.flood(3 * ws.REPEAT_HITS, 0, _hit(WRITER + 3))
+    n = 2 * ws.REPEAT_HITS
+    result = _session(fake, [ws.WatchTarget(VALUE, 4, kind)], max_hits=n).run(threading.Event())
+    assert result.ended == ws.HITS and result.hits == n and result.message == ""
+
+
+def test_data_hits_between_execute_hits_restart_the_repeat_count(fake):  # M-new
+    targets = [ws.WatchTarget(READER, 1, "execute"), ws.WatchTarget(VALUE, 4, "write")]
+    d = fake.debugger
+    for _ in range(3):
+        d.stops += [FakeStop(0, _hit(READER), dr6=0b01) for _ in range(ws.REPEAT_HITS - 1)]
+        d.stops.append(FakeStop(1, _hit(READER), dr6=0b10))  # same RIP and registers
+    result = _session(fake, targets).run(threading.Event())
+    assert result.ended != ws.REPEATS and result.hits == 3 * ws.REPEAT_HITS
+
+
 def test_several_dr6_bits_go_to_the_watch_the_operand_points_at(fake):  # m3
     targets = [ws.WatchTarget(VALUE + 0x100, 4, "write"), ws.WatchTarget(VALUE, 4, "write")]
     d = fake.debugger
@@ -182,6 +215,16 @@ def test_several_dr6_bits_go_to_the_watch_the_operand_points_at(fake):  # m3
     d.stops.append(FakeStop(0, WatchHit(WRITER + 3, {"rbx": 0x10}), dr6=0b11))
     rows = _session(fake, targets).run(threading.Event()).rows
     assert sorted((r.slot is None, r.slot) for r in rows) == [(False, 1), (True, None)]
+
+
+def test_operand_touches_ignores_fs_and_gs_operands():  # m-C
+    import iced_x86 as ix
+
+    fs_load = ix.Decoder(64, bytes.fromhex("64488b042528000000"), ip=0).decode()
+    plain = ix.Decoder(64, bytes.fromhex("8b4308"), ip=0).decode()  # mov eax,[rbx+8]
+    target = ws.WatchTarget(0x28, 8, "access")
+    assert not ws.operand_touches(fs_load, {}, target)  # no fs base in the stop
+    assert ws.operand_touches(plain, {"rbx": 0x20}, target)
 
 
 def test_a_misaligned_address_is_refused():  # M6

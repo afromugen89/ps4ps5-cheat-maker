@@ -81,6 +81,8 @@ class SampleResult:
     rows: list[AccessRow]
     polls: int
     cancelled: bool
+    site_changed: bool = False
+    """The site held other bytes at the end (a cheat wrote there): left alone (m7)."""
 
 
 def operand_at(code: bytes, address: int) -> Operand:
@@ -210,4 +212,4 @@ def sample(
             writer.write(cave, bytes(len(code)), "sampler:cave_clear")
     rows = rows_from(counts, operand)
     log.info("action=pro_sample site=%#x polls=%d addresses=%d", site, polls, len(rows))
-    return SampleResult(operand, rows, polls, cancelled)
+    return SampleResult(operand, rows, polls, cancelled, site_changed=not unhooked)

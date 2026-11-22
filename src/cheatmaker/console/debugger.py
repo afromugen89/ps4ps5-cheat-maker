@@ -10,6 +10,10 @@
   A failed bind is "Port 755 is in use". The attach reply and the dial back must both
   come within ``ATTACH_DEADLINE`` (10 s, AC-1.3); otherwise the session detaches (on a
   fresh connection when its own is stuck) and raises FirewallBlocked naming the port.
+  A PS5 that dialled back but never answered the attach is not the firewall: that is a
+  plain DebuggerError (``ATTACH_NO_REPLY``). Closing the session wakes the accept at
+  once (the listener is shut, and the accept polls every ``ACCEPT_POLL_S``); a dial
+  back arriving after that is closed, not kept.
   On Windows the port is bound with ``SO_EXCLUSIVEADDRUSE`` (no second program can
   take it over).
 - **Already debugged** (a session cut off earlier): detach, wait 2 s, try once more.
@@ -78,6 +82,8 @@ KEEPALIVE_S = 2.0
 ALREADY_DEBUG_WAIT = 2.0
 """After an "already debugged" answer: detach, wait this long, attach once more."""
 POLL_S = 0.5  # the back-channel reader checks for the end this often
+ACCEPT_POLL_S = 0.2
+"""The accept thread checks this often whether the session is closing (m-D)."""
 FPU_OFFSET = 0xE0
 FPU_SIZE = 832
 DBREGS_OFFSET = 0x420
@@ -97,6 +103,10 @@ FIREWALL = (
     "try again."
 )
 ATTACH_REFUSED = "The PS5 wouldn't attach the debugger to the game ({reason})."
+ATTACH_NO_REPLY = (
+    "The PS5 connected back on port {port} but never answered the attach. Try again; "
+    "if it keeps happening, restart PS5Debug-NG."
+)
 GAME_CLOSED = "The game closed while the debugger was attached."
 SIGNAL_STOP = "The game stopped with signal {signal}, not at a watch."
 BACK_CLOSED = "The PS5 closed the debugger's back channel."
@@ -178,6 +188,7 @@ class DebugSession:
         self._attached = False
         self._maybe_attached = False  # ATTACH was sent but its answer never came
         self._accepted = threading.Event()  # the accept thread finished
+        self._back_lock = threading.Lock()  # the accept thread hands _back over vs _close
         self._dead = False  # the debugger socket failed: nothing more is sent on it
         self._cmd = threading.Lock()  # one command at a time on the debugger socket
         self._stops: queue.Queue[StopEvent | DebuggerLost] = queue.Queue()
@@ -202,6 +213,7 @@ class DebugSession:
             raise DebuggerError("The debugger is already attached.")
         started = time.monotonic()
         deadline = started + self.deadline
+        self._end.clear()  # set again by _close: the accept thread watches it
         try:
             self._listen()
             self._start_accept(deadline)
@@ -211,7 +223,6 @@ class DebugSession:
         except BaseException:
             self._close()
             raise
-        self._end.clear()
         self._stops = queue.Queue()
         self._lost_why = KEEPALIVE_LOST
         self.state = "running"
@@ -248,19 +259,28 @@ class DebugSession:
 
         def accept() -> None:
             try:
-                listener.settimeout(max(0.01, deadline - time.monotonic()))
-                conn, peer = listener.accept()
-            except OSError:  # the deadline, or the listener closed by _close
-                return
+                taken = _accept_until(listener, deadline, self._end)
+                if taken is not None:
+                    self._take_back(*taken)
             finally:
                 self._accepted.set()
-            conn.settimeout(POLL_S)
-            self._back = conn
-            log.info("action=pro_debug_back_channel peer=%s", peer[0])
 
         t = threading.Thread(target=accept, daemon=True)
         t.start()
         self._threads.append(t)
+
+    def _take_back(self, conn: socket.socket, peer: tuple) -> None:
+        """Keep the dial back, unless the session is closing already: then nobody
+        would close it (m-A). ``_back`` is set before ``_accepted``."""
+        conn.settimeout(POLL_S)
+        with self._back_lock:
+            if self._end.is_set():
+                log.info("action=pro_debug_back_channel peer=%s result=too_late", peer[0])
+                with contextlib.suppress(OSError):
+                    conn.close()
+                return
+            self._back = conn
+        log.info("action=pro_debug_back_channel peer=%s", peer[0])
 
     def _firewall(self, why: str) -> FirewallBlocked:
         log.warning(
@@ -279,9 +299,13 @@ class DebugSession:
             try:
                 status = self._request(Cmd.DEBUG_ATTACH, struct.pack("<I", self.pid), left)
             except DebuggerLost as exc:
-                if _timed_out(exc):  # NG may wait for its dial back before it answers
-                    raise self._firewall("no attach reply") from exc
-                raise
+                if not _timed_out(exc):
+                    raise
+                if self._back is not None:  # it dialled back: not the firewall
+                    log.warning("action=pro_debug_attach result=no_reply back_channel=1")
+                    raise DebuggerError(ATTACH_NO_REPLY.format(port=self.listen_port)) from exc
+                # NG may wait for its dial back before it answers
+                raise self._firewall("no attach reply") from exc
             if status == Status.SUCCESS:
                 self._attached = True
                 return
@@ -396,6 +420,14 @@ class DebugSession:
             except CheatMakerError as exc:  # never kill the reader on one bad packet
                 log.warning("action=pro_debug_stop result=bad_packet reason=%s", exc)
             else:
+                # the raw wait status, for console test C-P3d (what NG really sends)
+                log.info(
+                    "action=pro_debug_stop lwpid=%d status=%#x signal=%d dr6=%#x",
+                    stop.lwpid,
+                    struct.unpack_from("<I", buf, 4)[0],
+                    stop.signal,
+                    stop.dr6,
+                )
                 with self._count:
                     self._waiting += 1
                     if self.state == "running":
@@ -487,10 +519,15 @@ class DebugSession:
             else:
                 self._detach_fresh()
         self._attached = self._maybe_attached = False
-        for s in (self._back, self._listener):
-            if s is not None:
+        if self._listener is not None:  # wakes a pending accept at once (m-D)
+            with contextlib.suppress(OSError):
+                self._listener.shutdown(socket.SHUT_RDWR)
+        with self._back_lock:  # a dial back after this is closed by the accept thread
+            back = self._back
+        for sock in (back, self._listener):
+            if sock is not None:
                 with contextlib.suppress(OSError):
-                    s.close()
+                    sock.close()
         if self._w is not None:
             self._w.close()
         for t in self._threads:
@@ -502,6 +539,26 @@ class DebugSession:
         self._waiting = 0
         self._dead = False
         self.state = "detached"
+
+
+def _accept_until(
+    listener: socket.socket, deadline: float, end: threading.Event
+) -> tuple[socket.socket, tuple] | None:
+    """Accept one connection before ``deadline``; None at the deadline, when ``end`` is
+    set or the listener is shut. A short timeout loop, so a closing session never waits
+    for the deadline (a closed listener doesn't wake ``accept`` on every OS)."""
+    while not end.is_set():
+        left = deadline - time.monotonic()
+        if left <= 0:
+            return None
+        try:
+            listener.settimeout(min(ACCEPT_POLL_S, left))
+            return listener.accept()
+        except TimeoutError:
+            continue
+        except OSError:  # shut or closed by _close
+            return None
+    return None
 
 
 def _status_name(status: int) -> str:

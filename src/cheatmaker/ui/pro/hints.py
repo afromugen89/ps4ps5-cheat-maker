@@ -64,6 +64,10 @@ ACCESS_BUTTON = "What does it access?"
 ACCESS_RUNNING = "Sampling: {n} address(es) so far..."
 ACCESS_DONE = "{n} address(es) seen in {polls} look(s)."
 ACCESS_STOPPED = "Stopped: {n} address(es) seen."
+ACCESS_SITE_CHANGED = (
+    "The instruction was changed by another cheat while sampling, so it was left as "
+    "it is; the sampler's jump may remain until the game restarts."
+)
 ACCESS_WATCH_TITLE = "No room for the sampler"
 ACCESS_WATCH_ASK = (
     "{reason}\n\nWatch the instruction instead? The game pauses briefly each time it runs."

@@ -34,7 +34,13 @@ from cheatmaker.core.cave import Target
 from cheatmaker.core.cheats import Cheat, LocationKind
 from cheatmaker.core.locker import CONTEXT, MAX_INSN, Read, instruction_before, touches_memory
 from cheatmaker.core.pro.asm import insn_text
-from cheatmaker.errors import CheatMakerError, ConsoleBusy, DebuggerLost, ReadFailed
+from cheatmaker.errors import (
+    CheatMakerError,
+    ConnectionLost,
+    ConsoleBusy,
+    DebuggerLost,
+    ReadFailed,
+)
 
 log = logging.getLogger(__name__)
 
@@ -169,8 +175,21 @@ def _reg_value(regs: dict[str, int], reg: int) -> int | None:
 
 
 def operand_touches(insn: ix.Instruction, regs: dict[str, int], target: WatchTarget) -> bool:
-    """Does ``insn``'s memory operand, worked out from ``regs``, overlap ``target``?"""
+    """Does ``insn``'s memory operand, worked out from ``regs``, overlap ``target``?
+
+    Best effort, used only to split a stop whose DR6 names several watches (m3):
+
+    - ``regs`` are the registers *after* the instruction ran (a data watch traps after
+      it). An instruction that changes its own base or index register (``mov rax,
+      [rax+8]``, ``pop``, string ops) gives the wrong address.
+    - The fs/gs segment bases aren't in the stop packet, so an ``fs:``/``gs:``
+      operand never matches.
+
+    A wrong or missing match only means the hit's watch shows as "?" (no single
+    match), never the wrong watch for a correct operand."""
     if not any(insn.op_kind(i) == ix.OpKind.MEMORY for i in range(insn.op_count)):
+        return False
+    if insn.memory_segment in (ix.Register.FS, ix.Register.GS):
         return False
     base = _reg_value(regs, insn.memory_base)
     index = _reg_value(regs, insn.memory_index)
@@ -233,6 +252,8 @@ class WatchSession:
                 message = REPEATING.format(n=REPEAT_HITS)
         except DebuggerLost as exc:
             ended, message = LOST, str(exc)
+        except ConnectionLost:  # the main link: the Controller must hear it (m-B)
+            raise  # after the detach below
         except CheatMakerError as exc:  # e.g. the firewall: the rows so far still show
             log.warning("action=pro_watch_end reason=%s: %s", type(exc).__name__, exc)
             ended, message = FAILED, str(exc)
@@ -276,6 +297,13 @@ class WatchSession:
                 self.on_update(self.rows(), self.hits, now - started)
 
     def _repeating(self, stop: StopEvent) -> bool:
+        """An execute breakpoint firing again and again with the very same registers
+        (NG not stepping past it). Only execute stops count: a data watch traps after
+        the instruction, so a game writing the same value from the same place every
+        frame is normal there."""
+        if self._kind(self._fired(stop)) != "execute":
+            self._same, self._same_count = None, 0
+            return False
         key = (stop.lwpid, stop.hit.rip, tuple(sorted(stop.hit.regs.items())))
         self._same_count = self._same_count + 1 if key == self._same else 1
         self._same = key
@@ -284,14 +312,22 @@ class WatchSession:
             return True
         return False
 
+    def _fired(self, stop: StopEvent) -> list[int]:
+        """The slots DR6 names (bits 0-3)."""
+        return [k for k in range(len(self.targets)) if stop.dr6 >> k & 1]
+
+    def _kind(self, fired: list[int]) -> WatchKind:
+        """``execute`` when every watch that may have fired is an execute watch (all of
+        them when DR6 names none), else ``access``."""
+        kinds = {self.targets[k].kind for k in fired or range(len(self.targets))}
+        return "execute" if kinds == {"execute"} else "access"
+
     def _slot(self, stop: StopEvent) -> tuple[int | None, _Found]:
         """Which watch fired, and the instruction. One DR6 bit names it. Several bits:
         the watch the instruction's operand points at (m3), else none. No bit (DR6
         UNVERIFIED on NG): the only watch, else none."""
-        fired = [k for k in range(len(self.targets)) if stop.dr6 >> k & 1]
-        kinds = {self.targets[k].kind for k in fired or range(len(self.targets))}
-        kind: WatchKind = "execute" if kinds == {"execute"} else "access"
-        found = self._lookup(stop.hit.rip, kind)
+        fired = self._fired(stop)
+        found = self._lookup(stop.hit.rip, self._kind(fired))
         if len(fired) == 1:
             return fired[0], found
         if not fired:
