@@ -34,6 +34,7 @@ def test_regions(session):
 def test_greater_than_keeps_only_bigger_values(session, fake):
     """AC-2.2."""
     scan = sc.ProScan(session)
+    scan.claim()
     assert scan.first(sc.GAME_DATA, ValueType.INT32, Compare.EXACT, 100) == 2
     fake.poke(PID, HEALTH_ADDR, struct.pack("<i", 150))
     assert scan.next(Compare.GREATER, 100) == 1
@@ -44,12 +45,14 @@ def test_greater_than_keeps_only_bigger_values(session, fake):
 def test_unsigned_and_between(session, fake):
     fake.poke(PID, HEAP_BASE + 0x300, struct.pack("<I", 0xFFFFFFF0))
     scan = sc.ProScan(session)
+    scan.claim()
     value = sc.scan_value(Compare.BETWEEN, ValueType.UINT32, 0xFFFFFF00, 0xFFFFFFFF)
     assert scan.first(sc.GAME_DATA, ValueType.UINT32, Compare.BETWEEN, value) == 1
 
 
 def test_pages_of_a_thousand(session):
     scan = sc.ProScan(session)
+    scan.claim()
     n = scan.first(sc.ALL_READABLE, ValueType.INT8, Compare.UNKNOWN)
     assert n > sc.PAGE_SIZE and scan.pages() == (n + 999) // 1000
     first, second = scan.page(0), scan.page(1)
@@ -58,6 +61,7 @@ def test_pages_of_a_thousand(session):
 
 def test_another_search_ends_the_pro_one(session):
     scan = sc.ProScan(session)
+    scan.claim()
     scan.first(sc.GAME_DATA, ValueType.INT32, Compare.EXACT, 100)
     guided = Scanner(session)
     guided.first_scan(2450)
@@ -71,7 +75,9 @@ def test_pro_scan_takes_the_guided_search(session):
     guided.first_scan(2450)
     lost = []
     guided.on_lost.append(lambda: lost.append(True))
-    sc.ProScan(session).first(sc.GAME_DATA, ValueType.INT32, Compare.EXACT, 100)
+    pro = sc.ProScan(session)
+    pro.claim()
+    pro.first(sc.GAME_DATA, ValueType.INT32, Compare.EXACT, 100)
     assert lost == [True] and not guided.active
 
 
@@ -138,7 +144,7 @@ def test_set_and_freeze(session, fake):
     assert writes == [(HEALTH_ADDR, struct.pack("<i", 7), "address_list")] and row.value == 7
     freezer = Freezer(session)
     ad.freeze(session, freezer, row, 999)
-    assert FREEZE_HZ >= 10 and freezer.keys == {f"pro:{HEALTH_ADDR:x}"}
+    assert FREEZE_HZ >= 10 and freezer.keys == {f"pro:{row.row_id}:{HEALTH_ADDR:x}"}
     ad.unfreeze(freezer, row)
     assert freezer.keys == set() and row.frozen is None
 

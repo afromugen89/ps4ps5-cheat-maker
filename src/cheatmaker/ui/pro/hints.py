@@ -105,3 +105,12 @@ ADDED = "Added {n} address(es) to the address list."
 POINTER_FOUND = "Pointer path for {place}: {chain}"
 FIND_WRITES = "Find what writes"
 FIND_ACCESSES = "Find what accesses"
+
+# -- messages (the Pro window's status line) -------------------------------------------------
+WRITE_FAILED = "The PS5 didn't take the new bytes ({reason}). Check the game is running."
+SITE_CHANGED_TITLE = "The game's code isn't what the cheat expects"
+SITE_CHANGED = "Nothing was written. These places hold other bytes than recorded:"
+SITE_ROW = "{place}\\n    expected: {expected}\\n    found:    {found}"
+CLOSE_FROZEN_TITLE = "Stop the freezes?"
+CLOSE_FROZEN = "Closing Pro stops the {n} frozen address(es) in the address list. Close it?"
+GUIDED_BUSY = "The main window is busy (a search or a read is running). Try again when it's done."

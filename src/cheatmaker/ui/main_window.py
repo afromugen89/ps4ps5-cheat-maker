@@ -160,6 +160,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         if self.pro is not None:
+            self.pro.force_close = True  # the app is closing: no questions
             self.pro.close()
         self.ctl.shutdown()
         super().closeEvent(event)

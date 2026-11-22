@@ -66,6 +66,8 @@ def default_unit(value: float | int) -> float:
 
 LOST_TAKEN = "taken"  # Scanner.lost_why: another search took the console's search
 LOST_LINK = "link"  # the connection the search ran on dropped
+LOST_PRO = "pro"  # the Pro window's scanner took the console's search
+REPLACED = "Your search was replaced by another one. Press Search to start again."
 
 
 def _ends_if_link_lost(method):
@@ -113,14 +115,16 @@ class Scanner:
     def _taken(self) -> None:
         """Another search replaces ours on the console: forget it (no scan_cancel, the
         other one owns the console's search now) and tell the Find view."""
-        self._lost(LOST_TAKEN)
+        self._lost(LOST_PRO if self.session.search_taken_by == "pro" else LOST_TAKEN)
 
     def _lost(self, why: str) -> None:
         if not self.active:
             return
-        if why == LOST_TAKEN:
+        if why in (LOST_TAKEN, LOST_PRO):
             log.info(
-                "action=scan_lost count=%s: the console's search was used for another", self.count
+                "action=scan_lost count=%s by=%s: the console's search was used for another",
+                self.count,
+                why,
             )
         else:
             log.info("action=scan_lost count=%s: the search connection dropped", self.count)
@@ -270,7 +274,6 @@ class Scanner:
         game = self.session.require_game()
         regions = self.session.scannable_regions()
         self.reset()
-        self.session.search_owner = self  # a Pro search running now is replaced
         self.scan_log.new_search(game)
         if cmp is None:
             cmp = Compare.UNKNOWN if value is None else Compare.EXACT
@@ -289,7 +292,9 @@ class Scanner:
                 if progress:
                     progress((i + p) / len(candidates))
 
-            count = client.scan_start(game.pid, regions, vt, cmp, value, scaled, cancel)
+            with self.session.search_lock:
+                self.session.search_owner = self  # a Pro search running now is replaced
+                count = client.scan_start(game.pid, regions, vt, cmp, value, scaled, cancel)
             log.info(
                 "action=scan_first type=%s cmp=%s value=%s count=%d",
                 "+".join(t.name for t in vt) if isinstance(vt, tuple) else vt.name,
@@ -610,7 +615,11 @@ class Scanner:
         cancel: threading.Event | None,
     ) -> int:
         self.note = None
-        count = self.session.require_client().scan_next(cmp, value, progress, cancel)
+        with self.session.search_lock:
+            if self.session.search_owner is not self:  # someone else's search now
+                self._lost(LOST_TAKEN)
+                raise ValueError(REPLACED)
+            count = self.session.require_client().scan_next(cmp, value, progress, cancel)
         self.count = count
         self._sync_types(self.vtype)
         log.info(

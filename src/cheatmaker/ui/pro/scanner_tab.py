@@ -30,7 +30,7 @@ from cheatmaker.errors import ScanCancelled
 from cheatmaker.ui.controller import Controller
 from cheatmaker.ui.pro import hints
 from cheatmaker.ui.pro.address_list import parse_value
-from cheatmaker.ui.pro.tab import ProTab, fail
+from cheatmaker.ui.pro.tab import ProMessages, ProTab
 from cheatmaker.ui.tasks import TaskRunner
 
 FIRST_COMPARES = (Compare.EXACT, Compare.BETWEEN, Compare.GREATER, Compare.LESS, Compare.UNKNOWN)
@@ -52,8 +52,8 @@ COL_ADDR, COL_VALUE, COL_PREVIOUS, COL_FIRST = range(4)
 class ScannerTab(ProTab):
     _progress = Signal(float)  # worker thread -> UI thread
 
-    def __init__(self, ctl: Controller, tasks: TaskRunner) -> None:
-        super().__init__(ctl, tasks)
+    def __init__(self, ctl: Controller, tasks: TaskRunner, msgs: ProMessages | None = None) -> None:
+        super().__init__(ctl, tasks, msgs)
         self.scan = sc.ProScan(ctl.session)
         self.add_address: Callable[[int, ValueType], None] = lambda a, t: None  # the window
         self.show_code: Callable[[int], None] = lambda addr: None
@@ -214,9 +214,9 @@ class ScannerTab(ProTab):
             self.running_scan = False
             self.left.setText("")
             if isinstance(exc, ScanCancelled):
-                self.ctl.message.emit(hints.SCAN_CANCELLED)
+                self.msgs.say(hints.SCAN_CANCELLED)
             else:
-                fail(self.ctl, exc, action)
+                self.msgs.fail(exc, action)
             self._set_compares()
 
         self.tasks.run(work, done, failed)
@@ -233,10 +233,14 @@ class ScannerTab(ProTab):
         try:
             value = self._value(cmp, vtype)
         except ValueError as exc:
-            fail(self.ctl, exc, "pro_scan")
+            self.msgs.fail(exc, "pro_scan")
+            return
+        if self.ctl.tasks.busy:  # a guided search or read may be using the console's search
+            self.msgs.say(hints.GUIDED_BUSY)
             return
         region = self.region.currentText()
         self._clear()
+        self.scan.claim()  # here, on the UI thread, before the worker starts
 
         def work() -> int:
             return self.scan.first(region, vtype, cmp, value, self._progress.emit, self._cancel)
@@ -249,7 +253,7 @@ class ScannerTab(ProTab):
         try:
             value = self._value(cmp, vtype)
         except ValueError as exc:
-            fail(self.ctl, exc, "pro_scan")
+            self.msgs.fail(exc, "pro_scan")
             return
 
         def work() -> int:
@@ -279,7 +283,7 @@ class ScannerTab(ProTab):
         self.tasks.run(lambda: self.scan.page(n), done, self._page_failed)
 
     def _page_failed(self, exc: BaseException) -> None:
-        fail(self.ctl, exc, "pro_scan")
+        self.msgs.fail(exc, "pro_scan")
         self._set_compares()
 
     def _decode(self, hit: ScanHit, raw: bytes | None) -> str:
@@ -311,7 +315,7 @@ class ScannerTab(ProTab):
         for h in picked:
             self.add_address(h.address, h.vtype or self.scan.vtype or ValueType.INT32)
         if picked:
-            self.ctl.message.emit(hints.ADDED.format(n=len(picked)))
+            self.msgs.say(hints.ADDED.format(n=len(picked)))
 
     def do_add(self) -> None:
         self._add_rows(sorted({i.row() for i in self.table.selectionModel().selectedRows()}))
@@ -338,7 +342,7 @@ class ScannerTab(ProTab):
 
         def failed(exc: BaseException) -> None:
             self.running_scan = False
-            fail(self.ctl, exc, "pro_aob")
+            self.msgs.fail(exc, "pro_aob")
             self._update_buttons()
 
         self.tasks.run(

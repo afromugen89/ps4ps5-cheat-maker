@@ -921,11 +921,41 @@ Built from docs/architecture-pro.md (spec docs/spec-pro.md), implementation step
   the guided `Scanner._first` sets itself, with no other change). A Pro first scan takes
   the search from the guided one, and a Pro search replaced by anything else says so.
   Progress shows time left (AC-2.1). The address list
-  (`core/pro/addresses.AddressRow`) freezes with the shared Freezer under `pro:{addr:x}`
-  keys (10 Hz). Closing the Pro window drops those freezes; a new game clears them as it
+  (`core/pro/addresses.AddressRow`) freezes with the shared Freezer under
+  `pro:{row_id}:{addr:x}` keys (10 Hz; see the review fixes). Closing the Pro window drops those freezes; a new game clears them as it
   does every freeze. The badge comes from the cheat the row would make (AC-2.3). Find
   what writes / accesses are disabled until Watch (step 17). Pointer scan opens the
   guided pointer dialog and puts the path in the row's comment.
 - **Not done here.** The Watch tab is a placeholder (steps 16-17). The NG
   `scan_results` offset and the unsigned/greater/less codes are still C-P2 on a real
   console.
+- **Review fixes, PR #39 (2026-11-22).**
+  - M1: the Pro window has its own status line (`ProMessages`). Every Pro tab, editor
+    and dialog speaks there, never in the main window. A dropped link still goes
+    through `Controller.fail`. `SiteChanged` also opens a dialog listing each site with
+    its expected and found bytes. `WriteFailed` and `AssemblerNotFound` have Pro wording.
+  - M2: `showEvent` restarts the liveness timer and polls at once (close, then reopen).
+  - M3: the cave editor keeps a draft per entry. `entry.source` takes it only when
+    Build succeeds. The editor is read-only while the cheat is on. Variable edits patch
+    the built bytes (`set_variable`) and never assemble a draft.
+  - M4: `ProScan.claim()` runs `take_search(owner, by="pro")` on the UI thread before the
+    worker starts. A Pro first scan is refused while the guided runner is busy.
+    `Session.search_lock` is held around "still mine?" plus the console call by both
+    scanners (worker threads only). The guided `_narrow` refuses when another search
+    owns the console. Find says "the Pro window's scanner started its own search"
+    (`LOST_PRO`).
+  - M5 (coordinator's call): My cheats turns a cheat with `pro` on and off through
+    `compile.enable`/`disable` (site check, overlap, read-back, undo). An overlap or a
+    changed site shows the error's own text.
+  - Minors:
+    - Freeze keys are `pro:{row_id}:{addr:x}`.
+    - Address-list freezes pause while the game isn't running and resume when it
+      runs again.
+    - Closing Pro asks first when rows are frozen (no question when the app closes).
+    - Pro builds, entry additions and variable edits run on a copy on the worker and
+      are applied on the UI thread. `others`/`open_rooms` are worked out on the UI
+      thread.
+    - The liveness poll waits at most `ALIVE_WAIT` (0.5 s) for the console
+      (`busy.short_wait`, honoured by the NG socket lock off the UI thread) and counts
+      busy as alive.
+    - A failed Pro action saves nothing.

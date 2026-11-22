@@ -10,6 +10,8 @@ rules, AC-8.4 to 8.8); My cheats' tick follows.
 
 from __future__ import annotations
 
+import copy
+import dataclasses
 import logging
 import time
 from collections.abc import Callable
@@ -46,7 +48,7 @@ from cheatmaker.ui.pro import hints
 from cheatmaker.ui.pro.cave_editor import CaveEditor
 from cheatmaker.ui.pro.export_dialog import ExportDialog
 from cheatmaker.ui.pro.import_dialog import ImportDialog
-from cheatmaker.ui.pro.tab import ProTab, fail
+from cheatmaker.ui.pro.tab import ProMessages, ProTab
 from cheatmaker.ui.tasks import TaskRunner
 
 log = logging.getLogger(__name__)
@@ -63,6 +65,19 @@ def entry_label(entry: ProEntry) -> str:
     return f"{entry.kind.capitalize()} at +{entry.offset:#x} ({len(entry.on)} bytes)"
 
 
+def _apply(pc: ProCheat, built: ProCheat) -> None:
+    """Copy what a worker built on a copy of ``pc`` back into ``pc`` (UI thread). Entry
+    objects stay the same (the editor and lists hold them); new entries are added."""
+    for k, new in enumerate(built.entries):
+        if k < len(pc.entries):
+            for f in dataclasses.fields(ProEntry):
+                setattr(pc.entries[k], f.name, getattr(new, f.name))
+        else:
+            pc.entries.append(new)
+    pc.variables[:] = built.variables
+    pc.editable = built.editable
+
+
 def _number(text: str, vtype: ValueType) -> float | int:
     text = text.strip()
     if vtype.is_float:
@@ -77,11 +92,12 @@ class CheatsTab(ProTab):
         tasks: TaskRunner,
         assembler: Assembler | None,
         save: Callable[[], None],
+        msgs: ProMessages | None = None,
     ) -> None:
-        super().__init__(ctl, tasks)
+        super().__init__(ctl, tasks, msgs)
         self.assembler = assembler
         self.save = save  # stores Pro sources in the .cmproj (FindAgain.save)
-        self.writer = pc_compile.ProWriter(ctl.session, warn=ctl.message.emit)
+        self.writer = pc_compile.ProWriter(ctl.session, warn=self.msgs.say)
         self.sleep: Callable[[float], None] = time.sleep
         self.ask_text: Callable[[str, str, str], str | None] = self._ask_text
         self.pick_file: Callable[[], str] = self._pick_file
@@ -111,7 +127,7 @@ class CheatsTab(ProTab):
         self.vars.setHorizontalHeaderLabels(["Name", "Type", "Value", "Comment", "In file"])
         self.add_var_btn = QPushButton("Add variable")
         self.remove_var_btn = QPushButton("Remove variable")
-        self.editor = CaveEditor(ctl, tasks)
+        self.editor = CaveEditor(ctl, tasks, self.msgs)
         self.editor.assembler = assembler
         self.editor.on_build = self.build_entry
         self.editor.others = self._others_rooms
@@ -280,7 +296,7 @@ class CheatsTab(ProTab):
 
     def _select_entry(self) -> None:
         c = self.selected()
-        read_only = c is None or c.pro is None
+        read_only = c is None or c.pro is None or c.enabled  # its bytes are in the game
         self.editor.set_entry(self.pc, self.selected_entry(), read_only=read_only)
         if c is not None and c.pro is None and self.preview is not None:
             self.editor.error.setText(hints.GUIDED_PREVIEW)
@@ -308,11 +324,14 @@ class CheatsTab(ProTab):
 
     def game_state_changed(self, new_game: bool) -> None:
         if new_game:
-            self.writer = pc_compile.ProWriter(self.ctl.session, warn=self.ctl.message.emit)
+            self.writer = pc_compile.ProWriter(self.ctl.session, warn=self.msgs.say)
         self._update_buttons()
 
-    # -- running work -------------------------------------------------------------------------
+    # -- running work ---------------------------------------------------------------------------
     def _run(self, work, done, action: str) -> None:
+        """``work`` on the worker. It never changes a cheat the UI shows: it works on a
+        copy, and ``done`` (UI thread) applies the result. A failure changes nothing and
+        saves nothing."""
         self.busy = True
         self._update_buttons()
 
@@ -323,8 +342,8 @@ class CheatsTab(ProTab):
 
         def failed(exc: BaseException) -> None:
             self.busy = False
-            fail(self.ctl, exc, action)
-            self._changed()
+            self.msgs.fail(exc, action)
+            self.fill()
 
         self.tasks.run(work, finish, failed)
 
@@ -357,40 +376,54 @@ class CheatsTab(ProTab):
         return parse_place(text, game) - game.module_base
 
     # -- build --------------------------------------------------------------------------------
-    def _build(self, cheat_pc: ProCheat, entry: ProEntry) -> None:
-        """On the worker: build one cave with My cheats' code lines kept free."""
+    def _builder(self, pc: ProCheat) -> Callable[[ProCheat, ProEntry], None]:
+        """Build one cave of a copy of ``pc`` (worker), with the other Pro caves and My
+        cheats' code lines kept free as they are now (worked out here, on the UI
+        thread)."""
         assert self.assembler is not None
-        result = pc_compile.build(
-            self.ctl.session,
-            cheat_pc,
-            entry,
-            self.assembler,
-            others=self._others(cheat_pc),
-            open_rooms=sites.open_rooms(self.cheats, skip=cheat_pc.id),
-        )
-        if not result.ok:
-            line, message = result.error  # type: ignore[misc]
-            raise ValueError(hints.ASM_ERROR.format(line=line, message=message))
+        asm, session = self.assembler, self.ctl.session
+        others = [copy.deepcopy(o) for o in self._others(pc)]
+        rooms = sites.open_rooms(self.cheats, skip=pc.id)
 
-    def build_entry(self, entry: ProEntry) -> None:
+        def build(trial: ProCheat, entry: ProEntry) -> None:
+            result = pc_compile.build(session, trial, entry, asm, others, rooms)
+            if not result.ok:
+                line, message = result.error  # type: ignore[misc]
+                raise ValueError(hints.ASM_ERROR.format(line=line, message=message))
+
+        return build
+
+    def build_entry(self, entry: ProEntry, text: str | None = None) -> None:
+        """Build ``entry`` from ``text`` (the editor's draft); the draft becomes its
+        source only when the build succeeds."""
         c = self.selected()
-        if c is None or c.pro is None or self.assembler is None:
+        if c is None or c.pro is None or self.assembler is None or entry not in c.pro.entries:
             return
         if c.enabled:
-            self.ctl.message.emit(hints.TURN_OFF_FIRST)
+            self.msgs.say(hints.TURN_OFF_FIRST)
             return
         pc = c.pro
+        k = next(i for i, e in enumerate(pc.entries) if e is entry)
+        trial = copy.deepcopy(pc)
+        trial.entries[k].source = entry.source if text is None else text
+        build = self._builder(pc)
 
-        def done(_r) -> None:
+        def done(built: ProCheat) -> None:
+            _apply(pc, built)
+            self.editor.built(entry)
             self._changed(c)
-            self.ctl.message.emit(
+            self.msgs.say(
                 hints.BUILT.format(
                     name=pc.name, size=len(entry.cave_bytes), place=f"+{entry.cave:#x}"
                 )
             )
             self.editor.refresh_budget()
 
-        self._run(lambda: self._build(pc, entry), done, "pro_build")
+        def work() -> ProCheat:
+            build(trial, trial.entries[k])
+            return trial
+
+        self._run(work, done, "pro_build")
 
     def do_new(self) -> None:
         """A new cheat: a name and a hook; its cave is built at once with the default
@@ -405,7 +438,7 @@ class CheatsTab(ProTab):
         try:
             hook = self._ask_place(hints.HOOK_PROMPT)
         except Exception as exc:
-            fail(self.ctl, exc, "pro_new")
+            self.msgs.fail(exc, "pro_new")
             return
         if hook is None:
             return
@@ -416,12 +449,13 @@ class CheatsTab(ProTab):
         (with the default source) so the cheat can be listed and saved."""
         pc = ProCheat(new_cheat_id(self._taken_ids()), name)
         session = self.ctl.session
+        build = self._builder(pc) if kind == "cave" else None
 
-        def work() -> Cheat:
-            if kind == "cave":
+        def work() -> Cheat:  # ``pc`` is new: nothing shows it until ``done``
+            if build is not None:
                 entry = pc_compile.new_cave_entry(session, offset)
                 pc.entries.append(entry)
-                self._build(pc, entry)
+                build(pc, entry)
             else:
                 pc.entries.append(pc_compile.new_nop_entry(session, offset))
             return pc_compile.compile_cheat(pc)
@@ -439,7 +473,7 @@ class CheatsTab(ProTab):
         new cheat (its name asked)."""
         c = self.selected()
         if kind == "cave" and self.assembler is None:
-            self.ctl.message.emit(hints.ASSEMBLER_MISSING)
+            self.msgs.say(hints.ASSEMBLER_MISSING)
             return
         if c is not None and c.pro is not None and not c.enabled:
             self.add_entry_at(c, kind, offset)
@@ -458,7 +492,7 @@ class CheatsTab(ProTab):
         try:
             c.pro = adopt(c, new_cheat_id(self._taken_ids()), self.assembler)
         except Exception as exc:
-            fail(self.ctl, exc, "pro_adopt")
+            self.msgs.fail(exc, "pro_adopt")
             return
         log.info("action=pro_adopt id=%s name=%s", c.pro.id, c.name)
         self._changed()
@@ -469,12 +503,12 @@ class CheatsTab(ProTab):
         if c is None or c.pro is None:
             return
         if c.enabled:
-            self.ctl.message.emit(hints.TURN_OFF_FIRST)
+            self.msgs.say(hints.TURN_OFF_FIRST)
             return
         try:
             offset = self._ask_place(hints.HOOK_PROMPT if kind == "cave" else hints.NOP_PROMPT)
         except Exception as exc:
-            fail(self.ctl, exc, "pro_entry")
+            self.msgs.fail(exc, "pro_entry")
             return
         if offset is not None:
             self.add_entry_at(c, kind, offset)
@@ -484,30 +518,33 @@ class CheatsTab(ProTab):
         pc, session = c.pro, self.ctl.session
         if pc is None:
             return
+        trial = copy.deepcopy(pc)
+        build = self._builder(pc) if kind == "cave" else None
 
-        def work() -> None:
-            if kind == "cave":
+        def work() -> ProCheat:
+            if build is not None:
                 entry = pc_compile.new_cave_entry(session, offset)
-                pc.entries.append(entry)
-                try:
-                    self._build(pc, entry)
-                except Exception:
-                    pc.entries.remove(entry)  # an entry that can't be built isn't kept
-                    raise
+                trial.entries.append(entry)
+                build(trial, entry)
             else:
-                pc.entries.append(pc_compile.new_nop_entry(session, offset))
+                trial.entries.append(pc_compile.new_nop_entry(session, offset))
+            return trial
 
-        self._run(work, lambda _r: self._changed(c), "pro_entry")
+        def done(built: ProCheat) -> None:
+            _apply(pc, built)
+            self._changed(c)
+
+        self._run(work, done, "pro_entry")
 
     def do_remove_entry(self) -> None:
         c, entry = self.selected(), self.selected_entry()
         if c is None or c.pro is None or entry is None:
             return
         if c.enabled:
-            self.ctl.message.emit(hints.TURN_OFF_FIRST)
+            self.msgs.say(hints.TURN_OFF_FIRST)
             return
         if len(c.pro.entries) == 1:
-            self.ctl.message.emit(hints.LAST_ENTRY)
+            self.msgs.say(hints.LAST_ENTRY)
             return
         c.pro.entries.remove(entry)
         if c.pro.editable is not None and pc_compile.home(c.pro) is None:
@@ -558,7 +595,7 @@ class CheatsTab(ProTab):
             n += 1
         c.pro.variables.append(Variable(f"{hints.VAR_NEW}{n}", ValueType.INT32, 0))
         self._changed(c)
-        self.ctl.message.emit(hints.VAR_NEEDS_BUILD.format(name=f"{hints.VAR_NEW}{n}"))
+        self.msgs.say(hints.VAR_NEEDS_BUILD.format(name=f"{hints.VAR_NEW}{n}"))
 
     def do_remove_variable(self) -> None:
         c, row = self.selected(), self.vars.currentRow()
@@ -579,9 +616,10 @@ class CheatsTab(ProTab):
         try:
             c.pro.variables[row] = Variable(old.name, vtype, vtype.clamp(old.value), old.comment)
         except ValueError as exc:
-            fail(self.ctl, exc, "pro_variable")
-        else:
-            self.ctl.message.emit(hints.VAR_NEEDS_BUILD.format(name=old.name))
+            self.msgs.fail(exc, "pro_variable")
+            self.fill()
+            return
+        self.msgs.say(hints.VAR_NEEDS_BUILD.format(name=old.name))
         self._changed(c)
 
     def _var_changed(self, item: QTableWidgetItem) -> None:
@@ -595,7 +633,7 @@ class CheatsTab(ProTab):
                 pc.variables[row] = Variable(item.text().strip(), old.vtype, old.value, old.comment)
                 if pc.editable == old.name:
                     pc.editable = pc.variables[row].name
-                self.ctl.message.emit(hints.VAR_NEEDS_BUILD.format(name=item.text().strip()))
+                self.msgs.say(hints.VAR_NEEDS_BUILD.format(name=item.text().strip()))
             elif col == VAR_COMMENT:
                 pc.variables[row] = Variable(old.name, old.vtype, old.value, item.text())
             elif col == VAR_IN_FILE:
@@ -605,7 +643,9 @@ class CheatsTab(ProTab):
                 self._set_value(c, old, _number(item.text(), old.vtype))
                 return
         except (ValueError, KeyError) as exc:
-            fail(self.ctl, exc, "pro_variable")
+            self.msgs.fail(exc, "pro_variable")
+            self.fill()
+            return
         self._changed(c)
 
     def _set_value(self, c: Cheat, var: Variable, value: float | int) -> None:
@@ -618,19 +658,25 @@ class CheatsTab(ProTab):
         if not built:
             k = pc.variables.index(var)
             pc.variables[k] = Variable(var.name, var.vtype, value, var.comment)
-            self.ctl.message.emit(hints.VAR_NEEDS_BUILD.format(name=var.name))
+            self.msgs.say(hints.VAR_NEEDS_BUILD.format(name=var.name))
             self._changed(c)
             return
-        on, session = c.enabled, self.ctl.session
+        on, session, writer = c.enabled, self.ctl.session, self.writer
+        trial = copy.deepcopy(pc)
 
-        def work() -> str:
-            return pc_compile.set_variable(
-                pc, var.name, value, session=session, writer=self.writer, on=on
+        def work() -> tuple[str, ProCheat]:
+            # patches the built bytes in place (never re-assembles; a draft in the
+            # editor isn't the source until it is built)
+            how = pc_compile.set_variable(
+                trial, var.name, value, session=session, writer=writer, on=on
             )
+            return how, trial
 
-        def done(how: str) -> None:
+        def done(result: tuple[str, ProCheat]) -> None:
+            how, built = result
+            _apply(pc, built)
             text = hints.VAR_WRITTEN if how == pc_compile.WRITTEN else hints.VAR_SAVED
-            self.ctl.message.emit(text.format(name=var.name, value=var.vtype.text(value)))
+            self.msgs.say(text.format(name=var.name, value=var.vtype.text(value)))
             self._changed(c)
 
         self._run(work, done, "pro_variable")
@@ -643,7 +689,7 @@ class CheatsTab(ProTab):
         try:
             result = importer.import_path(path, self._taken_ids())
         except Exception as exc:
-            fail(self.ctl, exc, "pro_import")
+            self.msgs.fail(exc, "pro_import")
             return
         dlg = ImportDialog(self.ctl, result, self.assembler, self)
         self.exec_dialog(dlg)
@@ -656,9 +702,9 @@ class CheatsTab(ProTab):
                 cf.cheats.append(pc_compile.compile_cheat(pc))
                 added += 1
             except Exception as exc:  # e.g. nothing to write: skip it, say why
-                fail(self.ctl, exc, "pro_import")
+                self.msgs.fail(exc, "pro_import")
         self._changed()
-        self.ctl.message.emit(hints.IMPORTED.format(n=added))
+        self.msgs.say(hints.IMPORTED.format(n=added))
 
     def do_export(self) -> None:
-        self.exec_dialog(ExportDialog(self.ctl, self))
+        self.exec_dialog(ExportDialog(self.ctl, self.msgs, self))

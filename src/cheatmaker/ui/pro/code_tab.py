@@ -24,7 +24,7 @@ from cheatmaker.core.pro.addresses import parse_place, place_text
 from cheatmaker.ui.controller import Controller
 from cheatmaker.ui.pro import hints
 from cheatmaker.ui.pro.cave_editor import mono
-from cheatmaker.ui.pro.tab import ProTab, fail
+from cheatmaker.ui.pro.tab import ProMessages, ProTab
 from cheatmaker.ui.tasks import TaskRunner
 
 COL_ADDR, COL_BYTES, COL_TEXT, COL_CHEAT = range(4)
@@ -32,8 +32,8 @@ _MARKED = QColor("#fff2cc")
 
 
 class CodeTab(ProTab):
-    def __init__(self, ctl: Controller, tasks: TaskRunner) -> None:
-        super().__init__(ctl, tasks)
+    def __init__(self, ctl: Controller, tasks: TaskRunner, msgs: ProMessages | None = None) -> None:
+        super().__init__(ctl, tasks, msgs)
         # (kind, module offset) -> the Cheats tab adds the entry (set by the window)
         self.make_entry: Callable[[str, int], None] = lambda kind, offset: None
         self.page: cp.Page | None = None
@@ -98,7 +98,7 @@ class CodeTab(ProTab):
         try:
             addr = parse_place(self.place.text(), self.ctl.session.require_game())
         except Exception as exc:
-            fail(self.ctl, exc, "pro_code")
+            self.msgs.fail(exc, "pro_code")
             return
         self.go(addr)
 
@@ -116,7 +116,7 @@ class CodeTab(ProTab):
         self._show()
 
     def _load_failed(self, exc: BaseException) -> None:
-        fail(self.ctl, exc, "pro_code")
+        self.msgs.fail(exc, "pro_code")
         self._update_buttons()
 
     def do_back(self) -> None:
@@ -187,10 +187,10 @@ class CodeTab(ProTab):
         try:
             text = cp.aob(self.page, ln.ip, self.original.isChecked(), self.sites())
         except ValueError as exc:
-            fail(self.ctl, exc, "pro_aob")
+            self.msgs.fail(exc, "pro_aob")
             return None
         QGuiApplication.clipboard().setText(text)
-        self.ctl.message.emit(hints.AOB_COPIED.format(aob=text))
+        self.msgs.say(hints.AOB_COPIED.format(aob=text))
         return text
 
     def _make(self, kind: str) -> None:

@@ -67,7 +67,7 @@ def test_copy_aob(win, pro):
     text = code.copy_aob()
     assert text.startswith("C4 C1 7A 11 8C 24 AC 02 00 00")
     assert QGuiApplication.clipboard().text() == text
-    assert win.status.text() == hints.AOB_COPIED.format(aob=text)
+    assert win.pro.status.text() == hints.AOB_COPIED.format(aob=text)
 
 
 def test_make_nop_entry_here_makes_a_cheat(win, pro):
@@ -91,9 +91,9 @@ def test_make_cave_entry_adds_to_the_picked_cheat(win, pro):
 def test_unmapped_address_is_said_and_keeps_the_link(win, pro):
     go(pro.code, "0x30000000")
     assert win.ctl.session.connected
-    assert "Couldn't read" in win.status.text()
+    assert "Couldn't read" in win.pro.status.text()
 
 
 def test_bad_text(win, pro):
     go(pro.code, "nowhere")
-    assert win.status.text().startswith("Type an address")
+    assert win.pro.status.text().startswith("Type an address")

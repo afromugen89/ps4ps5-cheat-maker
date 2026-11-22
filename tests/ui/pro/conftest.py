@@ -22,12 +22,33 @@ def notices(monkeypatch) -> list[str]:
 
 
 @pytest.fixture
+def warnings(monkeypatch) -> list[tuple[str, str]]:
+    """Warning boxes shown (title, text)."""
+    shown: list[tuple[str, str]] = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a: shown.append((a[1], a[2])))
+    return shown
+
+
+@pytest.fixture
+def questions(monkeypatch) -> list[str]:
+    """Questions asked (title); each answered Yes."""
+    asked: list[str] = []
+
+    def ask(*a):
+        asked.append(a[1])
+        return QMessageBox.StandardButton.Yes
+
+    monkeypatch.setattr(QMessageBox, "question", ask)
+    return asked
+
+
+@pytest.fixture
 def game():
     return fg.build(1, connect=False)
 
 
 @pytest.fixture
-def win(qtbot, game, notices):
+def win(qtbot, game, notices, warnings, questions):
     ctl = Controller(lambda ip, port: game.fake, Settings.load(), TaskRunner(sync=True))
     w = MainWindow(ctl)
     w.pro_assembler_factory = FakeAssembler
@@ -36,6 +57,7 @@ def win(qtbot, game, notices):
     w.connect_view.connect_btn.click()
     yield w
     if w.pro is not None:
+        w.pro.force_close = True
         w.pro.close()
     ctl.shutdown()
 

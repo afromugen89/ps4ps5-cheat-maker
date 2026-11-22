@@ -1,7 +1,9 @@
 """The cave editor (spec PR-8): source, bytes side by side, first error, cave budget.
 
-Typing restarts a ``DEBOUNCE_MS`` timer; then the source is assembled on the worker
-(AC-8.1: bytes or the first error within 0.5 s). A result for older text is dropped.
+Typing changes a draft, never the cheat: the draft becomes the entry's source only when
+Build succeeds (so nothing, e.g. a variable edit, ever uses unbuilt text). Typing
+restarts a ``DEBOUNCE_MS`` timer; then the draft is assembled on the worker (AC-8.1:
+bytes or the first error within 0.5 s). A result for older text is dropped.
 The budget (free room for the cave) reads the console, so it is worked out when an
 entry is opened and after a build, not on every key.
 """
@@ -27,7 +29,7 @@ from cheatmaker.core.pro.asm import AsmResult, Assembler
 from cheatmaker.core.pro.model import ProCheat, ProEntry
 from cheatmaker.ui.controller import Controller
 from cheatmaker.ui.pro import hints
-from cheatmaker.ui.pro.tab import fail
+from cheatmaker.ui.pro.tab import ProMessages
 from cheatmaker.ui.tasks import TaskRunner
 
 DEBOUNCE_MS = 300
@@ -75,15 +77,19 @@ class AsmHighlighter(QSyntaxHighlighter):
 
 
 class CaveEditor(QWidget):
-    def __init__(self, ctl: Controller, tasks: TaskRunner) -> None:
+    def __init__(self, ctl: Controller, tasks: TaskRunner, msgs: ProMessages) -> None:
         super().__init__()
         self.ctl = ctl
         self.tasks = tasks
+        self.msgs = msgs
         self.assembler: Assembler | None = None
         self.pc: ProCheat | None = None
         self.entry: ProEntry | None = None
         self.others: Callable[[], list[sites.Range]] = list  # rooms other caves keep
-        self.on_build: Callable[[ProEntry], None] = lambda e: None
+        # Build: (entry, the draft text) -> the tab builds it; the draft becomes the
+        # entry's source only when the build succeeds (``built``).
+        self.on_build: Callable[[ProEntry, str], None] = lambda e, text: None
+        self._drafts: dict[int, tuple[ProEntry, str]] = {}  # id(entry) -> unbuilt text
         self.room: int | None = None
         self.size: int | None = None
         self._gen = 0
@@ -122,7 +128,7 @@ class CaveEditor(QWidget):
         self.timer.setInterval(DEBOUNCE_MS)
         self.timer.timeout.connect(self.assemble_now)
         self.source.textChanged.connect(self._typed)
-        self.build_btn.clicked.connect(lambda: self.entry and self.on_build(self.entry))
+        self.build_btn.clicked.connect(self._build_clicked)
         self.set_entry(None, None)
 
     # -- entry ---------------------------------------------------------------------
@@ -133,7 +139,7 @@ class CaveEditor(QWidget):
         self.room = self.size = None
         cave = self.entry
         self.source.blockSignals(True)
-        self.source.setPlainText(cave.source if cave else "")
+        self.source.setPlainText(self.draft_of(cave) if cave else "")
         self.source.blockSignals(False)
         self.source.setReadOnly(cave is None or read_only)
         self.bytes_view.setPlainText(hex_lines(cave.cave_bytes) if cave else "")
@@ -155,12 +161,29 @@ class CaveEditor(QWidget):
         if self.entry is not None and self.assembler is None:
             self.error.setText(hints.ASSEMBLER_MISSING)
 
+    def draft_of(self, entry: ProEntry) -> str:
+        """The text being edited for ``entry``: an unbuilt draft, else its source."""
+        kept = self._drafts.get(id(entry))
+        return kept[1] if kept is not None and kept[0] is entry else entry.source
+
+    def has_draft(self, entry: ProEntry) -> bool:
+        return self.draft_of(entry) != entry.source
+
+    def built(self, entry: ProEntry) -> None:
+        """``entry`` was built from its draft (now its source)."""
+        self._drafts.pop(id(entry), None)
+
     def _typed(self) -> None:
+        """Typing changes only the draft; the cheat keeps its built source until Build."""
         if self.entry is None or self.source.isReadOnly():
             return
-        self.entry.source = self.source.toPlainText()  # kept in the cheat as typed
+        self._drafts[id(self.entry)] = (self.entry, self.source.toPlainText())
         self._gen += 1
         self.timer.start()
+
+    def _build_clicked(self) -> None:
+        if self.entry is not None:
+            self.on_build(self.entry, self.draft_of(self.entry))
 
     # -- assemble on the worker (AC-8.1) ---------------------------------------------------
     def assemble_now(self) -> None:
@@ -168,11 +191,17 @@ class CaveEditor(QWidget):
         if pc is None or entry is None or asm is None:
             return
         gen = self._gen
-        session = self.ctl.session
+        text = self.draft_of(entry)
+        org = entry.cave if entry.cave is not None else entry.offset + pc_compile.FAR
+        try:  # what the draft is assembled with, worked out here (UI thread)
+            ctx = pc_compile.context(pc, entry, org, pc_compile.module_size(self.ctl.session))
+        except Exception as exc:
+            self.msgs.fail(exc, "pro_assemble")
+            return
+        variables = tuple(pc.variables) if entry is pc_compile.home(pc) else ()
 
         def work() -> AsmResult:
-            org = entry.cave if entry.cave is not None else entry.offset + pc_compile.FAR
-            return pc_compile.assemble(pc, entry, asm, org, pc_compile.module_size(session))
+            return asm.assemble(text, ctx, variables)
 
         self.tasks.run(work, lambda r: self._assembled(gen, r), lambda e: self._failed(gen, e))
 
@@ -190,7 +219,7 @@ class CaveEditor(QWidget):
 
     def _failed(self, gen: int, exc: BaseException) -> None:
         if gen == self._gen:
-            fail(self.ctl, exc, "pro_assemble")
+            self.msgs.fail(exc, "pro_assemble")
 
     # -- cave budget (AC-8.2) ---------------------------------------------------------------
     def refresh_budget(self) -> None:
@@ -211,7 +240,7 @@ class CaveEditor(QWidget):
                     self.size = len(entry.cave_bytes)
                 self._show_budget()
 
-        self.tasks.run(work, done, lambda e: fail(self.ctl, e, "pro_budget"))
+        self.tasks.run(work, done, lambda e: self.msgs.fail(e, "pro_budget"))
 
     def _show_budget(self) -> None:
         if self.size is None:

@@ -75,13 +75,13 @@ def test_cancelled_scan(win, pro, monkeypatch):
 
     monkeypatch.setattr(s.scan, "first", cancelled)
     first(s, 5)
-    assert win.status.text() == hints.SCAN_CANCELLED and s.first_btn.isEnabled()
+    assert win.pro.status.text() == hints.SCAN_CANCELLED and s.first_btn.isEnabled()
 
 
 def test_bad_value_is_refused(win, pro):
     s = pro.scanner
     first(s, "lots")
-    assert "isn't a" in win.status.text() and s.scan.count is None
+    assert "isn't a" in win.pro.status.text() and s.scan.count is None
 
 
 def test_new_scan_and_compares(pro):
@@ -101,7 +101,7 @@ def test_add_results_to_the_address_list(win, pro, game):
     s.table.cellDoubleClicked.emit(row, 0)
     (added,) = pro.addresses.rows
     assert added.address == HP_ADDR and added.vtype is ValueType.INT32 and added.value == hp
-    assert win.status.text() == hints.ADDED.format(n=1)
+    assert win.pro.status.text() == hints.ADDED.format(n=1)
 
 
 def test_aob_search_and_show_in_code(pro):
@@ -134,7 +134,8 @@ def test_freeze_keeps_writing_until_off(win, pro, game):
     lst, row = _row(pro)
     freezer = win.ctl.freezer
     lst.table.item(0, 4).setCheckState(Qt.CheckState.Checked)
-    assert freezer.keys == {f"pro:{HP_ADDR:x}"} and freezer.interval <= 0.1
+    assert freezer.keys == {row.key} and freezer.interval <= 0.1
+    assert row.key == f"pro:{row.row_id}:{HP_ADDR:x}"
     assert row.frozen == row.value
     lst.table.item(0, 3).setText("555")
     assert freezer.fixed_writes("pro:")[row.key][0][2] == struct.pack("<i", 555)

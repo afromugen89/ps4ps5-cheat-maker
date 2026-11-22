@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
+from PySide6.QtCore import QObject, Signal
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
+from cheatmaker.core.pro.asm import AssemblerNotFound
 from cheatmaker.core.pro.asm_text import CantConvert
 from cheatmaker.core.pro.compile import SiteChanged
 from cheatmaker.core.pro.scan import SearchReplaced
 from cheatmaker.core.pro.sites import Overlap
 from cheatmaker.core.session import GameInfo
-from cheatmaker.errors import LockFailed
+from cheatmaker.errors import ConnectionLost, LockFailed, WriteFailed
 from cheatmaker.ui.controller import Controller
-from cheatmaker.ui.messages import report
+from cheatmaker.ui.messages import LOST, report
 from cheatmaker.ui.pro import hints
 from cheatmaker.ui.tasks import TaskRunner
 
@@ -20,13 +22,41 @@ PRO_ERRORS = (SiteChanged, Overlap, LockFailed, CantConvert, SearchReplaced)
 cheat or the room); the guided wording ("Couldn't lock this value") would mislead."""
 
 
-def fail(ctl: Controller, exc: BaseException, action: str) -> None:
-    """``Controller.fail`` with Pro's own errors shown as they read."""
+def pro_text(exc: BaseException, guided: str) -> str:
+    """The Pro window's wording for an error (``guided``: the main window's)."""
+    if isinstance(exc, AssemblerNotFound):
+        return hints.ASSEMBLER_MISSING
+    if isinstance(exc, WriteFailed):
+        return hints.WRITE_FAILED.format(reason=str(exc) or "no reason given")
     if isinstance(exc, PRO_ERRORS):
-        ctl.message.emit(str(exc))
-        report(exc, action)
-        return
-    ctl.fail(exc, action)
+        return str(exc)
+    return guided
+
+
+class ProMessages(QObject):
+    """The Pro window's own status line: every Pro tab, editor and dialog says things
+    here, never in the main window. Emitting is safe from worker threads."""
+
+    message = Signal(str)
+    site_changed = Signal(object)  # SiteChanged: the window shows its details
+
+    def __init__(self, ctl: Controller) -> None:
+        super().__init__()
+        self.ctl = ctl
+
+    def say(self, text: str) -> None:
+        self.message.emit(text)
+
+    def fail(self, exc: BaseException, action: str) -> None:
+        """Log, then say it in Pro. A dropped link is also handled by the Controller
+        (every cheat off, main window told)."""
+        if isinstance(exc, ConnectionLost):
+            self.ctl.fail(exc, action)
+            self.say(LOST)
+            return
+        self.say(pro_text(exc, report(exc, action)))
+        if isinstance(exc, SiteChanged):
+            self.site_changed.emit(exc)
 
 
 def game_text(game: GameInfo | None, connected: bool, alive: bool) -> str:
@@ -47,10 +77,11 @@ class ProTab(QWidget):
     game; ``banner`` then says why. Subclasses put their widgets in ``body`` and react
     in ``game_state_changed``."""
 
-    def __init__(self, ctl: Controller, tasks: TaskRunner) -> None:
+    def __init__(self, ctl: Controller, tasks: TaskRunner, msgs: ProMessages | None = None) -> None:
         super().__init__()
         self.ctl = ctl
         self.tasks = tasks
+        self.msgs = msgs or ProMessages(ctl)
         self.game: GameInfo | None = None
         self.alive = False
         self.banner = QLabel()

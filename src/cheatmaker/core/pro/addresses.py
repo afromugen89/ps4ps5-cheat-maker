@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import itertools
 import logging
 import re
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from cheatmaker.core.cheats import MAIN_MODULE, Cheat, Location
 from cheatmaker.core.freezer import Freezer
@@ -15,6 +16,7 @@ from cheatmaker.core.values import ValueType
 from cheatmaker.errors import ConsoleBusy, ReadFailed
 
 log = logging.getLogger(__name__)
+_ROW_IDS = itertools.count(1)
 
 _PLACE = re.compile(
     r"^\s*(?:(?P<module>[\w.\-]+)?\s*\+\s*)?(?P<num>(?:0x)?[0-9a-f]+)h?\s*$", re.IGNORECASE
@@ -59,15 +61,17 @@ class AddressRow:
     comment: str = ""
     value: float | int | None = None  # as last read; None: couldn't be read
     frozen: float | int | None = None  # the value kept while frozen
+    row_id: int = field(default_factory=lambda: next(_ROW_IDS))
 
     @property
     def key(self) -> str:
-        return freeze_key(self.address)
+        return freeze_key(self.row_id, self.address)
 
 
-def freeze_key(addr: int) -> str:
-    """The Freezer key of a Pro address-list freeze (never a guided one's)."""
-    return f"pro:{addr:x}"
+def freeze_key(row_id: int, addr: int) -> str:
+    """The Freezer key of a Pro address-list freeze: never a guided one's, and one per
+    row (two rows on one address, e.g. as two types, freeze separately)."""
+    return f"pro:{row_id}:{addr:x}"
 
 
 def read_values(session: Session, rows: Sequence[AddressRow]) -> list[float | int | None]:

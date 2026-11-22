@@ -24,17 +24,18 @@ from cheatmaker.core.pro.badge import pc_only, runner_cheats
 from cheatmaker.paths import default_save_dir
 from cheatmaker.ui.controller import Controller
 from cheatmaker.ui.pro import hints
-from cheatmaker.ui.pro.tab import fail
+from cheatmaker.ui.pro.tab import ProMessages
 from cheatmaker.ui.save_dialog import ask_overwrite
 
 EXPORT_FORMATS = (("json", ".json (GoldHEN)"), ("shn", ".shn"), ("mc4", ".mc4"))
 
 
 class ExportDialog(QDialog):
-    def __init__(self, ctl: Controller, parent=None) -> None:
+    def __init__(self, ctl: Controller, msgs: ProMessages, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle(hints.EXPORT_TITLE)
         self.ctl = ctl
+        self.msgs = msgs
         self.cf = ctl.ensure_file()
         self.confirm: Callable[[str], bool] = lambda name: ask_overwrite(self, name)
         self.saved: Path | None = None
@@ -113,7 +114,7 @@ class ExportDialog(QDialog):
                     return None
                 path = save_to_pc(folder, name, data, overwrite=True)
         except Exception as exc:
-            fail(self.ctl, exc, "pro_export")
+            self.msgs.fail(exc, "pro_export")
             return None
         self.saved = path
         self.result.setText(hints.EXPORT_SAVED.format(path=path))

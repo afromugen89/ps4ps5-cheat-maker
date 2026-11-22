@@ -17,7 +17,9 @@ from collections.abc import Callable
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QLabel, QMainWindow, QMessageBox, QTabWidget, QVBoxLayout, QWidget
 
+from cheatmaker.core.pro.addresses import place_text
 from cheatmaker.core.pro.asm import Assembler, AssemblerNotFound, default_assembler
+from cheatmaker.core.pro.compile import SiteChanged
 from cheatmaker.core.session import GameInfo
 from cheatmaker.ui.controller import Controller
 from cheatmaker.ui.pro import hints
@@ -26,7 +28,7 @@ from cheatmaker.ui.pro.cheats_tab import CheatsTab
 from cheatmaker.ui.pro.code_tab import CodeTab
 from cheatmaker.ui.pro.memory_tab import MemoryTab
 from cheatmaker.ui.pro.scanner_tab import ScannerTab
-from cheatmaker.ui.pro.tab import ProTab, game_text
+from cheatmaker.ui.pro.tab import ProMessages, ProTab, game_text
 from cheatmaker.ui.tasks import TaskRunner
 
 log = logging.getLogger(__name__)
@@ -35,8 +37,8 @@ POLL_MS = 2000
 
 
 class _Placeholder(ProTab):
-    def __init__(self, ctl: Controller, tasks: TaskRunner, text: str) -> None:
-        super().__init__(ctl, tasks)
+    def __init__(self, ctl: Controller, tasks: TaskRunner, msgs: ProMessages, text: str) -> None:
+        super().__init__(ctl, tasks, msgs)
         lay = QVBoxLayout(self.body)
         label = QLabel(text)
         label.setWordWrap(True)
@@ -59,7 +61,9 @@ class ProWindow(QMainWindow):
         self.ctl = ctl
         self.tasks = TaskRunner(sync=ctl.tasks.sync, parent=self)
         self.save = save or (lambda: None)
+        self.msgs = ProMessages(ctl)
         self.assembler = self._make_assembler(assembler_factory)
+        self.force_close = False  # the app is closing: no questions
         self.setWindowTitle(hints.WINDOW_TITLE)
         self.resize(1100, 720)
         self.header = QLabel()
@@ -72,6 +76,11 @@ class ProWindow(QMainWindow):
         lay.addWidget(self.header)
         lay.addWidget(self.tabs, 1)
         self.setCentralWidget(root)
+        self.status = QLabel("")  # Pro's own status line (never the main window's)
+        self.status.setWordWrap(True)
+        self.statusBar().addWidget(self.status, 1)
+        self.msgs.message.connect(self.status.setText)
+        self.msgs.site_changed.connect(self.show_site_changed)
 
         self.alive = True
         self._polling = False
@@ -81,7 +90,6 @@ class ProWindow(QMainWindow):
         ctl.game_changed.connect(self._on_game)
         ctl.connection_changed.connect(lambda _up: self._show_state())
         self._show_state()
-        self.timer.start()
 
     def _make_assembler(self, factory: Callable[[], Assembler] | None) -> Assembler | None:
         """The assembler, or None: the Cheats tab then says "Assembler not found"."""
@@ -92,16 +100,18 @@ class ProWindow(QMainWindow):
             return None
 
     def _build_tabs(self) -> None:
-        self.scanner = ScannerTab(self.ctl, self.tasks)
+        self.scanner = ScannerTab(self.ctl, self.tasks, self.msgs)
         self.add_tab(self.scanner, hints.TAB_SCANNER)
-        self.addresses = AddressListTab(self.ctl, self.tasks)
+        self.addresses = AddressListTab(self.ctl, self.tasks, self.msgs)
         self.add_tab(self.addresses, hints.TAB_ADDRESSES)
-        self.code = CodeTab(self.ctl, self.tasks)
+        self.code = CodeTab(self.ctl, self.tasks, self.msgs)
         self.add_tab(self.code, hints.TAB_CODE)
-        self.memory = MemoryTab(self.ctl, self.tasks)
+        self.memory = MemoryTab(self.ctl, self.tasks, self.msgs)
         self.add_tab(self.memory, hints.TAB_MEMORY)
-        self.add_tab(_Placeholder(self.ctl, self.tasks, hints.WATCH_LATER), hints.TAB_WATCH)
-        self.cheats = CheatsTab(self.ctl, self.tasks, self.assembler, self.save)
+        self.add_tab(
+            _Placeholder(self.ctl, self.tasks, self.msgs, hints.WATCH_LATER), hints.TAB_WATCH
+        )
+        self.cheats = CheatsTab(self.ctl, self.tasks, self.assembler, self.save, self.msgs)
         self.add_tab(self.cheats, hints.TAB_CHEATS)
         self.code.make_entry = self._entry_from_code
         self.scanner.add_address = lambda addr, vtype: self.addresses.add(addr, vtype)
@@ -157,7 +167,7 @@ class ProWindow(QMainWindow):
 
     def _poll_failed(self, exc: BaseException) -> None:
         self._polling = False
-        self.ctl.fail(exc, "pro_poll")
+        self.msgs.fail(exc, "pro_poll")
 
     # -- safety notice -----------------------------------------------------------
     def show_safety_notice(self) -> None:
@@ -170,7 +180,41 @@ class ProWindow(QMainWindow):
         self.ctl.settings.save()
         QMessageBox.information(self, hints.NOTICE_TITLE, hints.NOTICE)
 
+    # -- details --------------------------------------------------------------------
+    def show_site_changed(self, exc: SiteChanged) -> None:
+        """Every site that holds other bytes than recorded: place, expected, found."""
+        game = self.game
+        rows = [
+            hints.SITE_ROW.format(
+                place=place_text(addr, game),
+                expected=want.hex(" ").upper(),
+                found=got.hex(" ").upper(),
+            )
+            for addr, want, got in exc.found
+        ]
+        QMessageBox.warning(
+            self, hints.SITE_CHANGED_TITLE, "\n\n".join([hints.SITE_CHANGED, *rows])
+        )
+
+    # -- showing and closing ------------------------------------------------------------
+    def showEvent(self, event) -> None:
+        """(Re)opened: the liveness poll runs again, starting now."""
+        super().showEvent(event)
+        if not self.timer.isActive():
+            self.timer.start()
+            self.poll()
+
+    def confirm_close(self, frozen: int) -> bool:
+        answer = QMessageBox.question(
+            self, hints.CLOSE_FROZEN_TITLE, hints.CLOSE_FROZEN.format(n=frozen)
+        )
+        return answer == QMessageBox.StandardButton.Yes
+
     def closeEvent(self, event) -> None:
+        frozen = self.addresses.frozen_count()
+        if frozen and not self.force_close and not self.confirm_close(frozen):
+            event.ignore()
+            return
         self.timer.stop()
         for tab in self.pro_tabs:
             tab.closing()

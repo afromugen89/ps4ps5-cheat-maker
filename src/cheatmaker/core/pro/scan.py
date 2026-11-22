@@ -107,6 +107,13 @@ class ProScan:
             self.count = None
             raise SearchReplaced(REPLACED)
 
+    def claim(self) -> None:
+        """Take the console's search (UI thread, before the first scan's worker starts):
+        the guided Scanner hears it at once and the owner is set before any console
+        call, so a guided scan can't slip in between."""
+        self.count = None
+        self.session.take_search(owner=self, by="pro")
+
     def first(
         self,
         region: str,
@@ -116,15 +123,17 @@ class ProScan:
         progress: ProgressFn | None = None,
         cancel: threading.Event | None = None,
     ) -> int:
+        """The first scan (worker thread), after ``claim``."""
         if cmp.needs_previous:
             raise ValueError("A first search compares with a number, or starts unknown.")
         game = self.session.require_game()
         maps = regions(self.session, region)
-        self.session.take_search(owner=self)
-        self.count = None
-        count = self.session.require_client().scan_start(
-            game.pid, maps, vtype, cmp, value, progress, cancel
-        )
+        with self.session.search_lock:
+            if self.session.search_owner is not self:
+                raise SearchReplaced(REPLACED)
+            count = self.session.require_client().scan_start(
+                game.pid, maps, vtype, cmp, value, progress, cancel
+            )
         self.vtype, self.count = vtype, count
         self.history = [f"{cmp.value} {value}" if value is not None else cmp.value]
         log.info(
@@ -143,10 +152,11 @@ class ProScan:
         progress: ProgressFn | None = None,
         cancel: threading.Event | None = None,
     ) -> int:
-        self._check()
         if cmp is Compare.UNKNOWN:
             raise ValueError("Unknown is for a first search only.")
-        count = self.session.require_client().scan_next(cmp, value, progress, cancel)
+        with self.session.search_lock:
+            self._check()
+            count = self.session.require_client().scan_next(cmp, value, progress, cancel)
         self.count = count
         self.history.append(f"{cmp.value} {value}" if value is not None else cmp.value)
         log.info("action=pro_scan_next cmp=%s count=%d", cmp.value, count)
@@ -154,8 +164,9 @@ class ProScan:
 
     def page(self, n: int) -> list[ScanHit]:
         """Results ``n * PAGE_SIZE`` onwards, at most ``PAGE_SIZE`` of them."""
-        self._check()
-        return self.session.require_client().scan_results(PAGE_SIZE, n * PAGE_SIZE)
+        with self.session.search_lock:
+            self._check()
+            return self.session.require_client().scan_results(PAGE_SIZE, n * PAGE_SIZE)
 
     def pages(self) -> int:
         return 0 if not self.count else (self.count + PAGE_SIZE - 1) // PAGE_SIZE

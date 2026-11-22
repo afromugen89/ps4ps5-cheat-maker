@@ -4,6 +4,7 @@ Freezer under ``pro:`` keys, so they never touch a guided freeze."""
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 
 from PySide6.QtCore import Qt
@@ -25,12 +26,13 @@ from cheatmaker.core.values import ValueType
 from cheatmaker.ui.controller import Controller
 from cheatmaker.ui.pointer_dialog import PointerDialog
 from cheatmaker.ui.pro import hints
-from cheatmaker.ui.pro.tab import ProTab, fail
+from cheatmaker.ui.pro.tab import ProMessages, ProTab
 from cheatmaker.ui.tasks import TaskRunner
 
 COL_DESC, COL_ADDR, COL_TYPE, COL_VALUE, COL_FREEZE, COL_GROUP, COL_COMMENT, COL_BADGE = range(8)
 HEADERS = ["Description", "Address", "Type", "Value", "Freeze", "Group", "Comment", "Badge"]
 TYPES = tuple(ValueType)
+log = logging.getLogger(__name__)
 
 
 def parse_value(text: str, vtype: ValueType) -> float | int:
@@ -44,14 +46,15 @@ def parse_value(text: str, vtype: ValueType) -> float | int:
 
 
 class AddressListTab(ProTab):
-    def __init__(self, ctl: Controller, tasks: TaskRunner) -> None:
-        super().__init__(ctl, tasks)
+    def __init__(self, ctl: Controller, tasks: TaskRunner, msgs: ProMessages | None = None) -> None:
+        super().__init__(ctl, tasks, msgs)
         self.rows: list[ad.AddressRow] = []
-        self.writer = pc_compile.ProWriter(ctl.session, warn=ctl.message.emit)
+        self.writer = pc_compile.ProWriter(ctl.session, warn=self.msgs.say)
         self.show_memory: Callable[[int], None] = lambda addr: None  # set by the window
         self.ask_text: Callable[[str, str, str], str | None] = self._ask_text
         self.exec_dialog: Callable[[object], object] = lambda d: d.exec()
         self._filling = False
+        self._paused = False  # freezes held back while the game isn't running
 
         self.hint = QLabel(hints.ADDRESSES)
         self.hint.setWordWrap(True)
@@ -167,12 +170,28 @@ class AddressListTab(ProTab):
         self.pointer_btn.setEnabled(one)
         self.refresh_btn.setEnabled(bool(self.rows))
 
+    def frozen_count(self) -> int:
+        return sum(row.frozen is not None for row in self.rows)
+
     def game_state_changed(self, new_game: bool) -> None:
         if new_game:
             # the Controller already cleared every freeze for the new game
             for row in self.rows:
                 row.frozen = None
-            self.writer = pc_compile.ProWriter(self.ctl.session, warn=self.ctl.message.emit)
+            self._paused = False
+            self.writer = pc_compile.ProWriter(self.ctl.session, warn=self.msgs.say)
+        elif not self.running and not self._paused and self.frozen_count():
+            # the game has gone: stop writing there, but remember what to keep
+            for row in self.rows:
+                if row.frozen is not None:
+                    self.ctl.freezer.unfreeze(row.key)
+            self._paused = True
+            log.info("action=pro_freeze paused=%d", self.frozen_count())
+        elif self.running and self._paused:
+            self._paused = False
+            for row in self.rows:
+                if row.frozen is not None:
+                    ad.freeze(self.ctl.session, self.ctl.freezer, row, row.frozen)
         self.fill()
 
     # -- reading and editing -------------------------------------------------------------
@@ -188,7 +207,7 @@ class AddressListTab(ProTab):
             self.fill()
 
         self.tasks.run(
-            lambda: ad.read_values(session, rows), done, lambda e: fail(self.ctl, e, "pro_read")
+            lambda: ad.read_values(session, rows), done, lambda e: self.msgs.fail(e, "pro_read")
         )
 
     def _item_changed(self, item: QTableWidgetItem) -> None:
@@ -209,7 +228,7 @@ class AddressListTab(ProTab):
                 self.set_freeze(row, item.checkState() == Qt.CheckState.Checked)
                 return
         except Exception as exc:
-            fail(self.ctl, exc, "pro_address")
+            self.msgs.fail(exc, "pro_address")
         self.fill()
 
     def set_value(self, row: ad.AddressRow, value: float | int) -> None:
@@ -219,7 +238,7 @@ class AddressListTab(ProTab):
             if row.frozen is not None:
                 ad.freeze(self.ctl.session, self.ctl.freezer, row, value)
         except Exception as exc:
-            fail(self.ctl, exc, "pro_set")
+            self.msgs.fail(exc, "pro_set")
         self.fill()
 
     def set_freeze(self, row: ad.AddressRow, on: bool) -> None:
@@ -232,7 +251,7 @@ class AddressListTab(ProTab):
             else:
                 ad.unfreeze(self.ctl.freezer, row)
         except Exception as exc:
-            fail(self.ctl, exc, "pro_freeze")
+            self.msgs.fail(exc, "pro_freeze")
         self.fill()
 
     def _retype(self, row: ad.AddressRow, box: QComboBox) -> None:
@@ -249,7 +268,7 @@ class AddressListTab(ProTab):
         try:
             addr = ad.parse_place(text, self.ctl.session.require_game())
         except Exception as exc:
-            fail(self.ctl, exc, "pro_address")
+            self.msgs.fail(exc, "pro_address")
             return
         self.add(addr, ValueType.INT32)
 
@@ -273,7 +292,7 @@ class AddressListTab(ProTab):
 
         def use(chain, _vtype) -> None:
             row.comment = f"pointer: {chain.label()}"
-            self.ctl.message.emit(
+            self.msgs.say(
                 hints.POINTER_FOUND.format(
                     place=ad.place_text(row.address, self.game), chain=chain.label()
                 )
@@ -283,7 +302,7 @@ class AddressListTab(ProTab):
         try:
             dlg = PointerDialog(self.ctl, row.address, row.vtype, use, self)
         except Exception as exc:
-            fail(self.ctl, exc, "pro_pointer")
+            self.msgs.fail(exc, "pro_pointer")
             return
         self.exec_dialog(dlg)
 

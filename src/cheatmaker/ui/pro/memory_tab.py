@@ -21,15 +21,15 @@ from cheatmaker.core.pro.addresses import parse_place, place_text
 from cheatmaker.ui.controller import Controller
 from cheatmaker.ui.pro import hints
 from cheatmaker.ui.pro.cave_editor import mono
-from cheatmaker.ui.pro.tab import ProTab, fail
+from cheatmaker.ui.pro.tab import ProMessages, ProTab
 from cheatmaker.ui.tasks import TaskRunner
 
 COL_TEXT = mp.ROW  # the last column: the row as text
 
 
 class MemoryTab(ProTab):
-    def __init__(self, ctl: Controller, tasks: TaskRunner) -> None:
-        super().__init__(ctl, tasks)
+    def __init__(self, ctl: Controller, tasks: TaskRunner, msgs: ProMessages | None = None) -> None:
+        super().__init__(ctl, tasks, msgs)
         self.page: mp.MemPage | None = None
         self.target: int | None = None
 
@@ -84,7 +84,7 @@ class MemoryTab(ProTab):
         try:
             addr = parse_place(self.place.text(), self.ctl.session.require_game())
         except Exception as exc:
-            fail(self.ctl, exc, "pro_memory")
+            self.msgs.fail(exc, "pro_memory")
             return
         self.go(addr)
 
@@ -98,7 +98,7 @@ class MemoryTab(ProTab):
         self.tasks.run(
             lambda: mp.read_page(session, addr),
             lambda page: self._loaded(page, addr),
-            lambda exc: fail(self.ctl, exc, "pro_memory"),
+            lambda exc: self.msgs.fail(exc, "pro_memory"),
         )
 
     def _loaded(self, page: mp.MemPage, addr: int) -> None:

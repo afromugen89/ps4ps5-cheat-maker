@@ -28,12 +28,16 @@ from cheatmaker.core import project as pj
 from cheatmaker.core import updater as up
 from cheatmaker.core.cheats import Cheat, Location, LocationKind, combine, versions_differ
 from cheatmaker.core.locker import NOP
+from cheatmaker.core.pro import compile as pro_compile
+from cheatmaker.core.pro.compile import SiteChanged
+from cheatmaker.core.pro.sites import Overlap
 from cheatmaker.core.values import parse_number
 from cheatmaker.errors import CheatMakerError, ConsoleBusy, ProjectFileError
 from cheatmaker.ui import hints
 from cheatmaker.ui.controller import Controller
 from cheatmaker.ui.find_again import FindAgain, LearnDialog
 from cheatmaker.ui.find_wizard import fmt_value
+from cheatmaker.ui.messages import report
 
 log = logging.getLogger(__name__)
 
@@ -86,6 +90,10 @@ def _line_details(loc: Location) -> str:
     return f"{loc.part}: {where}: {bytes_}" if loc.part else f"{where}: {bytes_}"
 
 
+PRO_TOGGLE_ERRORS = (SiteChanged, Overlap)
+"""Turning a Pro cheat on refused by Pro's rules: the error's text says why."""
+
+
 class CheatsView(QWidget):
     def __init__(self, ctl: Controller) -> None:
         super().__init__()
@@ -94,6 +102,7 @@ class CheatsView(QWidget):
         self.open_build: Callable[..., None] = lambda **kw: None
         self.open_save: Callable[[], None] = lambda: None
         self.finder = FindAgain(ctl)
+        self._pro_writer = pro_compile.ProWriter(ctl.session, warn=ctl.message.emit)
         self.open_learn: Callable[[Cheat], None] = lambda c: LearnDialog(
             self.ctl, self.finder, c, self
         ).exec()
@@ -311,11 +320,11 @@ class CheatsView(QWidget):
                 if want and not c.enabled:
                     if self.finder.confirm(c):  # AC-12.2: ask once per run
                         self.finder.before_on(c)
-                        self.ctl.live.turn_on(c)
+                        self._turn_on(c)
                         if c.carried == "test" and c.enabled:
                             self.finder.tested(c)
                 elif not want and c.enabled:
-                    self.ctl.live.turn_off(c)
+                    self._turn_off(c)
                     self.finder.after_off(c)
             elif item.column() == COL_NAME:
                 name = item.text().strip()
@@ -333,10 +342,30 @@ class CheatsView(QWidget):
                     _restore_value_bytes(c, saved)
                     raise
                 self.finder.cheat_changed(c)
+        except PRO_TOGGLE_ERRORS as exc:  # their own text names the site or the cheat
+            report(exc, "toggle")
+            self.ctl.message.emit(str(exc))
         except Exception as exc:
             self.ctl.fail(exc, "toggle" if item.column() == COL_ON else "edit")
             c.enabled = c.enabled and self.ctl.session.connected
         self.fill()
+
+    def _turn_on(self, c: Cheat) -> None:
+        """A Pro cheat goes on through Pro's rules (sites checked, overlap refused, read
+        back, undone on failure); any other cheat as before."""
+        if c.pro is None:
+            self.ctl.live.turn_on(c)
+            return
+        enabled = [x for x in self.cheats if x.enabled and x is not c]
+        pro_compile.enable(self.ctl.session, c.pro, self._pro_writer, enabled)
+        self.ctl.live.mark_on(c)
+
+    def _turn_off(self, c: Cheat) -> None:
+        if c.pro is None:
+            self.ctl.live.turn_off(c)
+            return
+        pro_compile.disable(self.ctl.session, c.pro, self._pro_writer)
+        self.ctl.live.turn_off(c, restore=False)  # already written back
 
     def do_build(self, c: Cheat) -> None:
         """Make it work on this cheat's value; the result replaces it."""

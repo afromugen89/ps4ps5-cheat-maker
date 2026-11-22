@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from cheatmaker.busy import short_wait
 from cheatmaker.console.client import ConsoleClient, MemMap
 from cheatmaker.core.cheats import MAIN_MODULE, LocationKind
 from cheatmaker.errors import (
@@ -28,6 +30,8 @@ what 1.3.2 really reports."""
 TITLE_ID_RE = re.compile(r"^(PPSA|CUSA)\d{5}$", re.IGNORECASE)
 
 ClientFactory = Callable[[str, int], ConsoleClient]
+ALIVE_WAIT = 0.5
+"""Seconds the Pro liveness poll waits for a busy connection before it counts as alive."""
 
 
 @dataclass(frozen=True)
@@ -93,6 +97,10 @@ class Session:
         # Who started the console's current search (the guided Scanner, the Pro
         # scanner, or None for another search): the Pro scanner checks it is still its own.
         self.search_owner: object | None = None
+        self.search_taken_by = ""  # who took it last ("pro": the Pro scanner)
+        # Held around "is it still mine?" plus the console call, by the guided Scanner
+        # and the Pro scanner (worker threads; the UI thread never takes it).
+        self.search_lock = threading.RLock()
         # Module-offset ranges [start, end) that saved find-again notes keep for their
         # routines and slots (even while still zero): new caves and slots avoid them.
         self.reserved_rooms: list[tuple[int, int]] = []
@@ -128,11 +136,13 @@ class Session:
                 self.client = None
         self._set_game(None)
 
-    def take_search(self, owner: object | None = None) -> None:
-        """Another search is about to replace the console's search session."""
+    def take_search(self, owner: object | None = None, by: str = "") -> None:
+        """Another search is about to replace the console's search session. ``by``
+        names who takes it ("pro"), so the one losing it can say so."""
+        self.search_owner = owner
+        self.search_taken_by = by
         for cb in list(self.on_search_taken):
             cb()
-        self.search_owner = owner
 
     def require_client(self) -> ConsoleClient:
         if self.client is None:
@@ -181,14 +191,16 @@ class Session:
         """Is the attached game still running (Pro window poll, AC-1.2)? The game in the
         foreground says yes at once; otherwise (the PS5's home screen is up, the game
         suspended) its memory map still answering does. A busy connection counts as
-        alive: the next poll asks again. ConnectionLost is raised as usual."""
+        alive: the next poll asks again, so the poll never queues behind a long search
+        (it waits at most ``ALIVE_WAIT`` for the connection). ConnectionLost is raised."""
         game = self.require_game()
         client = self.require_client()
-        fg = client.foreground_app()
-        if fg is not None and fg.pid == game.pid:
-            return True
         try:
-            return bool(client.maps(game.pid))
+            with short_wait(ALIVE_WAIT):
+                fg = client.foreground_app()
+                if fg is not None and fg.pid == game.pid:
+                    return True
+                return bool(client.maps(game.pid))
         except ConsoleBusy:
             return True
         except ReadFailed:

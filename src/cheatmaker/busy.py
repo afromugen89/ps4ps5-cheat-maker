@@ -18,6 +18,26 @@ MAIN_THREAD_WAIT = 1.5
 BUSY_MESSAGE = "The PS5 is busy right now. Try again in a moment."
 
 
+_local = threading.local()
+
+
+@contextlib.contextmanager
+def short_wait(seconds: float) -> Iterator[None]:
+    """On this (worker) thread, wait at most ``seconds`` for the console, then give up
+    with ConsoleBusy (e.g. a liveness poll that must not queue behind a long search)."""
+    prev = getattr(_local, "wait", None)
+    _local.wait = seconds
+    try:
+        yield
+    finally:
+        _local.wait = prev
+
+
+def thread_wait() -> float | None:
+    """The ``short_wait`` limit of this thread, or None (wait as long as it takes)."""
+    return getattr(_local, "wait", None)
+
+
 def on_ui_thread() -> bool:
     return threading.current_thread() is threading.main_thread()
 

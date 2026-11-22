@@ -55,7 +55,9 @@ def test_typing_assembles_after_a_pause(qtbot, tab):
     assert DEBOUNCE_MS < 500
     cheat = new_cheat(tab)
     tab.editor.source.setPlainText("nop\noriginal\njmp return\n")
-    assert cheat.pro.entries[0].source.startswith("nop")
+    entry = cheat.pro.entries[0]
+    assert entry.source == pc_compile.DEFAULT_SOURCE, "typing only changes the draft"
+    assert tab.editor.has_draft(entry)
     qtbot.waitUntil(lambda: tab.editor.bytes_view.toPlainText().startswith("90 "), timeout=2000)
     assert tab.editor.error.text() == ""
     tab.editor.source.setPlainText("nop\nbogus here\n")
@@ -89,7 +91,7 @@ def test_build_keeps_the_new_bytes(win, tab):
     entry = cheat.pro.entries[0]
     assert entry.cave_bytes[0] == 0x90
     assert cheat.locations[0].on == entry.cave_bytes, "compiled again"
-    assert "Built" in win.status.text()
+    assert "Built" in win.pro.status.text()
 
 
 def test_build_error_changes_nothing(win, tab):
@@ -98,7 +100,7 @@ def test_build_error_changes_nothing(win, tab):
     tab.editor.source.setPlainText("bogus\n")
     tab.editor.build_btn.click()
     assert cheat.pro.entries[0].cave_bytes == before
-    assert "Line 1" in win.status.text()
+    assert "Line 1" in win.pro.status.text()
 
 
 def test_build_passes_my_cheats_code_lines(tab, monkeypatch):
@@ -109,7 +111,7 @@ def test_build_passes_my_cheats_code_lines(tab, monkeypatch):
     real = pc_compile.build
 
     def spy(*a, **kw):
-        seen.update(kw)
+        seen["open_rooms"] = a[5]
         return real(*a, **kw)
 
     monkeypatch.setattr(pc_compile, "build", spy)
@@ -141,7 +143,7 @@ def test_changed_site_writes_nothing(win, tab, game):
     writes = len(game.fake.writes)
     tab.on_box.click()
     assert not cheat.enabled and len(game.fake.writes) == writes
-    assert "Nothing was changed" in win.status.text()
+    assert "Nothing was changed" in win.pro.status.text()
 
 
 def test_overlap_names_the_other_cheat(win, tab):
@@ -150,14 +152,15 @@ def test_overlap_names_the_other_cheat(win, tab):
     assert first.enabled
     second = new_cheat(tab, "Second")
     tab.on_box.click()
-    assert not second.enabled and "First" in win.status.text()
+    assert not second.enabled and "First" in win.pro.status.text()
 
 
 def test_build_and_entry_changes_wait_until_off(win, tab):
     cheat = new_cheat(tab)
     tab.on_box.click()
-    tab.editor.build_btn.click()
-    assert win.status.text() == hints.TURN_OFF_FIRST
+    assert tab.editor.source.isReadOnly() and not tab.editor.build_btn.isEnabled()
+    tab.build_entry(cheat.pro.entries[0], "nop\n")
+    assert win.pro.status.text() == hints.TURN_OFF_FIRST
     assert not tab.add_cave_btn.isEnabled() and not tab.remove_entry_btn.isEnabled()
     assert cheat.enabled
 
@@ -173,14 +176,14 @@ def test_add_and_remove_entries(win, tab):
     assert [e.kind for e in cheat.pro.entries] == ["cave"]
     tab.entries.setCurrentRow(0)
     tab.remove_entry_btn.click()
-    assert win.status.text() == hints.LAST_ENTRY
+    assert win.pro.status.text() == hints.LAST_ENTRY
 
 
 def test_bad_place_is_refused(win, tab):
     answers(tab, "x", "here")
     tab.new_btn.click()
     assert len(win.ctl.cheat_file.cheats) == 0
-    assert "eboot.bin+0x1234" in win.status.text()
+    assert "eboot.bin+0x1234" in win.pro.status.text()
 
 
 def test_variable_value_goes_live_when_on(win, tab, game):
@@ -195,7 +198,7 @@ def test_variable_value_goes_live_when_on(win, tab, game):
     entry = cheat.pro.entries[0]
     ((_name, _t, at),) = entry.layout
     assert game_bytes(game, fg.BASE + entry.cave + at, 4) == (1234).to_bytes(4, "little")
-    assert win.status.text() == hints.VAR_WRITTEN.format(name="value1", value="1234")
+    assert win.pro.status.text() == hints.VAR_WRITTEN.format(name="value1", value="1234")
 
 
 def test_variable_waits_for_build_when_the_layout_changed(win, tab):
@@ -203,7 +206,7 @@ def test_variable_waits_for_build_when_the_layout_changed(win, tab):
     tab.add_var_btn.click()
     tab.vars.item(0, 2).setText("7")
     assert cheat.pro.variables[0].value == 7
-    assert win.status.text() == hints.VAR_NEEDS_BUILD.format(name="value1")
+    assert win.pro.status.text() == hints.VAR_NEEDS_BUILD.format(name="value1")
 
 
 def test_variable_type_and_in_file(tab):
@@ -222,7 +225,7 @@ def test_bad_variable_name_is_refused(win, tab):
     tab.add_var_btn.click()
     tab.vars.item(0, 0).setText("rax")
     assert cheat.pro.variables[0].name == "value1"
-    assert "register" in win.status.text()
+    assert "register" in win.pro.status.text()
 
 
 def _guided(win) -> Cheat:
@@ -312,7 +315,7 @@ def test_export_other_formats(win, tab, tmp_path, fmt):
     _export_project(win)
     from cheatmaker.ui.pro.export_dialog import ExportDialog
 
-    dlg = ExportDialog(win.ctl)
+    dlg = ExportDialog(win.ctl, win.pro.msgs)
     dlg.fmt.setCurrentIndex(dlg.fmt.findData(fmt))
     dlg.folder.setText(str(tmp_path))
     path = dlg.do_export()
@@ -357,7 +360,7 @@ def test_import_and_convert_to_assembly(win, tab, tmp_path):
     (cheat,) = [c for c in win.ctl.cheat_file.cheats if c.pro is not None]
     assert [e.kind for e in cheat.pro.entries] == ["cave"]
     assert cheat.pro.origin == "import"
-    assert win.status.text() == hints.IMPORTED.format(n=1)
+    assert win.pro.status.text() == hints.IMPORTED.format(n=1)
 
 
 def test_import_cancelled_adds_nothing(win, tab, tmp_path):
@@ -392,5 +395,5 @@ def test_real_assembler_from_the_settings(win, qtbot):
     cheat = new_cheat(t)
     t.editor.source.setPlainText("mov eax, 1\noriginal\njmp return\n")
     qtbot.waitUntil(lambda: t.editor.bytes_view.toPlainText().startswith("B8 01"), timeout=3000)
-    assert cheat.pro.entries[0].source.startswith("mov")
+    assert t.editor.draft_of(cheat.pro.entries[0]).startswith("mov")
     pro.close()
