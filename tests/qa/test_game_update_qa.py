@@ -141,7 +141,7 @@ def test_tc06_broken_declined_setting_resets_and_offers(make):
 # == AC-U7 old notes, format 4 ===============================================================
 def test_tc07_old_notes_byte_identical_after_a_failed_bring_over(make):
     """TC-07: the hook can't come over (code changed): old notes and old fingerprints
-    are byte for byte the same; the new file is format 4 with carried_from."""
+    are byte for byte the same; the new file is format 4+ (now 5) with carried_from."""
     tc.learned_v1(1)
     up.save_signatures(up.signatures_path(fg.TITLE, fg.VERSION), fg.TITLE, fg.VERSION, {})
     before = old_files()
@@ -150,7 +150,7 @@ def test_tc07_old_notes_byte_identical_after_a_failed_bring_over(make):
     app.bring()
     assert old_files() == before
     raw = json.loads(new_path().read_text())
-    assert raw["format_version"] == 4 and raw["carried_from"] == fg.VERSION
+    assert raw["format_version"] == 5 and raw["carried_from"] == fg.VERSION
     assert raw["objects"][0]["check"] is True
 
 

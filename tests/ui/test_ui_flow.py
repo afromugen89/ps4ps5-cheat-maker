@@ -914,3 +914,41 @@ def test_lock_it_value_dropped_on_new_game_run(win, fake):
     assert c.locked is None and c.value is None and item.text() == ""
     assert not item.flags() & Qt.ItemFlag.ItemIsEditable
     assert item.toolTip() == hints.LOCK_NO_VALUE
+
+
+def test_guided_type_lists_have_no_unsigned_types(win):
+    """Pro step 2: the scanner gained unsigned types; the guided Find screen is unchanged."""
+    from cheatmaker.core.values import GUIDED_TYPES
+
+    vtypes = [win.find.vtype.itemData(i) for i in range(win.find.vtype.count())]
+    assert vtypes == [None, *GUIDED_TYPES]
+    added = [win.find.add_type.itemData(i) for i in range(win.find.add_type.count())]
+    assert added == list(GUIDED_TYPES)
+    assert win.find.add_type.currentData() is ValueType.FLOAT
+
+
+def test_save_dialog_names_left_out_cheats_with_their_reasons(win):
+    """Pro step 4 (AC-S2): the cheats a file leaves out are listed with why."""
+    from cheatmaker.core.cheats import Cheat, Location, LocationKind
+
+    connect(win)
+    raw = struct.pack("<i", 1)
+    heap = Cheat("Gold", [Location(LocationKind.SESSION_ADDRESS, 0x2000_0080, raw, raw)])
+    found = Cheat(
+        "Health",
+        [Location(LocationKind.SESSION_ADDRESS, 0, raw, raw)],
+        value_type=ValueType.INT32,
+        anchor=("obj1", "Health"),
+    )
+    patch = Cheat("nop", [Location(LocationKind.CODE_PATCH, 0x100, b"\x90\x90", b"\x89\x08")])
+    win.ctl.ensure_file().cheats.extend([heap, found, patch])
+    dlg = SaveDialog(win.ctl, win)
+    tip = dlg.skipped.toolTip()
+    assert tip.splitlines() == [
+        hints.SAVE_LEFT_OUT,
+        "Gold: heap address",
+        "Health: found again each run",
+    ]
+    win.ctl.cheat_file.cheats[:] = [patch]
+    dlg = SaveDialog(win.ctl, win)
+    assert dlg.skipped.toolTip() == ""

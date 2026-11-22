@@ -212,7 +212,7 @@ def test_format_3_combined_cheat_round_trips(tmp_path):  # AC-5
 
 
 @pytest.mark.parametrize("old", [1, 2, 3])
-def test_formats_1_to_3_load_the_same_and_save_as_4(tmp_path, old):  # AC-5, AC-U10
+def test_formats_1_to_3_load_the_same_and_save_as_5(tmp_path, old):  # AC-5, AC-U10
     doc = json.loads(GOLDEN.read_text())
     doc["format_version"] = old
     path = tmp_path / "old.cmproj"
@@ -226,12 +226,13 @@ def test_formats_1_to_3_load_the_same_and_save_as_4(tmp_path, old):  # AC-5, AC-
     assert hook is None or not hook.sig_unique, "older hooks are learned again (AC-U2)"
     pj.save(path, p)
     saved = path.read_text()
-    assert json.loads(saved)["format_version"] == 4
+    assert json.loads(saved)["format_version"] == 5
     for key in ("carried_from", '"check"', "relearn_class", "signature_unique", '"test"'):
         assert key not in saved, "format 4 keys are written only when set"
+    assert "pro_cheats" not in saved, "format 5 writes pro_cheats only when there are any"
 
 
-def test_format_5_is_from_a_newer_app(tmp_path):  # AC-5: an older app's rule, one step up
+def test_format_6_is_from_a_newer_app(tmp_path):  # AC-5: an older app's rule, one step up
     doc = json.loads(GOLDEN.read_text())
     doc["format_version"] = pj.FORMAT_VERSION + 1
     path = tmp_path / "new.cmproj"

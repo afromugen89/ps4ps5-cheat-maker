@@ -146,7 +146,7 @@ def test_missing_file_raises_cheatfileerror(tmp_path):
 
 def test_unknown_format_dumps():
     with pytest.raises(ValueError):
-        formats.dumps(_sample(), "mc4")
+        formats.dumps(_sample(), "xml")  # mc4 is a format since Pro step 5
 
 
 def test_linked_pool_and_places_are_never_written_or_compared():  # spec-linked-values L2

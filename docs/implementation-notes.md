@@ -651,3 +651,71 @@ Review round 5:
 - Find it again drops a kept answer once its object's pending place is gone or another,
   shows the busy message once per kept answer, and finishes a Yes whose carry-over save
   (`carried_yes`) was busy on a later tick.
+
+## Cheat Maker Pro, R1 steps 1-5 (2026-11-22)
+
+Built from docs/architecture-pro.md (spec docs/spec-pro.md), implementation steps 1-5.
+
+- **Step 1 (tooling).** `tools/fetch_nasm.py` pins NASM 3.02 win64 by URL and SHA-256.
+  The hash could not be computed in the build container (nasm.us blocked), so
+  `NASM_ZIP_SHA256` is None with a TODO and the script refuses to run; CI runs it with
+  `continue-on-error` until the hash is pinned. `paths.nasm_exe(configured)` takes the
+  `nasm_path` setting as an argument (paths can't import settings). `needs_nasm` tests
+  skip when no assembler is found.
+- **Step 2 (scanner model).** `ValueType.UINT8..UINT64` are appended after the old six so
+  list indices into the guided order still hold; the guided Find combos use
+  `GUIDED_TYPES`. `Compare.GREATER/LESS` compare against the typed number. On the real
+  client every greater/less (first scan, window re-scan, single- and multi-type
+  snapshot narrowing) runs as ValueBetween over `values.as_between`, the proven path;
+  BiggerThan 2 / SmallerThan 3 are never sent (review fix: they truncated 100.5 to
+  100). `as_between` bounds are values of the type (4-byte decimals: the next float32
+  past the value, clamped to the finite range), or None when nothing can match: then
+  nothing is sent and the search is empty. `ScanHit.previous` / `first` (compare=False) are kept by LocalScanSession and
+  filled from NG snapshot rows (2-value: previous; 3-value: previous + first; order
+  unverified). `scan_results(limit, offset=0)` pages; NG sends the offset in the first
+  `TURBOSCAN_GET` field (unverified, C-P2d).
+- **Step 3 (format 5).** `core/pro/model.py` (`ProCheat`, `ProEntry`, `Variable`) with
+  JSON (de)serialisation and validation (bad files raise ValueError, so `project.load`
+  reports ProjectFileError as before). `pro_cheats` is written only when there are any,
+  so a format 4 file saves as format 5 with only its version changed (AC-S3; the golden
+  `.cmproj` fixture is now format 5). NOP entries imply 0x90 on-bytes and store `on`
+  only when it differs. Variable names can't be `hook`, `return` or `original` (the
+  cave wrapper's symbols). `Cheat.pro` (compare=False) links a compiled cheat to its
+  source; compiling comes in step 8.
+- **Step 4 (badge).** `core/pro/badge.py`: `badge(cheat, project=None)` with the AC-S2
+  reasons (heap address, freeze, pointer path, found again each run; plus "nothing to
+  write" for an empty cheat). "Pointer path" needs the `.cmproj` to see that every
+  object is reached by memory paths only; without it the reason is "found again".
+  The save dialog's skipped-line tooltip lists each left-out cheat with its reasons.
+  **Open (architect):** the export filter still uses `Cheat.saveable`. The doc's rule
+  (CheatRunner = saveable and not freeze) would drop frozen values in the game's module
+  (guided "Infinite Health/Money/Ammo" on static data) from cheat files, which
+  spec-restart-combined TC-60 pins as written once, and spec-pro §1 says guided mode
+  stays as it is. `badge.runner_cheats` is ready for when it is decided. The full
+  export dialog (AC-12.1, "make a cave at its writer") is step 12.
+- **Step 5 (mc4).** `formats/_aes.py` is ReaperPy's `aes_cbc.py` with its MIT notice,
+  English messages, type hints and a strict PKCS#7 unpad; NIST SP 800-38A CBC
+  (128/192/256) and FIPS-197 block vectors pass. `formats/mc4.py` = base64(AES-256-CBC(
+  PKCS#7(`shn.dumps`))) with the public key/IV from ReaperPy `cheatfmt.py`; a file with
+  bad padding is still read when it decrypts to a `<Trainer` (logged; trailing NULs and
+  whitespace trimmed; UTF-16-LE text, with or without BOM, accepted). Decision 6
+  (revised after review): plain `.shn` is byte-identical to before Pro; `.mc4` encrypts
+  `shn.dumps(cf, sanitise=True)`, which replaces `& < > "` with `+ ( ) '` in every
+  attribute (title, credits, cheat names). Note: the real GoldHEN fixture `CUSA15436_1.05.shn` writes `&#38;` in a cheat name,
+  a hint for S-P8 that escapes may be fine. `formats.load_path` reads a file by its
+  content when it is clearly XML or JSON under another extension. The ReaperPy-made
+  mc4 fixture is not included (running ReaperPy here was not allowed); a test reads
+  ReaperPy's plaintext layout instead. The save dialog doesn't offer mc4 yet (the
+  CheatRunner folder for mc4 is unknown; export dialog in step 12).
+- **Badge decision (2026-11-22, option C).** A frozen value at a game-module address
+  keeps the CheatRunner badge with the note "written once (CheatRunner can't freeze)"
+  (`Badge.notes`); "freeze" is a reason only on a cheat that is PC only anyway. Export
+  (`CheatFile.saveable_cheats`) now uses `badge.runner_cheats`, which for guided cheats
+  is the same set as `Cheat.saveable` (tested), so TC-60 is unchanged.
+- **QA round (2026-11-22, BUG-01..04).** A Pro variable too large for its type is a
+  ValueError (and `project.load` also treats OverflowError as an unreadable file, so it
+  is set aside, not overwritten). `as_between` maps a whole number past the float range
+  to an infinity (LESS keeps every finite value, GREATER none). `.mc4` skips a leading
+  UTF-8 BOM. `formats.sniff` decodes a UTF-16 start and looks for `<` / `{` (a UTF-16
+  `.json` is again refused as "not valid JSON"). Also: entry and cave offsets must be
+  below 2^48, and variable names can't be x86 registers or NASM keywords.

@@ -278,9 +278,9 @@ class FakeConsole:
             raise ValueError("no scan to narrow down; start a new search")
         return self._scan.next(cmp, value, progress, cancel)
 
-    def scan_results(self, limit: int) -> list[ScanHit]:
+    def scan_results(self, limit: int, offset: int = 0) -> list[ScanHit]:
         self._alive()
-        return [] if self._scan is None else self._scan.results(limit)
+        return [] if self._scan is None else self._scan.results(limit, offset)
 
     def scan_counts(self) -> dict[ValueType, int]:
         if self._scan is None:

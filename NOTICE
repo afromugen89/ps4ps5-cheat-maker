@@ -1,0 +1,46 @@
+Cheat Maker
+Copyright (C) the Cheat Maker authors.
+Licensed under the GNU General Public License version 3 only (see LICENSE).
+
+This product includes or builds on the third-party work listed below. Full licence
+texts are in the licenses/ folder, which ships with the Windows build.
+
+------------------------------------------------------------------------------------
+NASM (the Netwide Assembler)                 https://www.nasm.us/
+------------------------------------------------------------------------------------
+The Windows build bundles an unmodified nasm.exe (version pinned in
+tools/fetch_nasm.py). Cheat Maker runs it as a separate program to assemble Pro code
+caves; no NASM code is linked into Cheat Maker.
+
+    Copyright 1996-2025 the NASM Authors - All rights reserved.
+    Licensed under the 2-clause BSD licence. The full notice and disclaimer are in
+    licenses/NASM-BSD-2-Clause.txt.
+
+------------------------------------------------------------------------------------
+ReaperPy                                     https://github.com/Trexxxo/ReaperPy
+------------------------------------------------------------------------------------
+    Copyright (c) 2026 ReaperPy contributors
+    MIT licence, full text in licenses/ReaperPy-MIT.txt.
+
+Copied code: src/cheatmaker/formats/_aes.py is adapted from ReaperPy's aes_cbc.py
+(pure-Python AES-CBC); its MIT notice is kept at the top of that file.
+Used as reference: the .mc4 file handling (public key and IV, layout, cheat name
+sanitising, content sniffing) in src/cheatmaker/formats/mc4.py, and the PS5Debug-NG
+debugger command table.
+
+------------------------------------------------------------------------------------
+PS5Debug-studio                              https://github.com/alfizari/PS5Debug-studio
+------------------------------------------------------------------------------------
+Apache-2.0. Credited for the SHN / mc4 file layout facts (via ReaperPy). No code is
+copied from it.
+
+------------------------------------------------------------------------------------
+PS5Debug-NG
+------------------------------------------------------------------------------------
+GPL-3.0. Cheat Maker speaks its network protocol (PROTOCOL.md); no code is copied.
+
+------------------------------------------------------------------------------------
+Python dependencies (installed separately, see pyproject.toml)
+------------------------------------------------------------------------------------
+- iced-x86 (MIT)             https://github.com/icedland/iced
+- PySide6 / Qt (LGPL-3.0)    https://www.qt.io/qt-for-python

@@ -13,4 +13,10 @@ jobs:
       - run: pip install -e ".[dev]"
       - run: ruff check src tests tools
       - run: ruff format --check src tests tools
+      # Real-assembler tests (marker needs_nasm) skip when NASM is missing.
+      # TODO(pro step 1): drop continue-on-error once NASM_ZIP_SHA256 is pinned in
+      # tools/fetch_nasm.py; until then the script refuses to run.
+      - name: Fetch NASM (pinned, SHA-256 checked)
+        run: python tools/fetch_nasm.py
+        continue-on-error: true
       - run: pytest -q

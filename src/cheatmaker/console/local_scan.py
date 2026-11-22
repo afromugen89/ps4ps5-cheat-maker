@@ -9,6 +9,7 @@ from __future__ import annotations
 import struct
 import threading
 from collections.abc import Callable, Iterable
+from dataclasses import replace
 
 from cheatmaker.console.client import MemMap, ProgressFn, ScanHit
 from cheatmaker.core.values import Compare, Scale, ValueType, matches, part_value
@@ -50,13 +51,14 @@ def scan_buffer(
         i = data.find(needle)
         while i != -1:
             if i % step == 0:
-                hits.append(ScanHit(base + i, needle))
+                hits.append(ScanHit(base + i, needle, first=needle))
             i = data.find(needle, i + 1)
         return hits
     for off in range(0, len(data) - size + 1, step):
         chunk = data[off : off + size]
         if matches(vtype, cmp, chunk, None, value):
-            hits.append(ScanHit(base + off, bytes(chunk)))
+            raw = bytes(chunk)
+            hits.append(ScanHit(base + off, raw, first=raw))
     return hits
 
 
@@ -169,7 +171,7 @@ class LocalScanSession:
             progress(1.0)
         vt = self.vtype
         return [
-            ScanHit(h.address, current[h.address])
+            moved_on(h, current[h.address])
             for h in self.hits
             if h.address in current and matches(vt, cmp, current[h.address], h.value, value)
         ]
@@ -184,12 +186,19 @@ class LocalScanSession:
         if self.vtype is None:
             raise ValueError("no scan to narrow down; start a new search")
         current = self.current_values(self.hits, cancel, progress)
-        return [ScanHit(h.address, current[h.address]) for h in self.hits if h.address in current]
+        return [moved_on(h, current[h.address]) for h in self.hits if h.address in current]
 
-    def results(self, limit: int) -> list[ScanHit]:
+    def results(self, limit: int, offset: int = 0) -> list[ScanHit]:
+        page = self.hits[offset : offset + limit]
         if self.way is None:
-            return self.hits[:limit]
-        return [ScanHit(h.address, h.value, h.vtype, self.way) for h in self.hits[:limit]]
+            return page
+        return [replace(h, way=self.way) for h in page]
+
+
+def moved_on(hit: ScanHit, now: bytes) -> ScanHit:
+    """``hit`` after a compare: ``now`` is its value, the old one its previous value,
+    and its first value stays."""
+    return ScanHit(hit.address, now, previous=hit.value, first=hit.first)
 
 
 NarrowFn = Callable[..., list[ScanHit]]
@@ -291,8 +300,9 @@ class MultiScan:
             progress(1.0)
         return sum(len(s.hits) for s in self.sessions)
 
-    def results(self, limit: int) -> list[ScanHit]:
-        return merge_results([(s.vtype, s.results(limit)) for s in self.sessions], limit)
+    def results(self, limit: int, offset: int = 0) -> list[ScanHit]:
+        per = [(s.vtype, s.results(offset + limit)) for s in self.sessions]
+        return merge_results(per, limit, offset)
 
 
 def drop_empty(sessions: list, count: Callable) -> list:
@@ -313,12 +323,13 @@ def one_way_each(sessions: list[LocalScanSession]) -> None:
         mine.update(h.address for h in s.hits)
 
 
-def merge_results(per_type: list, limit: int) -> list[ScanHit]:
+def merge_results(per_type: list, limit: int, offset: int = 0) -> list[ScanHit]:
     """Matches of several types in address order (each tagged with its type, and its
-    way when known), at most ``limit``."""
-    tagged = [ScanHit(h.address, h.value, vt, h.way) for vt, hits in per_type for h in hits]
+    way when known), at most ``limit`` after skipping ``offset``. Each part must hold
+    at least its first ``offset + limit`` matches."""
+    tagged = [replace(h, vtype=vt) for vt, hits in per_type for h in hits]
     tagged.sort(key=lambda h: h.address)
-    return tagged[:limit]
+    return tagged[offset : offset + limit]
 
 
 def way_parts(
@@ -350,7 +361,9 @@ def restrict(
         vt = h.vtype or fallback
         if vt is None:
             raise ValueError("no number type for a match; start a new search")
-        parts.setdefault((vt, h.way), []).append(ScanHit(h.address, h.value))
+        parts.setdefault((vt, h.way), []).append(
+            ScanHit(h.address, h.value, previous=h.previous, first=h.first)
+        )
     if not parts:
         if fallback is None:
             raise ValueError("no search to narrow down; start a new search")

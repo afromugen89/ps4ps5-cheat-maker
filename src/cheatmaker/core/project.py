@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
+from cheatmaker.core.pro.model import ProCheat
 from cheatmaker.core.values import ValueType
 from cheatmaker.errors import ProjectFileError
 
@@ -38,7 +39,9 @@ FORMAT = "cheatmaker-project"
 # "relearn_class" and "carried_from", per hook "signature_unique", per cheat "test"). Each
 # key is written only when set, so a file that never was brought over reads the same as
 # format 3.
-FORMAT_VERSION = 4
+# 5: Cheat Maker Pro's "pro_cheats" (core/pro/model.py), written only when there are any,
+# so a file without Pro cheats differs from format 4 only in its version.
+FORMAT_VERSION = 5
 CLASS_FLOAT_LIMIT = 1e9  # top of a float's plausible range when the class is checked
 EXTENSION = ".cmproj"
 
@@ -502,6 +505,7 @@ class Project:
     # player is asked to press Find it next time again.
     dropped_hooks: list[str] = field(default_factory=list, compare=False)
     carried_from: str | None = None  # the game version these notes were brought over from
+    pro_cheats: list[ProCheat] = field(default_factory=list)  # format 5 (Cheat Maker Pro)
 
     def object(self, obj_id: str) -> ObjectSpec:
         for o in self.objects:
@@ -538,6 +542,8 @@ class Project:
             cheats=[c.to_json() for c in self.cheats],
             history=[h.to_json() for h in self.history],
         )
+        if self.pro_cheats:
+            d["pro_cheats"] = [c.to_json() for c in self.pro_cheats]
         return d
 
     @classmethod
@@ -568,7 +574,16 @@ class Project:
             [HistoryEntry.from_json(h) for h in _list(d.get("history", []), "history")],
             dropped,
             None if "carried_from" not in d else _str(d["carried_from"], "carried_from"),
+            _pro_cheats(d.get("pro_cheats", [])),
         )
+
+
+def _pro_cheats(raw: object) -> list[ProCheat]:
+    cheats = [ProCheat.from_json(c) for c in _list(raw, "pro_cheats")]
+    ids = [c.id for c in cheats]
+    if len(set(ids)) != len(ids):
+        raise ValueError("two Pro cheats share an id")
+    return cheats
 
 
 def project_path(title_id: str, version: str) -> Path:
@@ -595,7 +610,15 @@ def load(path: Path) -> Project | None:
         return None
     try:
         return Project.from_json(json.loads(path.read_text(encoding="utf-8")))
-    except (OSError, ValueError, KeyError, TypeError, IndexError, AttributeError) as exc:
+    except (
+        OSError,
+        ValueError,
+        OverflowError,  # a number too large for its type: an unreadable file, set aside
+        KeyError,
+        TypeError,
+        IndexError,
+        AttributeError,
+    ) as exc:
         raise ProjectFileError(f"{path.name}: {exc}") from exc
 
 

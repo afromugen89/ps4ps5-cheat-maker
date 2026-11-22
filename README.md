@@ -6,7 +6,7 @@ save them as `.json` / `.shn` files that [CheatRunner](https://github.com/notmaj
 
 New here? Read the **[getting-started guide](docs/user-guide.md)**: a step-by-step workflow for players, with Returnal as a worked example.
 
-Licence: GPL-3.0 (see `LICENSE`).
+Licence: GPL-3.0 (see `LICENSE`). Third-party credits and licences: `NOTICE` and `licenses/`.
 
 ## What you need
 
@@ -47,6 +47,7 @@ ruff check src tests tools && ruff format --check src tests tools
 - `src/cheatmaker/ui/`: PySide6 screens. No protocol code here.
 - `tools/record_dump.py`: record a real game's memory for `FakeConsole.from_dump()`.
 - `tools/watch_regs.py`: console test C10a, which instructions touch a value and their registers.
+- `tools/fetch_nasm.py`: downloads the pinned NASM (SHA-256 checked) into `vendor/nasm/` for the Pro cave editor; tests marked `needs_nasm` skip without it.
 - `docs/console-tests.md`: checks that need a real PS5.
 - `.claude/agents/`: the five workflow agents (requirements-challenger, architect, feature-implementor, pr-reviewer, qa-engineer).
 

@@ -73,6 +73,11 @@ class ScanHit:
     """Set when a search covers several number types at once."""
     way: Scale | None = field(default=None, compare=False)
     """How the match keeps the number (percent, fraction, x10, of full), when known."""
+    previous: bytes | None = field(default=None, compare=False)
+    """The value at the scan before the last one (None after a first scan, or when the
+    client can't tell)."""
+    first: bytes | None = field(default=None, compare=False)
+    """The value at the first scan, when the client kept it (Pro scanner column)."""
 
 
 WatchKind = Literal["write", "access", "execute"]
@@ -163,7 +168,10 @@ class ConsoleClient(Protocol):
         """Narrow the previous results; returns the match count."""
         ...
 
-    def scan_results(self, limit: int) -> list[ScanHit]: ...
+    def scan_results(self, limit: int, offset: int = 0) -> list[ScanHit]:
+        """At most ``limit`` matches in address order, skipping the first ``offset``
+        (the Pro scanner pages through them)."""
+        ...
 
     def scan_counts(self) -> dict[ValueType, int]:
         """Matches left per number type in the current search."""

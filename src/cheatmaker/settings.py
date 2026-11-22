@@ -32,6 +32,7 @@ class Settings:
     trace_notice_hidden: bool = False  # Find the real one's "Save your game first" notice
     # Bring them over: "Not now" pairs, "PPSA01285 03.000.005>03.001.000" (never offered again)
     carry_declined: list[str] = field(default_factory=list)
+    nasm_path: str = ""  # Pro cave editor: an assembler to use instead of the bundled one
 
     @classmethod
     def path(cls) -> Path:
@@ -77,6 +78,8 @@ class Settings:
             isinstance(x, str) for x in s.carry_declined
         ):
             s.carry_declined = []
+        if not isinstance(s.nasm_path, str):
+            s.nasm_path = ""
         return s
 
     def save(self) -> None:

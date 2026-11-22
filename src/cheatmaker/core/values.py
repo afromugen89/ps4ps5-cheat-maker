@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import re
 import struct
+import sys
 from dataclasses import dataclass
 from enum import Enum
 
@@ -17,6 +18,11 @@ class ValueType(Enum):
     INT64 = ("Whole number (8 bytes)", "q", 8, False)
     FLOAT = ("Decimal (4 bytes)", "f", 4, True)
     DOUBLE = ("Decimal (8 bytes)", "d", 8, True)
+    # Pro scanner only (GUIDED_TYPES leaves them out of the guided screens).
+    UINT8 = ("Unsigned whole number (1 byte)", "B", 1, False)
+    UINT16 = ("Unsigned whole number (2 bytes)", "H", 2, False)
+    UINT32 = ("Unsigned whole number (4 bytes)", "I", 4, False)
+    UINT64 = ("Unsigned whole number (8 bytes)", "Q", 8, False)
 
     def __init__(self, label: str, code: str, size: int, is_float: bool) -> None:
         self.label = label
@@ -53,8 +59,15 @@ class ValueType(Enum):
                 return t
         return repr(float(value))
 
+    @property
+    def signed(self) -> bool:
+        """Whole numbers that can be negative (struct codes are lower case for those)."""
+        return not self.is_float and self.code.islower()
+
     def int_range(self) -> tuple[int, int]:
         bits = self.size * 8
+        if not self.is_float and not self.signed:
+            return 0, (1 << bits) - 1
         return -(1 << (bits - 1)), (1 << (bits - 1)) - 1
 
     def clamp(self, value: float | int) -> float | int:
@@ -62,6 +75,17 @@ class ValueType(Enum):
             return float(value)
         lo, hi = self.int_range()
         return max(lo, min(hi, int(value)))
+
+
+GUIDED_TYPES = (
+    ValueType.INT8,
+    ValueType.INT16,
+    ValueType.INT32,
+    ValueType.INT64,
+    ValueType.FLOAT,
+    ValueType.DOUBLE,
+)
+"""The number types the guided screens offer, in their order (Pro offers every type)."""
 
 
 class Compare(Enum):
@@ -74,10 +98,19 @@ class Compare(Enum):
     BETWEEN = "between"  # value is (low, high), both included
     INCREASED_BY = "increased by"  # value is (amount, tolerance), AC-H1
     DECREASED_BY = "decreased by"
+    GREATER = "greater than"  # Pro scanner: value now > the typed number
+    LESS = "less than"
 
     @property
     def needs_value(self) -> bool:
-        return self in (Compare.EXACT, Compare.BETWEEN, Compare.INCREASED_BY, Compare.DECREASED_BY)
+        return self in (
+            Compare.EXACT,
+            Compare.BETWEEN,
+            Compare.INCREASED_BY,
+            Compare.DECREASED_BY,
+            Compare.GREATER,
+            Compare.LESS,
+        )
 
     @property
     def needs_previous(self) -> bool:
@@ -123,6 +156,10 @@ def matches(
     if cmp is Compare.BETWEEN:
         lo, hi = target  # type: ignore[misc]
         return lo <= cur <= hi
+    if cmp in (Compare.GREATER, Compare.LESS):
+        if target is None:
+            raise ValueError(f"{cmp.value} needs a number")
+        return cur > target if cmp is Compare.GREATER else cur < target
     if previous is None:
         raise ValueError(f"{cmp.value} needs a previous scan")
     prev = vtype.decode(previous)
@@ -152,6 +189,8 @@ on the console, side by side."""
 def value_for(vtype: ValueType, cmp: Compare, value):
     """``value`` as a search of ``vtype`` should use it, or None when no number of that
     type can match (a whole-number search for 87.5). Decimals take any value."""
+    if cmp in (Compare.GREATER, Compare.LESS) and value is not None:
+        return None if as_between(vtype, cmp, value) is None else value
     if vtype.is_float or value is None:
         return value
     lo_t, hi_t = vtype.int_range()
@@ -169,6 +208,46 @@ def value_for(vtype: ValueType, cmp: Compare, value):
             return None
         return (int(amount), tol)
     return value
+
+
+F32_MAX = struct.unpack("<f", struct.pack("<I", 0x7F7FFFFF))[0]
+"""The largest finite 4-byte decimal."""
+
+
+def as_between(
+    vtype: ValueType, cmp: Compare, value: float | int
+) -> tuple[float, float] | tuple[int, int] | None:
+    """A GREATER / LESS search as the inclusive (low, high) range that keeps the same
+    values, so the console runs it as the proven ValueBetween compare. Both bounds are
+    values ``vtype`` can hold: whole bounds inside the type; for decimals the nearest
+    value of the type strictly past ``value``, up to the largest finite one (infinities
+    never match, as in ``matches``). None when no value of the type can match."""
+    if cmp not in (Compare.GREATER, Compare.LESS):
+        raise ValueError(f"{cmp.value} isn't greater/less than")
+    up = cmp is Compare.GREATER
+    if vtype.is_float:
+        top = F32_MAX if vtype is ValueType.FLOAT else sys.float_info.max
+        try:
+            v = float(value)
+        except OverflowError:  # a whole number past the float range: an infinity here
+            v = math.inf if value > 0 else -math.inf
+        if math.isnan(v) or (v >= top if up else v <= -top):
+            return None
+        if (v < -top) if up else (v > top):
+            return (-top, top)
+        if vtype is ValueType.FLOAT:
+            bound = f32(v)  # the nearest 4-byte decimal, then one step past ``value``
+            if (bound <= v) if up else (bound >= v):
+                bound = _f32_step(bound, up)
+        else:
+            bound = math.nextafter(v, math.inf if up else -math.inf)
+        return (bound, top) if up else (-top, bound)
+    lo_t, hi_t = vtype.int_range()
+    if up:
+        lo = math.floor(value) + 1
+        return None if lo > hi_t else (max(lo_t, lo), hi_t)
+    hi = math.ceil(value) - 1
+    return None if hi < lo_t else (lo_t, min(hi_t, hi))
 
 
 def parse_number(text: str) -> float | int:

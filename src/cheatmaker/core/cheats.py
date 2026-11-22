@@ -12,6 +12,7 @@ from cheatmaker.errors import CheatMakerError
 
 if TYPE_CHECKING:
     from cheatmaker.core.linked import LinkedGroup
+    from cheatmaker.core.pro.model import ProCheat
 
 MAIN_MODULE = "eboot.bin"
 MAX_MOVING = 4  # parts that move (session or learned) in one combined cheat
@@ -94,6 +95,10 @@ class Cheat:
     number it holds, as a SESSION_ADDRESS line with ``vtype`` set. Turning the cheat on
     writes it once after the code patch, so the value stays at the number the player
     typed. In memory only (the address moves every run); never saved, Combine drops it."""
+    pro: ProCheat | None = field(default=None, compare=False)
+    """The Pro source this cheat was compiled from (architecture-pro decision 3), or
+    None for a guided cheat. Will be saved in the .cmproj (step 8, compile.py), never
+    in cheat files."""
 
     @property
     def session_only(self) -> bool:
@@ -350,7 +355,7 @@ class CheatFile:
 
     def file_name(self, fmt: str) -> str:
         """``{titleid}_{version}.{ext}`` (AC-6.1, AC-6.2)."""
-        if fmt not in ("json", "shn"):
+        if fmt not in ("json", "shn", "mc4"):
             raise ValueError(f"unknown format {fmt!r}")
         if not self.title_id or not self.version:
             raise ValueError("title ID and version are needed to name the file")
@@ -358,7 +363,11 @@ class CheatFile:
         return f"{self.title_id.upper()}_{safe_version}.{fmt}"
 
     def saveable_cheats(self) -> list[Cheat]:
-        return [c for c in self.cheats if c.saveable]
+        """The cheats a cheat file holds: those badged CheatRunner (spec-pro AC-S2). For
+        guided cheats this is the same set as ``Cheat.saveable``."""
+        from cheatmaker.core.pro.badge import runner_cheats  # badge builds on this module
+
+        return runner_cheats(self.cheats)
 
 
 def normalize_version(version: str) -> str:

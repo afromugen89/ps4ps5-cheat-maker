@@ -19,20 +19,35 @@ from cheatmaker.formats._hex import fmt_offset, parse_bytes, parse_offset
 TYPE_ATTR = "CheatMakerValueType"  # which bytes are the editable value (ours only)
 AT_ATTR = "CheatMakerValueAt"
 _DECL = re.compile(r"^\s*<\?xml[^>]*\?>")
+_SAFE = str.maketrans({"&": "+", "<": "(", ">": ")", '"': "'"})
+"""For .mc4 only (architecture-pro decision 6): attribute text loses the characters XML
+escapes, since older mc4 readers un-escape blindly and break the XML. Plain .shn keeps
+normal XML escaping (byte-identical to earlier versions). Console test S-P8 checks
+whether CheatRunner handles escapes in mc4."""
+
+
+def safe_text(text: str) -> str:
+    return text.translate(_SAFE)
 
 
 def _dash_hex(b: bytes) -> str:
     return "-".join(f"{x:02X}" for x in b)
 
 
-def dumps(cf: CheatFile) -> bytes:
+def dumps(cf: CheatFile, sanitise: bool = False) -> bytes:
+    """The .shn bytes. ``sanitise`` (what .mc4 encrypts) replaces ``& < > "`` with
+    ``+ ( ) '`` in every attribute instead of escaping them."""
     cheats = cf.saveable_cheats()
     if not cheats:
         raise ValueError("no cheats that can be saved to a file")
+
+    def attr(text: str) -> str:
+        return quoteattr(safe_text(text) if sanitise else text)
+
     attrs = (
-        f"Game={quoteattr(cf.title or cf.title_id)} Moder={quoteattr(', '.join(cf.credits))} "
-        f"Cusa={quoteattr(cf.title_id.upper())} Version={quoteattr(cf.version)} "
-        f"Process={quoteattr(cf.process)}"
+        f"Game={attr(cf.title or cf.title_id)} Moder={attr(', '.join(cf.credits))} "
+        f"Cusa={attr(cf.title_id.upper())} Version={attr(cf.version)} "
+        f"Process={attr(cf.process)}"
     )
     lines = [
         '<?xml version="1.0" encoding="utf-16"?>',
@@ -44,11 +59,11 @@ def dumps(cf: CheatFile) -> bytes:
         extra = ""
         vtype = _value.type_text(c)
         if vtype is not None:  # our own attributes; CheatRunner looks others up by name
-            extra = f" {TYPE_ATTR}={quoteattr(vtype)}"
+            extra = f" {TYPE_ATTR}={attr(vtype)}"
             at = _value.at_text(c)
             if at is not None:
-                extra += f" {AT_ATTR}={quoteattr(at)}"
-        lines.append(f"  <Cheat Text={quoteattr(c.name)}{extra}>")
+                extra += f" {AT_ATTR}={attr(at)}"
+        lines.append(f"  <Cheat Text={attr(c.name)}{extra}>")
         for loc in c.locations:
             lines += [
                 "    <Cheatline>",
