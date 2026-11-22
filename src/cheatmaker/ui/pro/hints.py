@@ -74,3 +74,12 @@ CONVERTED = "{name}: {n} cave(s) are now assembly."
 NO_CAVE = "{name} has no cave to convert."
 IMPORT_ADD = "Add to my cheats"
 IMPORTED = "Imported {n} cheat(s)."
+
+# -- Code view (PR-6) ---------------------------------------------------------------------------
+CODE = "Type an address (e.g. eboot.bin+0x1234) and press Go. Double-click a jump to follow it."
+SHOW_ORIGINAL = "Show original"
+SHOW_ORIGINAL_TIP = "Show the game's own bytes where cheats that are on changed them."
+AOB_COPIED = "Copied: {aob}"
+CODE_MAKE_NOP = "Make NOP entry"
+CODE_MAKE_CAVE = "Make cave entry"
+MAKE_ENTRY_TIP = "Add it to the Pro cheat picked in the Cheats tab, or make a new cheat."

@@ -28,7 +28,7 @@ def test_parse_place(text, addr):
 
 @pytest.mark.parametrize("text", ["", "here", "eboot.bin+", "0xzz"])
 def test_bad_place(text):
-    with pytest.raises(ValueError, match="eboot.bin"):
+    with pytest.raises(ValueError, match=r"eboot\.bin"):
         parse_place(text, GAME)
     assert "eboot.bin+0x1234" in BAD_PLACE
 

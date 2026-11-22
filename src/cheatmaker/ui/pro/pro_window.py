@@ -22,6 +22,7 @@ from cheatmaker.core.session import GameInfo
 from cheatmaker.ui.controller import Controller
 from cheatmaker.ui.pro import hints
 from cheatmaker.ui.pro.cheats_tab import CheatsTab
+from cheatmaker.ui.pro.code_tab import CodeTab
 from cheatmaker.ui.pro.tab import ProTab, game_text
 from cheatmaker.ui.tasks import TaskRunner
 
@@ -88,11 +89,19 @@ class ProWindow(QMainWindow):
             return None
 
     def _build_tabs(self) -> None:
-        for title in (hints.TAB_SCANNER, hints.TAB_ADDRESSES, hints.TAB_CODE, hints.TAB_MEMORY):
+        for title in (hints.TAB_SCANNER, hints.TAB_ADDRESSES):
             self.add_tab(_Placeholder(self.ctl, self.tasks, ""), title)
+        self.code = CodeTab(self.ctl, self.tasks)
+        self.add_tab(self.code, hints.TAB_CODE)
+        self.add_tab(_Placeholder(self.ctl, self.tasks, ""), hints.TAB_MEMORY)
         self.add_tab(_Placeholder(self.ctl, self.tasks, hints.WATCH_LATER), hints.TAB_WATCH)
         self.cheats = CheatsTab(self.ctl, self.tasks, self.assembler, self.save)
         self.add_tab(self.cheats, hints.TAB_CHEATS)
+        self.code.make_entry = self._entry_from_code
+
+    def _entry_from_code(self, kind: str, offset: int) -> None:
+        self.tabs.setCurrentWidget(self.cheats)
+        self.cheats.entry_here(kind, offset)
 
     def add_tab(self, tab: ProTab, title: str) -> None:
         self.pro_tabs.append(tab)

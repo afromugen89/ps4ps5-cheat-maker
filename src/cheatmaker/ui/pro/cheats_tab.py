@@ -409,22 +409,46 @@ class CheatsTab(ProTab):
             return
         if hook is None:
             return
-        pc = ProCheat(new_cheat_id(self._taken_ids()), name.strip())
+        self.new_cheat(name.strip(), "cave", hook)
+
+    def new_cheat(self, name: str, kind: str, offset: int) -> None:
+        """A new Pro cheat with one entry at module ``offset``; a cave is built at once
+        (with the default source) so the cheat can be listed and saved."""
+        pc = ProCheat(new_cheat_id(self._taken_ids()), name)
         session = self.ctl.session
 
         def work() -> Cheat:
-            entry = pc_compile.new_cave_entry(session, hook)
-            pc.entries.append(entry)
-            self._build(pc, entry)
+            if kind == "cave":
+                entry = pc_compile.new_cave_entry(session, offset)
+                pc.entries.append(entry)
+                self._build(pc, entry)
+            else:
+                pc.entries.append(pc_compile.new_nop_entry(session, offset))
             return pc_compile.compile_cheat(pc)
 
         def done(cheat: Cheat) -> None:
             self.ctl.ensure_file().cheats.append(cheat)
-            log.info("action=pro_new id=%s hook=%#x", pc.id, hook)
+            log.info("action=pro_new id=%s kind=%s at=%#x", pc.id, kind, offset)
             self._changed()
             self.select_cheat(cheat)
 
         self._run(work, done, "pro_new")
+
+    def entry_here(self, kind: str, offset: int) -> None:
+        """From the Code view: add to the picked Pro cheat when it is off, else make a
+        new cheat (its name asked)."""
+        c = self.selected()
+        if kind == "cave" and self.assembler is None:
+            self.ctl.message.emit(hints.ASSEMBLER_MISSING)
+            return
+        if c is not None and c.pro is not None and not c.enabled:
+            self.add_entry_at(c, kind, offset)
+            return
+        name = self.ask_text(
+            hints.NEW_CHEAT_TITLE, hints.NEW_CHEAT_NAME, hints.NEW_CHEAT_NAME_DEFAULT
+        )
+        if name and name.strip():
+            self.new_cheat(name.strip(), kind, offset)
 
     def do_adopt(self) -> None:
         """Edit in Pro: the guided cheat gets its Pro source (the same bytes)."""
