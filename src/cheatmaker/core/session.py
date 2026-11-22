@@ -9,7 +9,13 @@ from dataclasses import dataclass
 
 from cheatmaker.console.client import ConsoleClient, MemMap
 from cheatmaker.core.cheats import MAIN_MODULE, LocationKind
-from cheatmaker.errors import ConnectionLost, GameNotFound, UnsupportedServer
+from cheatmaker.errors import (
+    ConnectionLost,
+    ConsoleBusy,
+    GameNotFound,
+    ReadFailed,
+    UnsupportedServer,
+)
 from cheatmaker.logs import game_context
 
 log = logging.getLogger(__name__)
@@ -166,6 +172,24 @@ class Session:
         )
         self._set_game(game)
         return game
+
+    def game_alive(self) -> bool:
+        """Is the attached game still running (Pro window poll, AC-1.2)? The game in the
+        foreground says yes at once; otherwise (the PS5's home screen is up, the game
+        suspended) its memory map still answering does. A busy connection counts as
+        alive: the next poll asks again. ConnectionLost is raised as usual."""
+        game = self.require_game()
+        client = self.require_client()
+        fg = client.foreground_app()
+        if fg is not None and fg.pid == game.pid:
+            return True
+        try:
+            return bool(client.maps(game.pid))
+        except ConsoleBusy:
+            return True
+        except ReadFailed:
+            log.info("action=game_alive pid=%d result=gone", game.pid)
+            return False
 
     @staticmethod
     def _module_range(maps: list[MemMap], process: str) -> tuple[int, int]:

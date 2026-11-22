@@ -33,6 +33,8 @@ class Settings:
     # Bring them over: "Not now" pairs, "PPSA01285 03.000.005>03.001.000" (never offered again)
     carry_declined: list[str] = field(default_factory=list)
     nasm_path: str = ""  # Pro cave editor: an assembler to use instead of the bundled one
+    # Pro window: title IDs whose safety notice was shown (once per game)
+    pro_notice_shown: list[str] = field(default_factory=list)
 
     @classmethod
     def path(cls) -> Path:
@@ -80,6 +82,10 @@ class Settings:
             s.carry_declined = []
         if not isinstance(s.nasm_path, str):
             s.nasm_path = ""
+        if not isinstance(s.pro_notice_shown, list) or not all(
+            isinstance(x, str) for x in s.pro_notice_shown
+        ):
+            s.pro_notice_shown = []
         return s
 
     def save(self) -> None:

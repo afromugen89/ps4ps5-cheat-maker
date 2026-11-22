@@ -24,6 +24,7 @@ from cheatmaker.ui.connect_view import ConnectView
 from cheatmaker.ui.controller import Controller
 from cheatmaker.ui.find_wizard import FindWizard
 from cheatmaker.ui.lock_wizard import LockWizard
+from cheatmaker.ui.pro import hints as pro_hints
 from cheatmaker.ui.save_dialog import SaveDialog
 from cheatmaker.ui.trace_dialog import TraceDialog
 
@@ -53,8 +54,12 @@ class MainWindow(QMainWindow):
         self.status = QLabel("")
         self.status.setWordWrap(True)
         self.copy_log_btn = QPushButton("Copy log")
+        self.pro_btn = QPushButton(pro_hints.OPEN_BUTTON)
+        self.pro_btn.setToolTip(pro_hints.OPEN_BUTTON_TIP)
+        self.pro = None  # the Pro window, made when first opened
         bottom = QHBoxLayout()
         bottom.addWidget(self.status, 1)
+        bottom.addWidget(self.pro_btn)
         bottom.addWidget(self.copy_log_btn)
         root = QWidget()
         lay = QVBoxLayout(root)
@@ -66,6 +71,7 @@ class MainWindow(QMainWindow):
 
         ctl.message.connect(self.status.setText)
         self.copy_log_btn.clicked.connect(self.copy_log)
+        self.pro_btn.clicked.connect(self.open_pro)
         self.cheats.open_lock = self.open_lock
         self.cheats.open_build = self.open_build
         self.find.open_build = self.open_build
@@ -121,6 +127,17 @@ class MainWindow(QMainWindow):
     def open_save(self) -> None:
         SaveDialog(self.ctl, self).exec()
 
+    def open_pro(self) -> None:
+        """The Pro window (spec PR-1): one per app, on this window's connection."""
+        from cheatmaker.ui.pro.pro_window import ProWindow  # Pro loads only when used
+
+        if self.pro is None:
+            self.pro = ProWindow(self.ctl)
+        self.pro.show()
+        self.pro.raise_()
+        self.pro.activateWindow()
+        self.pro.show_safety_notice()
+
     def show_first_run_warning(self) -> None:
         """AC-8.3: once, on first run."""
         if self.ctl.settings.first_run_done:
@@ -130,5 +147,7 @@ class MainWindow(QMainWindow):
         self.ctl.settings.save()
 
     def closeEvent(self, event) -> None:
+        if self.pro is not None:
+            self.pro.close()
         self.ctl.shutdown()
         super().closeEvent(event)
