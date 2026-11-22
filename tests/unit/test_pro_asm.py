@@ -253,3 +253,66 @@ def test_nasm_at_a_module_offset_org(nasm):
 def test_nasm_number_overflow_is_an_error(nasm):
     r = nasm.assemble("nop\nmov eax, 0x1ffffffff\n", MODULE)
     assert r.error is not None and r.error[0] == 2 and "exceeds" in r.error[1]
+
+
+# -- QA round: absolute operands, strings, PC files -------------------------------------
+@pytest.mark.parametrize(
+    "line",
+    [
+        'incbin "x.bin"',
+        "%include 'x.inc'",
+        '% include "x"',
+        "%pathsearch p x",
+        "%depend x",
+        "%use altreg",
+        "mov eax, %!HOME",
+        "%deftok t 'x'",
+        "x%+y",
+    ],
+)
+def test_pc_file_directives_are_refused(line):
+    err = asm.check_source(f"nop\n{line}\n", None)
+    assert err is not None and err[0] == 2 and "isn't allowed" in err[1]
+    assert FakeAssembler().assemble(f"nop\n{line}\n", CTX).error == err
+
+
+def test_directive_words_in_strings_and_comments_are_fine():
+    assert asm.check_source('db "incbin %include"\nnop ; incbin x\n', None) is None
+
+
+def test_split_line_and_shim_keep_strings():
+    parts, comment = asm.split_line("db 'a;b', \"[5]\" ; c [6]")
+    assert [t for is_code, t in parts if not is_code] == ["'a;b'", '"[5]"']
+    assert comment == "; c [6]"
+    assert shim_line("db '[5]', [0x10]", 0x1000).startswith("db '[5]', [rel $$+")
+    assert shim_line("mov rax, gs: [0x28]", 0x1000) == "mov rax, gs: [0x28]"
+
+
+@pytest.mark.needs_nasm
+def test_listing_maps_an_absolute_operand_to_its_line(nasm):
+    r = nasm.assemble("nop\nnop\nmov eax, [0x10+rcx*4]\n", MODULE)
+    assert r.error == (3, asm.ABSOLUTE_ADDRESS)
+    r = nasm.assemble("nop\nmov eax, [0x10+0x20]\n", MODULE)
+    assert r.error == (2, asm.ABSOLUTE_ADDRESS)
+    ok = nasm.assemble(
+        "mov eax, [abs 0x10+rcx*4]\nmov eax, [rcx*4]\ndb 0x8b, 0x04, 0x8d, 1, 0, 0, 0\n", MODULE
+    )
+    assert ok.ok, ok.error
+
+
+@pytest.mark.needs_nasm
+def test_absolute_operand_in_a_user_macro_falls_back_to_a_bracket_line(nasm):
+    src = "%macro m 0\nmov eax, [0x10+rcx*4]\n%endmacro\nnop\nm\n"
+    assert nasm.assemble(src, MODULE).error == (2, asm.ABSOLUTE_ADDRESS)
+
+
+def test_parse_listing_keeps_user_rows():
+    text = (
+        "     7                                  %line 0+1 user\n"
+        "     1 00000000 90                      nop\n"
+        "     5 00000001 8B042500010000      <1> mov eax,[rel 0x100]\n"
+        "     5                                  %line 0+1 cheatmaker-variables\n"
+        "     1 00000008 00                      align 4, db 0\n"
+    )
+    rows = asm.parse_listing(text)
+    assert [(r.offset, r.line) for r in rows] == [(0, 1), (1, None)]

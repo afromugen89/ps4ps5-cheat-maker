@@ -51,7 +51,7 @@ TIMEOUT = 2.0
 USER_FILE = "user"
 """The file name NASM reports for lines of the user's source (via ``%line``)."""
 _VARS_FILE = "cheatmaker-variables"
-_SOURCE, _OUTPUT, _MAP = "cave.asm", "cave.bin", "cave.map"
+_SOURCE, _OUTPUT, _MAP, _LIST = "cave.asm", "cave.bin", "cave.map", "cave.lst"
 VARIABLE_ALIGN = 4
 
 
@@ -120,16 +120,15 @@ _FMT = nasm_formatter()
 
 
 def insn_text(insn: ix.Instruction) -> str:
-    """One instruction in NASM syntax. An operand at a plain address (no register) is
-    written ``[abs N]`` so the shim doesn't take it for a RIP-relative one."""
+    """One instruction in NASM syntax. An operand with no base register (a plain
+    address, or ``[N+rcx*4]``) is written ``[abs ...]``: it is a fixed address, not a
+    module offset (the shim and the absolute-operand check leave it alone)."""
     text = _FMT.format(insn)
     if any(
-        insn.op_kind(i) == ix.OpKind.MEMORY
-        and insn.memory_base == ix.Register.NONE
-        and insn.memory_index == ix.Register.NONE
+        insn.op_kind(i) == ix.OpKind.MEMORY and insn.memory_base == ix.Register.NONE
         for i in range(insn.op_count)
     ):
-        text = re.sub(r"\[(?=0x|\d)", "[abs ", text, count=1)
+        text = text.replace("[", "[abs ", 1)
     return text
 
 
@@ -143,12 +142,17 @@ _PTR = re.compile(r"\b(byte|word|dword|qword|tword|fword|xmmword|ymmword|zmmword
 _WIDE = {"xmmword": "oword", "ymmword": "yword", "zmmword": "zword"}
 _ORIGIN_RETURN = re.compile(r"\bOriginReturn\b", re.I)
 _NUM = r"(?:0x[0-9a-f]+|[0-9][0-9a-f]*h|\d+)"
-_PLAIN_ADDRESS = re.compile(rf"(?<![:\w])\[\s*(?:rel\s+)?({_NUM})\s*\]", re.I)
+_PLAIN_ADDRESS = re.compile(
+    rf"(?P<seg>\b[cdefgs]s\s*:\s*)?(?<![\w.$])\[\s*(?:rel\s+)?(?P<num>{_NUM})\s*\]", re.I
+)
 _BRANCH_NUMBER = re.compile(
     rf"^\s*(?:[A-Za-z_.][\w.]*:)?\s*(?:j[a-z]+|call|loop[a-z]*)\s+"
     rf"(?:(?:short|near|strict)\s+)*({_NUM})\s*$",
     re.I,
 )
+_FORBIDDEN = re.compile(r"\bincbin\b|%\s*(?:include|pathsearch|depend|use|deftok)\b|%!|%\+", re.I)
+"""Directives that read files or the environment on the PC (or build such a word from
+pieces): a cave is code the player writes, so none of them is allowed (QA BUG-03)."""
 
 
 def _number(text: str) -> int:
@@ -158,14 +162,50 @@ def _number(text: str) -> int:
     return int(t, 0)
 
 
-def shim_line(line: str, org: int) -> str:
-    """One source line in NASM's dialect (comments are left as they are)."""
-    code, sep, comment = line.partition(";")
+def split_line(line: str) -> tuple[list[tuple[bool, str]], str]:
+    """A source line as (is code, text) pieces, strings kept apart, and its comment
+    (from the first ``;`` outside a string, included)."""
+    parts: list[tuple[bool, str]] = []
+    i = start = 0
+    while i < len(line):
+        ch = line[i]
+        if ch == ";":
+            break
+        if ch in "'\"`":
+            end = line.find(ch, i + 1)
+            end = len(line) if end < 0 else end + 1
+            parts.append((True, line[start:i]))
+            parts.append((False, line[i:end]))
+            start = i = end
+            continue
+        i += 1
+    parts.append((True, line[start:i]))
+    return [p for p in parts if p[1]], line[i:]
+
+
+def _code_text(line: str) -> str:
+    """The line's code with string contents blanked (same length) and no comment."""
+    parts, _comment = split_line(line)
+    return "".join(t if is_code else t[0] + " " * (len(t) - 1) for is_code, t in parts)
+
+
+def _shim_code(code: str, org: int) -> str:
     code = _PTR.sub(lambda m: _WIDE.get(m.group(1).lower(), m.group(1)), code)
     code = _ORIGIN_RETURN.sub("return", code)
-    # NASM can't make a bare number RIP-relative; an offset from the section start can.
-    code = _PLAIN_ADDRESS.sub(lambda m: f"[rel $$+({_number(m.group(1)):#x}-{org:#x})]", code)
-    return code + sep + comment
+
+    def rel(m: re.Match[str]) -> str:
+        if m.group("seg"):  # fs:[0x28] stays an absolute, segment-based address
+            return m.group(0)
+        # NASM can't make a bare number RIP-relative; an offset from the section start can.
+        return f"[rel $$+({_number(m.group('num')):#x}-{org:#x})]"
+
+    return _PLAIN_ADDRESS.sub(rel, code)
+
+
+def shim_line(line: str, org: int) -> str:
+    """One source line in NASM's dialect (strings and comments are left as they are)."""
+    parts, comment = split_line(line)
+    return "".join(_shim_code(t, org) if is_code else t for is_code, t in parts) + comment
 
 
 def shim(source: str, org: int) -> str:
@@ -178,8 +218,8 @@ def check_numbers(source: str, module_size: int | None) -> tuple[int, str] | Non
     if module_size is None:
         return None
     for n, line in enumerate(source.split("\n"), 1):
-        code = line.partition(";")[0]
-        numbers = [m.group(1) for m in _PLAIN_ADDRESS.finditer(code)]
+        code = _code_text(line)
+        numbers = [m.group("num") for m in _PLAIN_ADDRESS.finditer(code) if not m.group("seg")]
         branch = _BRANCH_NUMBER.match(code)
         if branch:
             numbers.append(branch.group(1))
@@ -192,6 +232,16 @@ def check_numbers(source: str, module_size: int | None) -> tuple[int, str] | Non
                     "addresses here are module offsets (eboot.bin+offset)",
                 )
     return None
+
+
+def check_source(source: str, module_size: int | None) -> tuple[int, str] | None:
+    """What the source may not do, as the first (line, message): read PC files or the
+    environment (``incbin``, ``%include``, ...), or use an address outside the module."""
+    for n, line in enumerate(source.split("\n"), 1):
+        m = _FORBIDDEN.search(_code_text(line))
+        if m:
+            return n, f"{m.group(0).strip()} isn't allowed in a cave (it reads files on the PC)"
+    return check_numbers(source, module_size)
 
 
 # -- the wrapper -----------------------------------------------------------------
@@ -271,7 +321,7 @@ class NasmAssembler:
         self, source: str, ctx: CaveContext, variables: Sequence[Variable] = ()
     ) -> AsmResult:
         started = time.perf_counter()
-        bad = check_numbers(source, ctx.module_size)
+        bad = check_source(source, ctx.module_size)
         if bad is not None:
             return AsmResult(b"", {}, bad)
         with tempfile.TemporaryDirectory(prefix="cheatmaker-asm-") as tmp:
@@ -279,11 +329,25 @@ class NasmAssembler:
             (folder / _SOURCE).write_text(wrap(source, ctx, variables), encoding="utf-8")
             try:
                 done = subprocess.run(
-                    # a number too big for its operand is an error, not a silent cut
-                    [str(self.exe), "-Werror=number-overflow", "-f", "bin", "-o", _OUTPUT, _SOURCE],
+                    [
+                        str(self.exe),
+                        # a number too big for its operand is an error, not a silent cut;
+                        # so is an address with no register that can't be RIP-relative
+                        "-Werror=number-overflow",
+                        "-Werror=ea-absolute",
+                        "-f",
+                        "bin",
+                        "-l",
+                        _LIST,
+                        "-o",
+                        _OUTPUT,
+                        _SOURCE,
+                    ],
                     cwd=folder,
                     capture_output=True,
-                    text=True,
+                    # NASM echoes the user's names as UTF-8; never fail on its output
+                    encoding="utf-8",
+                    errors="replace",
                     timeout=self.timeout,
                     check=False,
                     # no console window flashing up on Windows
@@ -297,6 +361,8 @@ class NasmAssembler:
             except OSError as e:
                 raise AssemblerNotFound(f"The assembler couldn't start: {e}") from e
             error = parse_error(done.stderr)
+            if error is not None and "ea-absolute" in error[1]:
+                error = (error[0], ABSOLUTE_ADDRESS)
             out = folder / _OUTPUT
             if error is None and (done.returncode != 0 or not out.is_file()):
                 error = (0, done.stderr.strip() or f"the assembler failed ({done.returncode})")
@@ -305,10 +371,92 @@ class NasmAssembler:
             code = out.read_bytes()
             map_file = folder / _MAP
             labels = parse_map(map_file.read_text("utf-8", "replace")) if map_file.is_file() else {}
+            listing = folder / _LIST
+            rows = parse_listing(listing.read_text("utf-8", "replace")) if listing.is_file() else []
+            bad = absolute_operand(code, ctx.org, rows, source)
+            if bad is not None:
+                return AsmResult(b"", {}, bad)
         log.debug(
             "action=pro_asm bytes=%d ms=%.1f", len(code), (time.perf_counter() - started) * 1000
         )
         return AsmResult(code, labels)
+
+
+_LIST_ROW = re.compile(r"^\s*(\d+)\s+([0-9A-Fa-f]{8})\s+(\S+)\s+(<\d+>)?\s*(.*)$")
+_DATA_WORDS = re.compile(
+    r"^\s*(?:[A-Za-z_.][\w.]*:\s*)?(?:d[bwdqtoyz]|res[bwdqtoyz]|times|align|alignb)\b", re.I
+)
+ABSOLUTE_ADDRESS = (
+    "an address with no register must be a module offset written as one number, "
+    "[0x...]; write [abs N] for a fixed address"
+)
+
+
+@dataclass(frozen=True)
+class ListRow:
+    """One listing row that made bytes: where, the user line (None: not a line of the
+    user's own text, e.g. a macro expansion) and the source text."""
+
+    offset: int
+    line: int | None
+    text: str
+
+
+def parse_listing(text: str) -> list[ListRow]:
+    """The rows of a NASM listing that hold code, in the user's part of the wrapper."""
+    rows: list[ListRow] = []
+    region = ""
+    for raw in text.splitlines():
+        m = _LIST_ROW.match(raw)
+        if m is None:
+            directive = raw.strip().split()
+            if len(directive) >= 4 and directive[1] == "%line":
+                region = directive[3]
+            continue
+        number, offset, _bytes, macro, src = m.groups()
+        if src.lstrip().startswith("%line"):
+            region = src.split()[2] if len(src.split()) > 2 else ""
+            continue
+        if region != USER_FILE:
+            continue
+        rows.append(ListRow(int(offset, 16), None if macro else int(number), src))
+    return rows
+
+
+def _first_bracket_line(source: str) -> int:
+    for n, line in enumerate(source.split("\n"), 1):
+        if "[" in _code_text(line):
+            return n
+    return 0
+
+
+def absolute_operand(
+    code: bytes, org: int, rows: Sequence[ListRow], source: str
+) -> tuple[int, str] | None:
+    """(line, message) for the first instruction of the user's code that reads or
+    writes a fixed address with no base register (``[N+rcx*4]``, ``[dword N]``, ...)
+    the user didn't write as ``[abs N]``: here bare numbers are module offsets, and
+    such an operand would use the number as a console address (QA BUG-01). fs/gs
+    operands are allowed. Data lines (``db``, ``times``, ...) aren't decoded."""
+    for row in rows:
+        if _DATA_WORDS.match(row.text) or re.search(r"\babs\b", row.text, re.I):
+            continue
+        at = row.offset
+        if not 0 <= at < len(code):
+            continue
+        insn = ix.Decoder(64, code[at:], ip=org + at).decode()
+        if insn.code == ix.Code.INVALID or not _absolute(insn):
+            continue
+        return (row.line or _first_bracket_line(source), ABSOLUTE_ADDRESS)
+    return None
+
+
+def _absolute(insn: ix.Instruction) -> bool:
+    if not any(insn.op_kind(i) == ix.OpKind.MEMORY for i in range(insn.op_count)):
+        return False
+    if insn.memory_base != ix.Register.NONE or insn.memory_displacement == 0:
+        return False
+    return insn.segment_prefix not in (ix.Register.FS, ix.Register.GS)
 
 
 def default_assembler(configured: str = "") -> NasmAssembler:
@@ -349,7 +497,7 @@ class FakeAssembler:
         self.calls.append((source, ctx, tuple(variables)))
         if self.fail is not None:
             return AsmResult(b"", {}, self.fail)
-        bad = check_numbers(source, ctx.module_size)
+        bad = check_source(source, ctx.module_size)
         if bad is not None:
             return AsmResult(b"", {}, bad)
         names = dict(ctx.symbols)
@@ -454,6 +602,7 @@ __all__ = [
     "FakeAssembler",
     "NasmAssembler",
     "check_numbers",
+    "check_source",
     "default_assembler",
     "insn_text",
     "nasm_formatter",

@@ -583,7 +583,12 @@ class FindAgain(QObject):
         else:
             self.ctl.project = project
         self.ensure_cheats()
-        pro_compile.restore(self.ctl.project, self.ctl.ensure_file().cheats)
+        cheats = self.ctl.ensure_file().cheats
+        moved = {pc.id for pc in project.pro_cheats}
+        # the old version's rows of the brought-over Pro cheats go: the next save would
+        # otherwise put their old offsets back into these notes (QA BUG-07)
+        cheats[:] = [c for c in cheats if c.pro is None or c.pro.id not in moved]
+        pro_compile.restore(self.ctl.project, cheats)
         for obj in project.objects:
             addr = found.get(obj.id)
             if not addr:

@@ -207,3 +207,26 @@ def test_unconverted_imported_cave_is_refused_with_a_reason():
     pc = ProCheat("p3", "Imported", [cave, ProEntry("nop", NOP_SITE, NOP_CODE[:3])])
     _moved, report = rp.bring_over([pc], _image(SHIFT), FakeAssembler())
     assert "isn't converted to assembly" in report.failed["Imported"]
+
+
+def test_update_file_moves_a_pro_source_with_its_lines_and_refuses_caves():
+    """QA BUG-08."""
+    from cheatmaker.core.cheats import CheatFile
+    from cheatmaker.core.pro import compile as pro_compile
+
+    nop_only = _cheat()
+    nop_only.entries, nop_only.variables, nop_only.editable = nop_only.entries[1:], [], None
+    nop_only.entries[0].aob = "89 4B 08"
+    with_cave = _cheat()
+    with_cave.id, with_cave.name = "p2", "Cave"
+    cf = CheatFile(
+        "T",
+        "PPSA01234",
+        "01.000",
+        [pro_compile.compile_cheat(nop_only), pro_compile.compile_cheat(with_cave)],
+    )
+    new, report = up.update_file(cf, up.learn(cf, _image()), _image(SHIFT), "01.001")
+    assert report.moved == ["Health"] and report.failed["Cave"] == up.PRO_CAVE
+    (moved,) = new.cheats
+    assert moved.pro is not nop_only and moved.pro.entries[0].offset == NOP_SITE + SHIFT
+    assert moved.pro.entries[0].aob == "" and nop_only.entries[0].offset == NOP_SITE

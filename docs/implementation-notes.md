@@ -838,3 +838,29 @@ Built from docs/architecture-pro.md (spec docs/spec-pro.md), implementation step
     (`sites.open_rooms`, as `build_dialog._open_rooms`). **Imported caves not converted
     to assembly are refused by Bring them over** ("isn't converted to assembly"): convert
     them first, then their source is re-assembled like any Pro cave.
+- **QA round, steps 6-10 (2026-11-22, BUG-01..09).**
+  - BUG-01 (architect's call): besides the `[N]` -> `[rel N]` shim, NASM runs with
+    `-Werror=ea-absolute` and writes a listing. After a successful assemble, every
+    instruction row of the user's code (data rows such as `db`/`times` skipped) is
+    decoded with iced. A memory operand with no base register, no RIP base and a
+    non-zero displacement is refused, unless the row says `abs` or uses fs/gs. The
+    error is on the listing's user line, or, for a macro expansion, on the first source
+    line with a bracket. `insn_text` writes every base-less operand as `[abs ...]`, so
+    converted caves keep round-tripping.
+  - BUG-02: the shim works on code pieces only (strings and comments are left alone),
+    and a segment prefix may have spaces (`fs: [0x28]`).
+  - BUG-03: `incbin`, `%include`, `%pathsearch`, `%depend`, `%use`, `%!`, and the
+    word-building `%deftok` / `%+` are refused as line errors in both assemblers.
+  - BUG-04: NASM output is decoded as UTF-8 with `errors="replace"`.
+  - BUG-05: a Pro cheat with a stale cave compiles to no lines (hint "A cave needs
+    assembling again..."), so it can't be turned on or exported.
+  - BUG-06: `set_variable` patches the variable's bytes in the built cave instead of
+    re-assembling. Variables sit at fixed offsets at its end, so the size never
+    changes and an unbuilt source is never used. The assembler argument is ignored,
+    and the "restart" result is gone.
+  - BUG-07: `adopt_carried` drops the old version's My cheats rows of the
+    brought-over Pro cheats (same id) before restoring the moved ones.
+  - BUG-08: `update_file` moves a cave-less Pro source with its lines, clearing its
+    AOBs so they are learned again. A Pro cheat with a cave fails there with "a Pro
+    cheat with a cave: use Bring them over".
+  - BUG-09: `refpoints._place` clears `stale`.

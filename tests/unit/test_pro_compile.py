@@ -305,18 +305,34 @@ def test_variable_change_on_rewrites_only_its_bytes(s, fake):
     assert fake.peek(PID, addr, 4) == struct.pack("<f", 5.0)
 
 
-def test_variable_change_that_moves_code_asks_for_a_restart(s, fake):
+def test_variable_change_patches_the_built_cave_only(s):
+    """QA BUG-06: an edited but unbuilt source never reaches the cave."""
     pc = _cheat(
         s, "nop\noriginal\njmp return\n", variables=(MULT, Variable("n", ValueType.INT32, 1))
     )
-    asm = FakeAssembler()
-    pc.entries[0].source = "nop\nnop\noriginal\njmp return\n"  # edited, not rebuilt
-    assert pc_.set_variable(pc, "mult", 3.0, asm, on=True) == pc_.RESTART
+    entry = pc.entries[0]
+    built = entry.cave_bytes
+    entry.source = "nop\nnop\noriginal\njmp return\n"  # edited, not rebuilt
+    assert pc_.set_variable(pc, "mult", 3.0) == pc_.SAVED
+    assert len(entry.cave_bytes) == len(built)
+    assert entry.cave_bytes[:-8] == built[:-8]
+    assert entry.cave_bytes[-8:] == struct.pack("<fi", 3.0, 1)
     with pytest.raises(ValueError):
-        pc_.set_variable(pc, "n", 1 << 40, asm)
-    asm.fail = (2, "nope")
-    with pytest.raises(LockFailed, match="line 2: nope"):
-        pc_.set_variable(pc, "mult", 3.0, asm)
+        pc_.set_variable(pc, "n", 1 << 40)
+    with pytest.raises(ValueError, match="session and the writer"):
+        pc_.set_variable(pc, "mult", 4.0, on=True)
+    assert pc.variable("mult").value == 3.0, "nothing changed by a refused call"
+    unbuilt = ProCheat("p2", "U", [ProEntry("cave", HOOK, HOOK_CODE)], [MULT])
+    with pytest.raises(LockFailed, match="no built cave"):
+        pc_.set_variable(unbuilt, "mult", 1.0)
+
+
+def test_a_stale_cheat_compiles_to_no_lines(s):
+    """QA BUG-05."""
+    pc = _cheat(s)
+    pc.entries[0].stale = True
+    cheat = pc_.compile_cheat(pc)
+    assert cheat.locations == [] and not cheat.saveable and cheat.hint == pc_.STALE_HINT
 
 
 # -- the project (Cheat.pro saved via format 5) --------------------------------------------------

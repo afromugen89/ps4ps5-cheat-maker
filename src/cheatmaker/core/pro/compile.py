@@ -42,6 +42,7 @@ FAR = 1 << 30
 """A cave is first assembled this far from its hook, so its size is the worst case."""
 TEMPLATE = "pro"
 DEFAULT_SOURCE = "original\njmp return\n"
+STALE_HINT = "A cave needs assembling again in Pro before this cheat can be used."
 FF_WARNING = (
     "A write crosses an address ending in FF: the console may write it in two steps, "
     "so the game could briefly see half of it."
@@ -100,9 +101,13 @@ def _cave_lines(entry: ProEntry, pc: ProCheat) -> list[Location]:
 
 
 def compile_cheat(pc: ProCheat) -> Cheat:
-    """The ordinary cheat for ``pc`` (``Cheat.pro`` links back to it)."""
+    """The ordinary cheat for ``pc`` (``Cheat.pro`` links back to it). A cheat with a
+    stale cave (its bytes no longer match its variables) compiles to no lines, so it
+    can't be turned on in My cheats nor saved in a cheat file until it is rebuilt."""
     if not pc.entries:
         raise LockFailed(f"{pc.name}: there is nothing to write")
+    if any(e.stale for e in pc.entries):
+        return Cheat(name=pc.name, locations=[], template=TEMPLATE, hint=STALE_HINT, pro=pc)
     lines: list[Location] = []
     home_line = None
     for entry in pc.entries:
@@ -471,52 +476,44 @@ def disable(
 
 
 # -- live variable edit (AC-8.7) -----------------------------------------------------------
-WRITTEN, SAVED, RESTART = "written", "saved", "restart"
+WRITTEN, SAVED = "written", "saved"
 
 
 def set_variable(
     pc: ProCheat,
     name: str,
     value: float | int,
-    assembler: Assembler,
+    assembler: Assembler | None = None,
     *,
     session: Session | None = None,
     writer: ProWriter | None = None,
     on: bool = False,
 ) -> str:
-    """Give variable ``name`` a new value and re-assemble its cave. Returns ``SAVED``
-    (the cheat is off: only the stored bytes changed), ``WRITTEN`` (on: only the
-    variable's bytes differed and were rewritten live and read back) or ``RESTART``
-    (on, but more changed: turn it off and on). ValueError for a value that doesn't fit;
-    LockFailed when the cave no longer assembles."""
+    """Give variable ``name`` a new value (AC-8.7). Variables sit at fixed offsets at
+    the end of the built home cave, so the value's bytes are patched there and nothing
+    is re-assembled: a source edited but not built (or refused for lack of room) never
+    reaches the cave, and the cave never changes size (QA BUG-06). ``assembler`` isn't
+    needed for that and is ignored. Returns ``SAVED`` (the cheat is off: only the
+    stored bytes changed) or ``WRITTEN`` (on: the variable's bytes were written live and
+    read back). ValueError for a value that doesn't fit."""
+    del assembler
     var = pc.variable(name)
     new_var = Variable(var.name, var.vtype, value, var.comment)  # validates the value
     entry = home(pc)
-    if entry is None or entry.cave is None:
-        raise LockFailed(f"{pc.name}: there is no placed cave for the variable")
+    if entry is None or entry.cave is None or not entry.cave_bytes:
+        raise LockFailed(f"{pc.name}: there is no built cave for the variable")
     k = pc.variables.index(var)
-    variables = [*pc.variables[:k], new_var, *pc.variables[k + 1 :]]
-    size = module_size(session) if session is not None else None
-    result = assembler.assemble(entry.source, context(pc, entry, module_size=size), variables)
-    if not result.ok:
-        line, msg = result.error  # type: ignore[misc]
-        raise LockFailed(f"The cave doesn't assemble any more (line {line}: {msg})")
-    old = entry.cave_bytes
-    at = variable_offsets(variables, len(result.code))[name]
-    span = range(at, at + var.vtype.size)
-    only_var = len(result.code) == len(old) and all(
-        a == b for i, (a, b) in enumerate(zip(old, result.code, strict=True)) if i not in span
-    )
+    at = variable_offsets(pc.variables, len(entry.cave_bytes))[name]
+    data = new_var.encoded()
+    if on and (session is None or writer is None):
+        raise ValueError("a live rewrite needs the session and the writer")
     pc.variables[k] = new_var
-    entry.cave_bytes = result.code
+    entry.cave_bytes = entry.cave_bytes[:at] + data + entry.cave_bytes[at + len(data) :]
     if not on:
         return SAVED
-    if not only_var:
-        return RESTART
-    if session is None or writer is None:
-        raise ValueError("a live rewrite needs the session and the writer")
+    assert session is not None and writer is not None
     base = session.require_game().module_base
-    writer.write_checked(base + entry.cave + at, result.code[at : at + var.vtype.size], pc.id)
+    writer.write_checked(base + entry.cave + at, data, pc.id)
     return WRITTEN
 
 
@@ -524,7 +521,6 @@ __all__ = [
     "DEFAULT_SOURCE",
     "DISABLE_WAIT",
     "FF_WARNING",
-    "RESTART",
     "SAVED",
     "WRITTEN",
     "NoRoom",

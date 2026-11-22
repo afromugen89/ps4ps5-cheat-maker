@@ -114,11 +114,6 @@ def test_plain_module_offsets_are_rip_relative(nasm):  # TC-02
         "mov eax, [0x10000+0x10000]",
     ],
 )
-@pytest.mark.xfail(
-    reason="BUG-01: a bare-number address not written exactly as [N] is assembled as an "
-    "absolute address (not a module offset) and not refused",
-    strict=True,
-)
 def test_bug01_every_bare_number_address_is_a_module_offset_or_refused(nasm, src):  # TC-03
     result = nasm.assemble(src, CTX)
     if result.ok:
@@ -127,10 +122,6 @@ def test_bug01_every_bare_number_address_is_a_module_offset_or_refused(nasm, src
 
 
 @pytest.mark.needs_nasm
-@pytest.mark.xfail(
-    reason="BUG-02: the shim rewrites [N] after a spaced segment prefix and inside strings",
-    strict=True,
-)
 @pytest.mark.parametrize(
     ("src", "want"),
     [("mov rax, fs: [0x28]", "64488b042528000000"), ('db "[5]"', b"[5]".hex())],
@@ -141,10 +132,6 @@ def test_bug02_shim_leaves_segment_operands_and_strings(nasm, src, want):  # TC-
 
 
 @pytest.mark.needs_nasm
-@pytest.mark.xfail(
-    reason="BUG-03: cave source can read any file on the PC into the cave (incbin, %include)",
-    strict=True,
-)
 def test_bug03_cave_source_cant_read_pc_files(nasm, tmp_path):  # TC-05
     secret = tmp_path / "secret.txt"
     secret.write_text("password", encoding="utf-8")
@@ -176,11 +163,6 @@ def test_missing_or_broken_assembler_is_assembler_not_found(tmp_path):  # TC-07
 
 
 @pytest.mark.skipif(os.name == "nt", reason="uses a shell script as the assembler")
-@pytest.mark.xfail(
-    reason="BUG-04: assembler output that isn't valid in the PC's text encoding raises "
-    "UnicodeDecodeError instead of an error line",
-    strict=True,
-)
 def test_bug04_undecodable_assembler_output_is_an_error_line(tmp_path):  # TC-08
     body = 'printf "user:1: error: symbol \\140\\377\\201\\047 not defined\\n" >&2\nexit 1\n'
     result = NasmAssembler(_script(tmp_path, body)).assemble("mov eax, x", CTX)
@@ -295,10 +277,6 @@ def test_live_variable_write_is_only_the_variable_and_off_is_stored(s):  # TC-24
     assert pc_.set_variable(pc, "mult", 7.0, FakeAssembler()) == pc_.SAVED
 
 
-@pytest.mark.xfail(
-    reason="BUG-05: a cave marked stale is still compiled into My cheats and cheat files",
-    strict=True,
-)
 def test_bug05_stale_cave_isnt_exported(s):  # TC-25
     pc = _two_caves(s)
     home, second = pc.entries
@@ -309,11 +287,6 @@ def test_bug05_stale_cave_isnt_exported(s):  # TC-25
     assert cf.saveable_cheats() == []
 
 
-@pytest.mark.xfail(
-    reason="BUG-06: set_variable assembles an unbuilt source and stores a cave bigger "
-    "than its room (no NoRoom check)",
-    strict=True,
-)
 def test_bug06_set_variable_never_grows_a_cave_past_its_room(s):  # TC-26
     pc = built_cheat(s, "nop\noriginal\njmp return\n")
     entry = pc.entries[0]
@@ -385,11 +358,6 @@ def test_two_pro_cheats_survive_a_restart_in_order(pwin):  # TC-31
     assert [c.pro.id for c in cf.cheats if c.pro is not None] == ["p1", "p2"]
 
 
-@pytest.mark.xfail(
-    reason="BUG-07: after Bring them over, the old version's Pro cheat still in My cheats "
-    "(same id) overwrites the moved one in the new notes",
-    strict=True,
-)
 def test_bug07_bring_over_result_isnt_overwritten_by_the_old_row(pwin):  # TC-32
     old_pc = carry_cheat()
     rp.learn([old_pc], _image())
@@ -402,11 +370,6 @@ def test_bug07_bring_over_result_isnt_overwritten_by_the_old_row(pwin):  # TC-32
     assert [e.offset for e in saved[0].entries] == [e.offset for e in moved.entries]
 
 
-@pytest.mark.xfail(
-    reason="BUG-08: Update for this version moves the cheat's lines but keeps its old Pro "
-    "source, which is then saved and restored at the old offsets",
-    strict=True,
-)
 def test_bug08_update_for_this_version_keeps_source_and_lines_together():  # TC-33
     pc = carry_cheat()
     pc.entries = pc.entries[1:]  # a NOP entry only (caves can't move by file update)
@@ -432,7 +395,6 @@ def test_moved_cheat_compiles_and_turns_on_in_the_new_version():  # TC-40
     assert all(e.aob for e in new.entries)
 
 
-@pytest.mark.xfail(reason="BUG-09: a stale cave stays stale after Bring them over", strict=True)
 def test_bug09_bring_over_clears_stale(s):  # TC-41
     pc = carry_cheat()
     pc.entries[0].stale = True

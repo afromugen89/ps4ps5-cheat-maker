@@ -196,6 +196,7 @@ def _place(
         raise _Fail(f"its cave doesn't assemble here (line {line}: {msg})")
     entry.cave_bytes = result.code
     entry.on = cv.jmp_patch(entry.offset, cave, len(entry.off))
+    entry.stale = False  # just re-assembled against the moved variables
     rooms.append((cave, cave + max(size, len(result.code))))
 
 
