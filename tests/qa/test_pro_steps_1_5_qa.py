@@ -698,3 +698,108 @@ def test_bug01_notes_with_an_out_of_range_variable_survive_in_the_app(win, conso
     kept = [p for p in path.parent.iterdir() if p.read_text(encoding="utf-8") == doc]
     assert kept, "the unreadable notes must survive somewhere"
     assert errors == [], "a plain message, not an exception in the Qt event loop"
+
+
+# == Re-test of 3e8e54e (BUG-01..04 fixes, offset and name checks) =====================
+@pytest.mark.parametrize("vt", list(ValueType))
+@pytest.mark.parametrize("cmp", [Compare.GREATER, Compare.LESS])
+@pytest.mark.parametrize("value", [10**400, -(10**400)], ids=["huge", "-huge"])
+def test_rt_huge_targets_agree_with_matches_for_every_type(vt, cmp, value):  # TC-05b
+    rng = as_between(vt, cmp, value)
+    assert (value_for(vt, cmp, value) is None) == (rng is None)
+    keeps_all = (cmp is Compare.LESS) == (value > 0)
+    assert (rng is not None) == keeps_all
+    for raw in _candidates(vt):
+        cur = vt.decode(raw)
+        by_range = rng is not None and rng[0] <= cur <= rng[1]
+        assert matches(vt, cmp, raw, None, value) == by_range, (cur, rng)
+
+
+@pytest.mark.parametrize(
+    ("vt", "value"),
+    [(V.FLOAT, F32_MAX), (V.DOUBLE, sys.float_info.max), (V.UINT64, 2**64 - 1), (V.INT8, -128)],
+)
+def test_rt_variables_at_the_type_ends_still_load(vt, value):  # TC-23b
+    assert Variable("v", vt, value).encoded() == vt.encode(value)
+
+
+@pytest.mark.parametrize(
+    ("vt", "value"),
+    [(V.FLOAT, 10**400), (V.DOUBLE, -(10**400)), (V.INT64, 1e20), (V.UINT8, 256)],
+)
+def test_rt_variables_past_the_type_ends_are_value_errors(vt, value):  # TC-23b
+    with pytest.raises(ValueError):
+        Variable("v", vt, value)
+
+
+@pytest.mark.parametrize("name", ["rax", "RAX", "r8d", "xmm15", "byte", "DWORD", "rel", "ptr"])
+def test_rt_register_and_assembler_names_are_refused(name):  # TC-25
+    with pytest.raises(ValueError, match="register or assembler word"):
+        Variable(name, V.INT32, 1)
+
+
+@pytest.mark.parametrize("name", ["health", "mult", "add", "mov", "rax_copy", "_byte"])
+def test_rt_ordinary_names_are_still_allowed(name):  # TC-25 (mnemonics assemble as labels)
+    assert Variable(name, V.INT32, 1).name == name
+
+
+def test_rt_offsets_below_2_48_only(tmp_path):  # TC-26
+    from cheatmaker.core.pro.model import MAX_OFFSET, ProEntry
+
+    assert MAX_OFFSET == 1 << 48
+    ProEntry("bytes", MAX_OFFSET - 1, b"\x90", b"\xcc")
+    ProEntry("cave", 0x100, b"\x90" * 5, cave=MAX_OFFSET - 1)
+    for kw in ({"offset": MAX_OFFSET}, {"offset": 0x100, "cave": MAX_OFFSET}):
+        with pytest.raises(ValueError, match="below"):
+            ProEntry("cave", kw["offset"], b"\x90" * 5, cave=kw.get("cave"))
+    d = _fmt4()
+    d["format_version"] = 5
+    d["pro_cheats"] = [
+        {
+            "id": "p1",
+            "name": "x",
+            "entries": [{"kind": "bytes", "offset": hex(MAX_OFFSET), "off": "90", "on": "cc"}],
+        }
+    ]
+    path = tmp_path / "o.cmproj"
+    path.write_text(json.dumps(d), encoding="utf-8")
+    with pytest.raises(ProjectFileError):
+        pj.load(path)
+
+
+@pytest.mark.parametrize(
+    "wrap",
+    [
+        lambda b: b"\xef\xbb\xbf" + b"\r\n".join(b[i : i + 76] for i in range(0, len(b), 76)),
+        lambda b: b"\xef\xbb\xbf\r\n" + b + b"\r\n",
+    ],
+    ids=["bom-crlf-76", "bom-newline"],
+)
+def test_rt_mc4_bom_with_wrapped_base64(tmp_path, wrap):  # TC-58b
+    cf = formats.load_path(GOLDEN / "CUSA02396_01.01.json")
+    path = tmp_path / "x.mc4"
+    path.write_bytes(wrap(mc4.dumps(cf)))
+    assert len(formats.load_path(path).cheats) == len(cf.cheats)
+
+
+@pytest.mark.parametrize(
+    ("data", "fmt"),
+    [
+        ('<?xml version="1.0"?><Trainer/>'.encode("utf-16"), "shn"),
+        (b"\xfe\xff" + "  <Trainer/>".encode("utf-16-be"), "shn"),
+        ('{"name": "x"}'.encode("utf-16"), "json"),
+        (b"\xef\xbb\xbf  {}", "json"),
+        (b"\xef\xbb\xbfQUJD", None),
+        (b"\xff\xfe", None),
+        (b"", None),
+    ],
+)
+def test_rt_sniff_looks_past_any_bom(data, fmt):  # TC-59b
+    assert formats.sniff(data) == fmt
+
+
+def test_rt_utf16_shn_still_loads_under_a_json_name(tmp_path):  # TC-59c
+    text = (GOLDEN / "CUSA15436_1.05.shn").read_bytes()
+    path = tmp_path / "CUSA15436_1.05.json"
+    path.write_bytes(text)
+    assert formats.load_path(path).cheats
